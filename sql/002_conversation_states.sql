@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS conversation_states (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  conversation_id VARCHAR(128) NOT NULL,
+  tenant_id VARCHAR(128) NOT NULL DEFAULT 'default',
+  channel_type VARCHAR(64) NOT NULL DEFAULT 'livechat',
+  chat_id VARCHAR(128) NOT NULL,
+  chat_user_id VARCHAR(128) NULL,
+  current_thread_id VARCHAR(128) NULL,
+  status VARCHAR(64) NOT NULL DEFAULT 'AI_ACTIVE',
+  active_workflow VARCHAR(128) NULL,
+  slot_memory JSON NULL,
+  handoff_state JSON NULL,
+  last_capability_result JSON NULL,
+  last_inbound_event_id BIGINT UNSIGNED NULL,
+  last_outbound_message_id BIGINT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_chat_id (chat_id),
+  KEY idx_status (status),
+  KEY idx_active_workflow (active_workflow)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

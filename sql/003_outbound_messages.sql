@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS outbound_messages (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id VARCHAR(128) NOT NULL DEFAULT 'default',
+  channel_type VARCHAR(64) NOT NULL DEFAULT 'livechat',
+  chat_id VARCHAR(128) NOT NULL,
+  thread_id VARCHAR(128) NULL,
+  action_type VARCHAR(64) NOT NULL,
+  message_type VARCHAR(64) NOT NULL DEFAULT 'text',
+  payload_json JSON NOT NULL,
+  status VARCHAR(64) NOT NULL DEFAULT 'PENDING',
+  retry_count INT NOT NULL DEFAULT 0,
+  last_error TEXT NULL,
+  inbound_event_id BIGINT UNSIGNED NULL,
+  conversation_id VARCHAR(128) NULL,
+  sent_at DATETIME(6) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_status_created (status, created_at),
+  KEY idx_chat_thread (chat_id, thread_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

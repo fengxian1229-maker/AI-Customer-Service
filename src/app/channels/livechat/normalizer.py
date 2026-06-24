@@ -1,0 +1,65 @@
+import hashlib
+import json
+from datetime import datetime, timezone
+from typing import Any
+
+from app.schemas.events import InboundEvent
+
+
+def parse_rfc3339_to_mysql(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def stable_json_hash(data: Any) -> str:
+    raw = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def make_dedup_key(chat_id: str | None, thread_id: str | None, event_id: str | None, payload: dict[str, Any]) -> str:
+    if chat_id and thread_id and event_id:
+        return f"livechat_polling:{chat_id}:{thread_id}:{event_id}"
+    return f"livechat_polling:{chat_id or '-'}:{thread_id or '-'}:{stable_json_hash(payload)}"
+
+
+def sender_role_from_author(author_id: str | None, self_author_ids: set[str]) -> str:
+    if not author_id:
+        return "system"
+    if author_id in self_author_ids:
+        return "self_agent"
+    return "external"
+
+
+def standard_event_from_type(event_type: str | None) -> str:
+    if event_type == "message":
+        return "MESSAGE_CREATED"
+    if event_type == "file":
+        return "FILE_RECEIVED"
+    return "UNSUPPORTED"
+
+
+def normalize_polling_event(payload: dict[str, Any], self_author_ids: set[str]) -> InboundEvent:
+    event = payload.get("event") or {}
+    author_id = event.get("author_id")
+    sender_role = sender_role_from_author(author_id, self_author_ids)
+    ignored = sender_role == "self_agent"
+    return InboundEvent(
+        source="polling_fallback",
+        raw_action="polling.event",
+        organization_id=payload.get("organization_id"),
+        chat_id=payload.get("chat_id"),
+        thread_id=payload.get("thread_id"),
+        event_id=event.get("id"),
+        event_type=event.get("type"),
+        standard_event_type=standard_event_from_type(event.get("type")),
+        author_id=author_id,
+        sender_role=sender_role,
+        occurred_at=parse_rfc3339_to_mysql(event.get("created_at")),
+        dedup_key=make_dedup_key(payload.get("chat_id"), payload.get("thread_id"), event.get("id"), payload),
+        payload_json=payload,
+        ignored=ignored,
+        ignore_reason="self_message" if ignored else None,
+    )
