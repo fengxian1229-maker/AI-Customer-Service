@@ -23,6 +23,33 @@ def test_normalize_polling_message_event():
     assert result.source == "polling_fallback"
 
 
+def test_normalize_polling_event_includes_stable_audit_metadata():
+    payload = {
+        "ingress_source": "polling",
+        "group_ids": [23],
+        "chat_users": [{"id": "customer-1", "type": "customer"}],
+        "polling_source": "get_chat",
+        "last_thread_summary": {"id": "thread-1", "event_count": 1},
+        "chat_id": "chat-1",
+        "thread_id": "thread-1",
+        "event": {
+            "id": "event-1",
+            "type": "message",
+            "author_id": "customer-1",
+            "created_at": "2026-06-24T00:00:00Z",
+            "text": "hello",
+        },
+    }
+
+    result = normalize_polling_event(payload, self_author_ids=set())
+
+    assert result.payload_json["ingress_source"] == "polling"
+    assert result.payload_json["group_ids"] == [23]
+    assert result.payload_json["polling_source"] == "get_chat"
+    assert result.payload_json["chat_users"] == [{"id": "customer-1", "type": "customer"}]
+    assert result.payload_json["last_thread_summary"] == {"id": "thread-1", "event_count": 1}
+
+
 def test_build_receiver_state_defaults():
     from app.channels.livechat.polling_receiver import build_receiver_state
 
@@ -41,9 +68,9 @@ def test_ingest_polled_events_skips_known_event_ids():
         def __init__(self) -> None:
             self.events = []
 
-        async def insert(self, event) -> bool:
+        async def insert(self, event):
             self.events.append(event)
-            return True
+            return {"inserted": True, "duplicate": False}
 
     payload = {
         "chat_id": "chat-1",
@@ -141,9 +168,9 @@ def test_poll_once_inserts_customer_events_from_listed_chats():
         def __init__(self) -> None:
             self.events = []
 
-        async def insert(self, event) -> bool:
+        async def insert(self, event):
             self.events.append(event)
-            return True
+            return {"inserted": True, "duplicate": False}
 
     class FakeClient:
         async def list_chats(self, limit: int = 20) -> list[dict]:
@@ -177,6 +204,9 @@ def test_poll_once_inserts_customer_events_from_listed_chats():
 
     assert len(inserted) == 1
     assert inserted[0].event_id == "event-1"
+    assert inserted[0].payload_json["ingress_source"] == "polling"
+    assert inserted[0].payload_json["polling_source"] == "get_chat"
+    assert inserted[0].payload_json["group_ids"] == []
 
 
 def test_poll_once_falls_back_to_summary_when_get_chat_forbidden():
@@ -186,8 +216,8 @@ def test_poll_once_falls_back_to_summary_when_get_chat_forbidden():
     from app.channels.livechat.sender_client import LiveChatApiError
 
     class FakeRepository:
-        async def insert(self, event) -> bool:
-            return True
+        async def insert(self, event):
+            return {"inserted": True, "duplicate": False}
 
     class FakeClient:
         async def list_chats(self, limit: int = 20) -> list[dict]:
@@ -222,6 +252,8 @@ def test_poll_once_falls_back_to_summary_when_get_chat_forbidden():
 
     assert len(inserted) == 1
     assert inserted[0].event_id == "event-1"
+    assert inserted[0].payload_json["ingress_source"] == "polling"
+    assert inserted[0].payload_json["polling_source"] == "list_chats_summary_fallback"
 
 
 def test_poll_once_filters_disallowed_groups():
@@ -230,8 +262,8 @@ def test_poll_once_filters_disallowed_groups():
     from app.channels.livechat.polling_receiver import poll_once
 
     class FakeRepository:
-        async def insert(self, event) -> bool:
-            return True
+        async def insert(self, event):
+            return {"inserted": True, "duplicate": False}
 
     class FakeClient:
         async def list_chats(self, limit: int = 20) -> list[dict]:
@@ -276,8 +308,8 @@ def test_run_polling_cycle_reports_counts():
     from app.workers.polling_receiver import run_polling_cycle
 
     class FakeRepository:
-        async def insert(self, event) -> bool:
-            return True
+        async def insert(self, event):
+            return {"inserted": True, "duplicate": False}
 
     class FakeClient:
         async def list_chats(self, limit: int = 20) -> list[dict]:
@@ -311,3 +343,52 @@ def test_run_polling_cycle_reports_counts():
 
     assert result["listed"] == 1
     assert result["inserted"] == 1
+
+
+def test_run_polling_cycle_reports_duplicate_and_group_counts():
+    import asyncio
+
+    from app.workers.polling_receiver import run_polling_cycle
+
+    class FakeRepository:
+        async def insert(self, event):
+            return {"inserted": False, "duplicate": True}
+
+    class FakeClient:
+        async def list_chats(self, limit: int = 20) -> list[dict]:
+            return [
+                {"id": "chat-15", "access": {"group_ids": [15]}},
+                {"id": "chat-23", "access": {"group_ids": [23]}},
+            ]
+
+        async def get_chat(self, chat_id: str) -> dict:
+            return {
+                "id": chat_id,
+                "access": {"group_ids": [23]},
+                "users": [{"id": "customer-1", "type": "customer"}],
+                "threads": [{
+                    "id": "thread-1",
+                    "events": [{
+                        "id": "event-1",
+                        "type": "message",
+                        "author_id": "customer-1",
+                        "created_at": "2026-06-24T00:00:00Z",
+                        "text": "hello",
+                    }],
+                }],
+            }
+
+    result = asyncio.run(
+        run_polling_cycle(
+            client=FakeClient(),
+            repository=FakeRepository(),
+            self_author_ids=set(),
+            limit=20,
+            allowed_group_ids={23},
+        )
+    )
+
+    assert result["listed"] == 2
+    assert result["matched_group"] == 1
+    assert result["inserted"] == 0
+    assert result["duplicates"] == 1

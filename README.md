@@ -43,66 +43,33 @@ Poll LiveChat Once
 ------------------
 
 ```bash
-PYTHONPATH=src uv run --group dev python -m app.workers.polling_receiver
+PYTHONPATH=src LIVECHAT_ALLOWED_GROUP_IDS=23 uv run --group dev python -m app.workers.polling_receiver --once --groups 23 --limit 20
 ```
 
 Run Gateway Once
 ----------------
 
 ```bash
-PYTHONPATH=src uv run --group dev python - <<'PY'
-import asyncio
-from app.core.settings import Settings
-from app.db.mysql import create_pool
-from app.workers.gateway_consumer import process_next_batch
-
-async def main():
-    pool = await create_pool(Settings())
-    try:
-        print(await process_next_batch(pool, limit=20))
-    finally:
-        pool.close()
-        await pool.wait_closed()
-
-asyncio.run(main())
-PY
+PYTHONPATH=src uv run --group dev python -m app.workers.gateway_consumer --once --limit 20
 ```
 
 Run Sender Once
 ---------------
 
 ```bash
-PYTHONPATH=src uv run --group dev python - <<'PY'
-import asyncio
-from app.channels.livechat.sender_client import LiveChatSenderClient
-from app.core.settings import Settings
-from app.db.mysql import create_pool
-from app.db.repositories import OutboundMessageRepository
-from app.workers.sender_worker import process_pending_message
+PYTHONPATH=src uv run --group dev python -m app.workers.sender_worker --once --limit 20
+```
 
-async def main():
-    settings = Settings()
-    pool = await create_pool(settings)
-    try:
-        repo = OutboundMessageRepository(pool)
-        client = LiveChatSenderClient(
-            settings.livechat_api_base,
-            settings.livechat_account_id,
-            settings.livechat_agent_access_token,
-        )
-        for message in await repo.fetch_pending(limit=20):
-            print(await process_pending_message(repo, client, message))
-    finally:
-        pool.close()
-        await pool.wait_closed()
+Safe Group 23 Smoke
+-------------------
 
-asyncio.run(main())
-PY
+```bash
+scripts/smoke_livechat_group23.sh
 ```
 
 Notes
 -----
 
 - `.env` is ignored by Git and must not be committed.
-- The current polling receiver filters by `LIVECHAT_ALLOWED_GROUP_IDS`.
+- The current polling receiver requires explicit `--groups` or `LIVECHAT_ALLOWED_GROUP_IDS`; do not run broad all-group polling.
 - `get_chat` is used when available. If LiveChat returns a permission error, the receiver falls back to `list_chats.last_event_per_type`.

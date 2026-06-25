@@ -42,6 +42,37 @@ Make the current workers production-usable:
 - add a safe one-command local smoke script for group 23 only
 ```
 
+## Current Polling-First Worker Status
+
+This session hardened the polling-first worker path without adding websocket or webhook ingress.
+
+Implemented:
+
+- `python -m app.workers.polling_receiver --once --groups 23 --limit 20`
+- `python -m app.workers.gateway_consumer --once --limit 20`
+- `python -m app.workers.sender_worker --once --limit 20`
+- explicit polling group parsing from `--groups` or `LIVECHAT_ALLOWED_GROUP_IDS`
+- refusal to run polling when no explicit group source is provided
+- duplicate-aware inbound insert using `ON DUPLICATE KEY UPDATE id = id`
+- polling audit metadata in `inbound_events.payload_json`
+- sender statuses: `SENT`, `FAILED_CONFIG`, `RETRYABLE`, `FAILED_BUSINESS`, `FAILED_UNKNOWN`
+- `scripts/smoke_livechat_group23.sh`
+
+Ingress staging remains:
+
+- 前期: Polling 主入口。
+- 中期: WebSocket 主入口，Polling 用于断线补偿、指定 chat 补拉、本地调试。
+- 后期: Webhook 正式主入口，Polling 用于 targeted fallback、异常恢复、排障、数据校验。
+
+TODO for later phases only:
+
+- WebSocket RTM receiver
+- Webhook receiver and signature verification
+- webhook registration docs
+- LangGraph, RAG, LLM automatic replies
+- Telegram full handoff loop
+- backend API fact lookup and withdrawal workflows
+
 ## What Is Already Done
 
 ### Repository And Project Setup
@@ -106,18 +137,17 @@ Implemented:
 - `list_chats`
 - `get_chat`
 - group allowlist filtering through `LIVECHAT_ALLOWED_GROUP_IDS`
-- default allowed groups: `23,0`
+- no default polling group; polling requires `--groups` or `LIVECHAT_ALLOWED_GROUP_IDS`
 - customer `message` -> `MESSAGE_CREATED`
 - customer `file` -> `FILE_RECEIVED`
 - self/agent filtering based on user type and `LIVECHAT_SELF_AUTHOR_IDS`
 - dedup key generation
-- MySQL `INSERT IGNORE`
+- MySQL duplicate-aware insert with `ON DUPLICATE KEY UPDATE id = id`
 - fallback from `get_chat` to `list_chats.last_event_per_type` when `get_chat` lacks permission
 
 Important verified behavior:
 
-- The LiveChat token supplied by the user starts with `YTA4...`.
-- That token is already a pre-encoded Basic credential.
+- The LiveChat token supplied by the user is already a pre-encoded Basic credential.
 - The code now detects pre-encoded Basic tokens and does not double-encode them.
 - The previous accidental group 15 pull happened because polling was not group-filtered yet.
 - Group filtering was fixed. Current polling must use `LIVECHAT_ALLOWED_GROUP_IDS=23` for test scope.
@@ -404,23 +434,17 @@ PYTHONPATH=src uv run --group dev python -m app.workers.bootstrap_db
 Poll once:
 
 ```bash
-PYTHONPATH=src LIVECHAT_ALLOWED_GROUP_IDS=23 uv run --group dev python -m app.workers.polling_receiver
+PYTHONPATH=src LIVECHAT_ALLOWED_GROUP_IDS=23 uv run --group dev python -m app.workers.polling_receiver --once --groups 23 --limit 20
 ```
 
 ## Important Environment Notes
 
-The user-provided LiveChat token:
-
-```text
-LIVECHAT_AGENT_ACCESS_TOKEN starts with YTA4...
-```
-
-It is already a base64 Basic credential. Do not double-encode it.
+The user-provided LiveChat token is already a base64 Basic credential. Do not double-encode it.
 
 The local shell previously had conflicting LiveChat env vars:
 
 ```text
-LIVECHAT_ACCOUNT_ID=1c398...
+LIVECHAT_ACCOUNT_ID was set to a conflicting value
 ```
 
 Use explicit `.env` values or override env vars when testing.

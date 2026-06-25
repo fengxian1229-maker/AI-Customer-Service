@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.channels.livechat.normalizer import normalize_polling_event
 from app.channels.livechat.sender_client import LiveChatApiError
@@ -16,9 +17,11 @@ def build_receiver_state() -> ReceiverState:
 
 def extract_polling_events_from_chat_detail(chat: dict) -> list[dict]:
     payloads = []
+    group_ids = sorted(chat_group_ids(chat))
+    chat_users = chat.get("users") or []
     users_by_id = {
         str(user.get("id")): user
-        for user in chat.get("users") or []
+        for user in chat_users
         if user.get("id") is not None
     }
     threads = []
@@ -36,6 +39,11 @@ def extract_polling_events_from_chat_detail(chat: dict) -> list[dict]:
             if event.get("type") not in {"message", "file"}:
                 continue
             payloads.append({
+                "ingress_source": "polling",
+                "group_ids": group_ids,
+                "chat_users": chat_users,
+                "polling_source": "get_chat",
+                "last_thread_summary": summarize_thread(thread),
                 "chat_id": chat.get("id"),
                 "thread_id": thread_id,
                 "event": event,
@@ -45,9 +53,11 @@ def extract_polling_events_from_chat_detail(chat: dict) -> list[dict]:
 
 def extract_polling_events_from_chat_summary(summary: dict) -> list[dict]:
     payloads = []
+    group_ids = sorted(chat_group_ids(summary))
+    chat_users = summary.get("users") or []
     users_by_id = {
         str(user.get("id")): user
-        for user in summary.get("users") or []
+        for user in chat_users
         if user.get("id") is not None
     }
     last_events = summary.get("last_event_per_type") or {}
@@ -61,11 +71,26 @@ def extract_polling_events_from_chat_summary(summary: dict) -> list[dict]:
         if event.get("type") not in {"message", "file"}:
             continue
         payloads.append({
+            "ingress_source": "polling",
+            "group_ids": group_ids,
+            "chat_users": chat_users,
+            "polling_source": "list_chats_summary_fallback",
+            "last_thread_summary": summarize_last_event_entry(entry),
             "chat_id": summary.get("id"),
             "thread_id": entry.get("thread_id") or event.get("thread_id"),
             "event": event,
         })
     return payloads
+
+
+def summarize_thread(thread: dict[str, Any]) -> dict[str, Any]:
+    summary = {key: value for key, value in thread.items() if key != "events"}
+    summary["event_count"] = len(thread.get("events") or [])
+    return summary
+
+
+def summarize_last_event_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in entry.items() if key != "event"}
 
 
 def chat_group_ids(chat: dict) -> set[int]:
@@ -91,19 +116,35 @@ def chat_matches_allowed_groups(chat: dict, allowed_group_ids: set[int]) -> bool
     return bool(chat_group_ids(chat) & allowed_group_ids)
 
 
-async def ingest_polled_events(repository, payloads: list[dict], self_author_ids: set[str], state: ReceiverState | None = None) -> list:
+def insert_result_flags(result) -> tuple[bool, bool]:
+    if isinstance(result, dict):
+        return bool(result.get("inserted")), bool(result.get("duplicate"))
+    return bool(result), not bool(result)
+
+
+async def ingest_polled_events(
+    repository,
+    payloads: list[dict],
+    self_author_ids: set[str],
+    state: ReceiverState | None = None,
+    stats: dict[str, int] | None = None,
+) -> list:
     receiver_state = state or build_receiver_state()
     inserted = []
     for payload in payloads:
         event = normalize_polling_event(payload, self_author_ids=self_author_ids)
         if event.event_id and event.event_id in receiver_state.last_seen_event_ids:
             continue
-        was_inserted = await repository.insert(event)
+        was_inserted, was_duplicate = insert_result_flags(await repository.insert(event))
         if was_inserted:
             inserted.append(event)
             if event.event_id:
                 receiver_state.last_seen_event_ids.add(event.event_id)
             receiver_state.last_seen_created_at = event.occurred_at or receiver_state.last_seen_created_at
+        if stats is not None:
+            stats["inserted"] = stats.get("inserted", 0) + int(was_inserted)
+            stats["duplicates"] = stats.get("duplicates", 0) + int(was_duplicate)
+            stats["ignored_self"] = stats.get("ignored_self", 0) + int(event.ignored)
     return inserted
 
 
@@ -114,6 +155,7 @@ async def poll_once(
     limit: int = 20,
     state: ReceiverState | None = None,
     allowed_group_ids: set[int] | None = None,
+    stats: dict[str, int] | None = None,
 ) -> list:
     listed = await client.list_chats(limit=limit)
     receiver_state = state or build_receiver_state()
@@ -121,6 +163,8 @@ async def poll_once(
     for summary in listed:
         if not chat_matches_allowed_groups(summary, allowed_group_ids or set()):
             continue
+        if stats is not None:
+            stats["matched_group"] = stats.get("matched_group", 0) + 1
         try:
             chat = await client.get_chat(summary["id"])
             if not chat_matches_allowed_groups(chat, allowed_group_ids or set()):
@@ -136,6 +180,7 @@ async def poll_once(
                 payloads=payloads,
                 self_author_ids=self_author_ids,
                 state=receiver_state,
+                stats=stats,
             )
         )
     return inserted

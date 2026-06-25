@@ -17,12 +17,41 @@ def build_fixed_reply(event: InboundEvent) -> dict:
 
 
 class GatewayService:
-    def __init__(self, inbound_repository, conversation_repository, outbound_repository) -> None:
+    def __init__(
+        self,
+        inbound_repository=None,
+        conversation_repository=None,
+        outbound_repository=None,
+        transactional_repository=None,
+    ) -> None:
         self.inbound_repository = inbound_repository
         self.conversation_repository = conversation_repository
         self.outbound_repository = outbound_repository
+        self.transactional_repository = transactional_repository
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
+        if self.transactional_repository:
+            outbound_message = None
+            should_reply = should_enqueue_reply(event)
+            if should_reply:
+                outbound_message = build_text_outbox(
+                    chat_id=event.chat_id,
+                    thread_id=event.thread_id,
+                    conversation_id=conversation_id_for_chat(event.chat_id or "unknown"),
+                    inbound_event_id=inbound_event_id,
+                )
+            result = await self.transactional_repository.process_event_transactionally(
+                inbound_event_id,
+                event,
+                outbound_message,
+            )
+            return {
+                "conversation": result["conversation"],
+                "should_reply": should_reply,
+                "outbound_message": outbound_message,
+                "outbound_insert": result["outbound_insert"],
+            }
+
         conversation = await self.conversation_repository.get_or_create(
             chat_id=event.chat_id or "unknown",
             thread_id=event.thread_id,

@@ -9,9 +9,9 @@ class InboundEventRepository:
     def __init__(self, pool) -> None:
         self.pool = pool
 
-    async def insert(self, event: InboundEvent) -> bool:
+    async def insert(self, event: InboundEvent) -> dict[str, bool]:
         sql = """
-        INSERT IGNORE INTO inbound_events (
+        INSERT INTO inbound_events (
           source, raw_action, organization_id, chat_id, thread_id, event_id,
           event_type, standard_event_type, author_id, sender_role, occurred_at,
           dedup_key, payload_json, ignored, ignore_reason
@@ -20,6 +20,7 @@ class InboundEventRepository:
           %s, %s, %s, %s, %s,
           %s, CAST(%s AS JSON), %s, %s
         )
+        ON DUPLICATE KEY UPDATE id = id
         """
         args = (
             event.source,
@@ -41,7 +42,8 @@ class InboundEventRepository:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, args)
-                return cur.rowcount == 1
+                inserted = cur.rowcount == 1
+                return {"inserted": inserted, "duplicate": not inserted}
 
     async def fetch_unprocessed(self, limit: int = 20) -> list[dict]:
         sql = """
@@ -62,10 +64,13 @@ class InboundEventRepository:
         return rows
 
     async def mark_processed(self, inbound_event_id: int) -> None:
-        sql = "UPDATE inbound_events SET processed = 1 WHERE id = %s"
         async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, (inbound_event_id,))
+            await self.mark_processed_on_connection(conn, inbound_event_id)
+
+    async def mark_processed_on_connection(self, conn, inbound_event_id: int) -> None:
+        sql = "UPDATE inbound_events SET processed = 1 WHERE id = %s"
+        async with conn.cursor() as cur:
+            await cur.execute(sql, (inbound_event_id,))
 
 
 class ConversationRepository:
@@ -73,6 +78,10 @@ class ConversationRepository:
         self.pool = pool
 
     async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
+        async with self.pool.acquire() as conn:
+            return await self.get_or_create_on_connection(conn, chat_id, thread_id)
+
+    async def get_or_create_on_connection(self, conn, chat_id: str, thread_id: str | None = None) -> dict:
         conversation_id = f"livechat:{chat_id}"
         insert_sql = """
         INSERT INTO conversation_states (
@@ -81,11 +90,10 @@ class ConversationRepository:
         ON DUPLICATE KEY UPDATE current_thread_id = COALESCE(VALUES(current_thread_id), current_thread_id)
         """
         select_sql = "SELECT conversation_id, chat_id, current_thread_id FROM conversation_states WHERE chat_id = %s"
-        async with self.pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(insert_sql, (conversation_id, chat_id, thread_id))
-                await cur.execute(select_sql, (chat_id,))
-                row = await cur.fetchone()
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(insert_sql, (conversation_id, chat_id, thread_id))
+            await cur.execute(select_sql, (chat_id,))
+            row = await cur.fetchone()
         return row or {"conversation_id": conversation_id, "chat_id": chat_id, "current_thread_id": thread_id}
 
 
@@ -94,6 +102,10 @@ class OutboundMessageRepository:
         self.pool = pool
 
     async def insert(self, message: dict) -> int:
+        async with self.pool.acquire() as conn:
+            return await self.insert_on_connection(conn, message)
+
+    async def insert_on_connection(self, conn, message: dict) -> int:
         sql = """
         INSERT INTO outbound_messages (
           chat_id, thread_id, action_type, message_type, payload_json,
@@ -110,10 +122,40 @@ class OutboundMessageRepository:
             message["inbound_event_id"],
             message["conversation_id"],
         )
+        async with conn.cursor() as cur:
+            await cur.execute(sql, args)
+            return cur.lastrowid
+
+    async def insert_idempotent(self, message: dict) -> dict:
         async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, args)
-                return cur.lastrowid
+            return await self.insert_idempotent_on_connection(conn, message)
+
+    async def insert_idempotent_on_connection(self, conn, message: dict) -> dict:
+        sql = """
+        INSERT INTO outbound_messages (
+          chat_id, thread_id, action_type, message_type, payload_json,
+          status, inbound_event_id, conversation_id
+        ) VALUES (%s, %s, %s, %s, CAST(%s AS JSON), %s, %s, %s)
+        ON DUPLICATE KEY UPDATE id = id
+        """
+        args = (
+            message["chat_id"],
+            message["thread_id"],
+            message["action_type"],
+            message["message_type"],
+            json_dumps(message["payload_json"]),
+            message["status"],
+            message["inbound_event_id"],
+            message["conversation_id"],
+        )
+        async with conn.cursor() as cur:
+            await cur.execute(sql, args)
+            inserted = cur.rowcount == 1
+            return {
+                "inserted": inserted,
+                "duplicate": not inserted,
+                "id": cur.lastrowid if inserted else None,
+            }
 
     async def fetch_pending(self, limit: int = 20) -> list[dict]:
         sql = """
@@ -137,11 +179,18 @@ class OutboundMessageRepository:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (outbound_message_id,))
 
-    async def mark_failed(self, outbound_message_id: int, error: str) -> None:
-        sql = "UPDATE outbound_messages SET status = 'FAILED', last_error = %s WHERE id = %s"
+    async def mark_failed(
+        self,
+        outbound_message_id: int,
+        status: str,
+        error: str,
+        retryable: bool = False,
+    ) -> None:
+        retry_sql = ", retry_count = retry_count + 1" if retryable else ""
+        sql = f"UPDATE outbound_messages SET status = %s, last_error = %s{retry_sql} WHERE id = %s"
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql, (error, outbound_message_id))
+                await cur.execute(sql, (status, error, outbound_message_id))
 
 
 def json_dumps(payload: dict) -> str:
@@ -152,3 +201,48 @@ def json_loads(payload) -> dict:
     if isinstance(payload, str):
         return json.loads(payload)
     return payload
+
+
+class GatewayTransactionRepository:
+    def __init__(
+        self,
+        pool,
+        inbound_repository: InboundEventRepository | None = None,
+        conversation_repository: ConversationRepository | None = None,
+        outbound_repository: OutboundMessageRepository | None = None,
+    ) -> None:
+        self.pool = pool
+        self.inbound_repository = inbound_repository or InboundEventRepository(pool)
+        self.conversation_repository = conversation_repository or ConversationRepository(pool)
+        self.outbound_repository = outbound_repository or OutboundMessageRepository(pool)
+
+    async def process_event_transactionally(
+        self,
+        inbound_event_id: int,
+        event: InboundEvent,
+        outbound_message: dict | None,
+    ) -> dict:
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                conversation = await self.conversation_repository.get_or_create_on_connection(
+                    conn,
+                    chat_id=event.chat_id or "unknown",
+                    thread_id=event.thread_id,
+                )
+                outbound_insert = None
+                if outbound_message:
+                    outbound_message["conversation_id"] = conversation["conversation_id"]
+                    outbound_insert = await self.outbound_repository.insert_idempotent_on_connection(
+                        conn,
+                        outbound_message,
+                    )
+                await self.inbound_repository.mark_processed_on_connection(conn, inbound_event_id)
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return {
+            "conversation": conversation,
+            "outbound_insert": outbound_insert,
+        }
