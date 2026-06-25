@@ -86,6 +86,15 @@ class FakeExternalCommandRepository:
         return {"inserted": True, "duplicate": False, "id": len(self.inserted)}
 
 
+class FakeGraphRunErrorRepository:
+    def __init__(self) -> None:
+        self.inserted = []
+
+    async def insert(self, error_record: dict) -> int:
+        self.inserted.append(error_record)
+        return len(self.inserted)
+
+
 def test_gateway_service_processes_message_created():
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
@@ -233,3 +242,68 @@ def test_gateway_service_rolls_back_when_transactional_processing_fails():
 
     assert transactional.committed is False
     assert transactional.rolled_back is True
+
+
+class ExplodingGraph:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = []
+
+    def invoke(self, state: dict) -> dict:
+        self.calls.append(state)
+        raise self.error
+
+
+def test_gateway_service_does_not_persist_side_effects_when_graph_invoke_fails():
+    inbound_repository = FakeInboundRepository()
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    graph_error_repository = FakeGraphRunErrorRepository()
+    service = GatewayService(
+        inbound_repository=inbound_repository,
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        graph_run_error_repository=graph_error_repository,
+        workflow_graph=ExplodingGraph(RuntimeError("graph exploded")),
+    )
+
+    try:
+        asyncio.run(service.process_event(11, make_inbound_event()))
+    except RuntimeError as exc:
+        assert str(exc) == "graph exploded"
+    else:
+        raise AssertionError("expected graph invoke to fail")
+
+    assert inbound_repository.processed == []
+    assert conversation_repository.updated == []
+    assert outbound_repository.inserted == []
+    assert external_repository.inserted == []
+    assert graph_error_repository.inserted[0]["conversation_id"] == "livechat:chat-1"
+    assert graph_error_repository.inserted[0]["inbound_event_id"] == 11
+    assert graph_error_repository.inserted[0]["error_type"] == "RuntimeError"
+    assert graph_error_repository.inserted[0]["error_message"] == "graph exploded"
+    assert graph_error_repository.inserted[0]["retryable"] == 0
+    assert graph_error_repository.inserted[0]["state_snapshot"]["conversation_id"] == "livechat:chat-1"
+    assert graph_error_repository.inserted[0]["state_snapshot"]["raw_user_input"] == "mi deposito no llegó"
+
+
+def test_gateway_service_marks_timeout_errors_retryable():
+    graph_error_repository = FakeGraphRunErrorRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        graph_run_error_repository=graph_error_repository,
+        workflow_graph=ExplodingGraph(TimeoutError("graph timeout")),
+    )
+
+    try:
+        asyncio.run(service.process_event(11, make_inbound_event()))
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("expected graph invoke to fail")
+
+    assert graph_error_repository.inserted[0]["retryable"] == 1

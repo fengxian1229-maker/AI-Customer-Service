@@ -122,7 +122,13 @@ def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
 
     async def fake_process_next_batch(pool, limit: int = 20):
         calls["limit"] = limit
-        return [{"outbound_message": {"id": 1}}]
+        return {
+            "results": [{"outbound_message": {"id": 1}}],
+            "failures": [],
+            "processed": 1,
+            "failed": 0,
+            "enqueued": 1,
+        }
 
     monkeypatch.setattr(gateway_consumer, "Settings", FakeSettings)
     monkeypatch.setattr(gateway_consumer, "create_pool", fake_create_pool)
@@ -138,6 +144,7 @@ def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
     assert calls["closed"] is True
     assert calls["wait_closed"] is True
     assert result["processed"] == 1
+    assert result["failed"] == 0
     assert result["enqueued"] == 1
 
 

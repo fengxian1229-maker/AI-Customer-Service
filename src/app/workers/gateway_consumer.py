@@ -15,12 +15,29 @@ async def process_next_batch(pool, limit: int = 20) -> list[dict]:
     service = GatewayService(transactional_repository=transactional_repository)
 
     results = []
+    failures = []
     rows = await inbound_repository.fetch_unprocessed(limit=limit)
     for row in rows:
         inbound_event_id = row.pop("id")
         event = InboundEvent(**row)
-        results.append(await service.process_event(inbound_event_id, event))
-    return results
+        try:
+            results.append(await service.process_event(inbound_event_id, event))
+        except Exception as exc:
+            failures.append(
+                {
+                    "inbound_event_id": inbound_event_id,
+                    "event_id": event.event_id,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                }
+            )
+    return {
+        "results": results,
+        "failures": failures,
+        "processed": len(results),
+        "failed": len(failures),
+        "enqueued": sum(1 for result in results if result.get("outbound_message")),
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -41,8 +58,10 @@ async def run_once(limit: int) -> dict:
         return {
             "worker": "gateway_consumer",
             "mode": "once",
-            "processed": len(results),
-            "enqueued": sum(1 for result in results if result.get("outbound_message")),
+            "processed": results["processed"],
+            "failed": results["failed"],
+            "enqueued": results["enqueued"],
+            "failures": results["failures"],
         }
     finally:
         pool.close()

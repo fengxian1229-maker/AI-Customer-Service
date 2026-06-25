@@ -18,6 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
+P0 ingress contract is complete. Current focus is P1 main-chain hardening around GatewayConsumer / GatewayService / LangGraph failure boundaries.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -34,17 +35,16 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-Make the current workers production-usable:
-- add proper CLI entrypoints for polling, gateway, and sender
-- persist group_id/users metadata into `inbound_events.payload_json`
-- reduce duplicate warning noise from `INSERT IGNORE`
-- add sender error classification
-- add a safe one-command local smoke script for group 23 only
+P1-B and later:
+- add retry handling for `graph_run_errors` only after main graph failure boundaries are stable
+- consider LangGraph checkpointer later; do not add it before failure semantics are agreed
+- keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change
 ```
 
 ## Current Polling-First Worker Status
 
 This session hardened the polling-first worker path without adding websocket or webhook ingress.
+P0 ingress contract is done, and P1-A added graph failure isolation with `graph_run_errors`.
 
 Implemented:
 
@@ -57,6 +57,8 @@ Implemented:
 - polling audit metadata in `inbound_events.payload_json`
 - sender statuses: `SENT`, `FAILED_CONFIG`, `RETRYABLE`, `FAILED_BUSINESS`, `FAILED_UNKNOWN`
 - `scripts/smoke_livechat_group23.sh`
+- `graph_run_errors` persistence for graph invoke failures before any outbox, external command, or conversation state side effect
+- `gateway_consumer` per-event failure isolation with `processed` / `failed` / `enqueued` summary output
 
 Ingress staging remains:
 
@@ -69,6 +71,7 @@ TODO for later phases only:
 - WebSocket RTM receiver
 - Webhook receiver and signature verification
 - webhook registration docs
+- LangGraph checkpointer and resume
 - LangGraph, RAG, LLM automatic replies
 - Telegram full handoff loop
 - backend API fact lookup and withdrawal workflows

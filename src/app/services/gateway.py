@@ -4,6 +4,7 @@ from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
 from app.workflows.command_contracts import CommandType
+from app.db.repositories import GraphRunErrorRepository
 
 
 EXTERNAL_COMMAND_TYPES = {
@@ -36,6 +37,7 @@ class GatewayService:
         conversation_repository=None,
         outbound_repository=None,
         external_command_repository=None,
+        graph_run_error_repository=None,
         transactional_repository=None,
         workflow_graph=None,
     ) -> None:
@@ -45,12 +47,14 @@ class GatewayService:
         self.external_command_repository = external_command_repository
         self.transactional_repository = transactional_repository
         self.workflow_graph = workflow_graph or build_workflow_graph()
+        pool = getattr(transactional_repository, "pool", None)
+        self.graph_run_error_repository = graph_run_error_repository or (GraphRunErrorRepository(pool) if pool else None)
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
         if self.transactional_repository:
             should_reply = should_enqueue_reply(event)
             conversation = await self._load_transactional_conversation(event)
-            graph_state = self._invoke_graph(event, conversation) if should_reply or event.standard_event_type == "FILE_RECEIVED" else None
+            graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation) if should_reply or event.standard_event_type == "FILE_RECEIVED" else None
             outbound_messages = self._build_outbound_messages(inbound_event_id, event, conversation["conversation_id"], graph_state)
             external_commands = self._build_external_commands(inbound_event_id, event, conversation, graph_state)
             result = await self.transactional_repository.process_event_transactionally(
@@ -80,7 +84,7 @@ class GatewayService:
         graph_state = None
         outbound_messages = []
         if should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED":
-            graph_state = self._invoke_graph(event, conversation)
+            graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation)
             outbound_messages = self._build_outbound_messages(
                 inbound_event_id,
                 event,
@@ -109,9 +113,74 @@ class GatewayService:
             "external_commands": external_commands,
         }
 
-    def _invoke_graph(self, event: InboundEvent, conversation: dict) -> dict:
-        state = build_graph_state_from_event(event, conversation)
-        return self.workflow_graph.invoke(state)
+    async def _run_graph_with_boundary(self, inbound_event_id: int, event: InboundEvent, conversation: dict) -> dict:
+        graph_state = build_graph_state_from_event(event, conversation)
+        try:
+            return self.workflow_graph.invoke(graph_state)
+        except Exception as exc:
+            await self._record_graph_run_error(
+                inbound_event_id=inbound_event_id,
+                conversation=conversation,
+                graph_state=graph_state,
+                error=exc,
+            )
+            raise
+
+    async def _record_graph_run_error(
+        self,
+        inbound_event_id: int,
+        conversation: dict,
+        graph_state: dict,
+        error: Exception,
+    ) -> None:
+        if not self.graph_run_error_repository:
+            return
+        await self.graph_run_error_repository.insert(
+            {
+                "conversation_id": conversation.get("conversation_id") or graph_state.get("conversation_id"),
+                "inbound_event_id": inbound_event_id,
+                "graph_thread_id": graph_state.get("thread_id"),
+                "node_name": None,
+                "error_type": type(error).__name__,
+                "error_message": str(error),
+                "retryable": 1 if isinstance(error, (TimeoutError, ConnectionError)) else 0,
+                "state_snapshot": self._sanitize_graph_state_snapshot(graph_state),
+            }
+        )
+
+    def _sanitize_graph_state_snapshot(self, graph_state: dict) -> dict:
+        snapshot = {
+            "conversation_id": graph_state.get("conversation_id"),
+            "tenant_id": graph_state.get("tenant_id"),
+            "chat_id": graph_state.get("chat_id"),
+            "thread_id": graph_state.get("thread_id"),
+            "raw_user_input": graph_state.get("raw_user_input"),
+            "event_type": graph_state.get("event_type"),
+            "active_workflow": graph_state.get("active_workflow"),
+            "workflow_stage": graph_state.get("workflow_stage"),
+            "slot_memory": graph_state.get("slot_memory"),
+            "route": graph_state.get("route"),
+            "intent_result": graph_state.get("intent_result"),
+            "signal_result": graph_state.get("signal_result"),
+            "rewrite_result": graph_state.get("rewrite_result"),
+        }
+        return self._sanitize_value(snapshot)
+
+    def _sanitize_value(self, value):
+        sensitive_tokens = ("token", "access_token", "secret", "api_key", "password")
+        if isinstance(value, dict):
+            sanitized = {}
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if any(token in lowered for token in sensitive_tokens):
+                    continue
+                sanitized[key] = self._sanitize_value(item)
+            return sanitized
+        if isinstance(value, list):
+            return [self._sanitize_value(item) for item in value[:20]]
+        if isinstance(value, str):
+            return value[:2000]
+        return value
 
     async def _load_transactional_conversation(self, event: InboundEvent) -> dict:
         conversation_repository = getattr(self.transactional_repository, "conversation_repository", None)

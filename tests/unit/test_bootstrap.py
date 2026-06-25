@@ -36,6 +36,7 @@ def test_load_sql_files_in_order():
             "005_external_commands.sql",
             "006_external_command_results.sql",
             "007_add_worker_lease_fields.sql",
+            "008_graph_run_errors.sql",
         ]
 
 
@@ -82,6 +83,18 @@ def test_external_command_results_schema_has_required_indexes():
     assert "KEY idx_external_command_results_external_command (external_command_id)" in sql
     assert "KEY idx_external_command_results_conversation (conversation_id)" in sql
     assert "KEY idx_external_command_results_inbound_event (inbound_event_id)" in sql
+
+
+def test_graph_run_errors_schema_has_required_indexes():
+    from pathlib import Path
+
+    sql = Path("sql/008_graph_run_errors.sql").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS graph_run_errors" in sql
+    assert "state_snapshot JSON NULL" in sql
+    assert "KEY idx_graph_run_errors_conversation_created (conversation_id, created_at)" in sql
+    assert "KEY idx_graph_run_errors_inbound_event (inbound_event_id)" in sql
+    assert "KEY idx_graph_run_errors_retryable (retryable, created_at)" in sql
 
 
 def test_bootstrap_adds_missing_workflow_stage_for_mysql():
@@ -233,4 +246,77 @@ def test_external_result_lease_bootstrap_does_not_duplicate_existing_sqlite_fiel
     asyncio.run(ensure_external_command_result_lease_compat(cursor))
 
     assert not any(sql.startswith("ALTER TABLE external_command_results ADD COLUMN") for sql in cursor.executed)
+    assert not any(sql.startswith("CREATE INDEX") for sql in cursor.executed)
+
+
+def test_graph_run_errors_bootstrap_adds_missing_mysql_indexes_only_once():
+    import asyncio
+
+    from app.db.bootstrap import ensure_graph_run_errors_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+            self.phase = "columns"
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+            if sql == "SHOW INDEX FROM graph_run_errors":
+                self.phase = "indexes"
+
+        async def fetchall(self):
+            if self.phase == "indexes":
+                return [("graph_run_errors", 0, "idx_graph_run_errors_inbound_event")]
+            return [("id",), ("conversation_id",), ("inbound_event_id",), ("retryable",), ("created_at",)]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_graph_run_errors_compat(cursor))
+
+    assert any("idx_graph_run_errors_conversation_created" in sql for sql in cursor.executed)
+    assert any("idx_graph_run_errors_retryable" in sql for sql in cursor.executed)
+    assert not any(sql == "ALTER TABLE graph_run_errors ADD COLUMN retryable TINYINT(1) NOT NULL DEFAULT 0" for sql in cursor.executed)
+
+
+def test_graph_run_errors_bootstrap_keeps_existing_sqlite_columns_and_indexes():
+    import asyncio
+
+    from app.db.bootstrap import ensure_graph_run_errors_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+            self.phase = "columns"
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+            if sql.startswith("SHOW"):
+                raise RuntimeError("sqlite")
+            if sql.startswith("PRAGMA index_list"):
+                self.phase = "indexes"
+
+        async def fetchall(self):
+            if self.phase == "indexes":
+                return [
+                    (0, "idx_graph_run_errors_conversation_created"),
+                    (1, "idx_graph_run_errors_inbound_event"),
+                    (2, "idx_graph_run_errors_retryable"),
+                ]
+            return [
+                (0, "conversation_id"),
+                (1, "inbound_event_id"),
+                (2, "graph_thread_id"),
+                (3, "node_name"),
+                (4, "error_type"),
+                (5, "error_message"),
+                (6, "retryable"),
+                (7, "state_snapshot"),
+                (8, "created_at"),
+            ]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_graph_run_errors_compat(cursor))
+
+    assert not any(sql.startswith("ALTER TABLE graph_run_errors ADD COLUMN") for sql in cursor.executed)
     assert not any(sql.startswith("CREATE INDEX") for sql in cursor.executed)

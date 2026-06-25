@@ -19,6 +19,7 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
             await ensure_outbound_messages_compat(cur)
             await ensure_external_command_lease_compat(cur)
             await ensure_external_command_result_lease_compat(cur)
+            await ensure_graph_run_errors_compat(cur)
 
 
 async def ensure_inbound_events_compat(cur) -> None:
@@ -104,6 +105,39 @@ async def ensure_external_command_result_lease_compat(cur) -> None:
             ),
             "idx_external_command_results_locked_by": (
                 "CREATE INDEX idx_external_command_results_locked_by ON external_command_results (locked_by)"
+            ),
+        },
+    )
+
+
+async def ensure_graph_run_errors_compat(cur) -> None:
+    await ensure_columns(
+        cur,
+        "graph_run_errors",
+        {
+            "graph_thread_id": "ALTER TABLE graph_run_errors ADD COLUMN graph_thread_id VARCHAR(128) NULL",
+            "node_name": "ALTER TABLE graph_run_errors ADD COLUMN node_name VARCHAR(128) NULL",
+            "retryable": "ALTER TABLE graph_run_errors ADD COLUMN retryable TINYINT(1) NOT NULL DEFAULT 0",
+            "state_snapshot": "ALTER TABLE graph_run_errors ADD COLUMN state_snapshot JSON NULL",
+            "created_at": (
+                "ALTER TABLE graph_run_errors "
+                "ADD COLUMN created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"
+            ),
+        },
+    )
+    await ensure_indexes(
+        cur,
+        "graph_run_errors",
+        {
+            "idx_graph_run_errors_conversation_created": (
+                "CREATE INDEX idx_graph_run_errors_conversation_created "
+                "ON graph_run_errors (conversation_id, created_at)"
+            ),
+            "idx_graph_run_errors_inbound_event": (
+                "CREATE INDEX idx_graph_run_errors_inbound_event ON graph_run_errors (inbound_event_id)"
+            ),
+            "idx_graph_run_errors_retryable": (
+                "CREATE INDEX idx_graph_run_errors_retryable ON graph_run_errors (retryable, created_at)"
             ),
         },
     )

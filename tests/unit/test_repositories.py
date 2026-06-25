@@ -2,6 +2,7 @@ from app.db.repositories import (
     ExternalCommandRepository,
     ExternalCommandResultRepository,
     ExternalResultTransactionRepository,
+    GraphRunErrorRepository,
     InboundEventRepository,
     OutboundMessageRepository,
     build_external_command_dedup_key,
@@ -174,6 +175,27 @@ async def run_external_insert_idempotent(rowcount: int):
     return result, cursor
 
 
+async def run_graph_run_error_insert(rowcount: int):
+    cursor = FakeCursor(rowcount=rowcount)
+    cursor.lastrowid = 77
+    repository = GraphRunErrorRepository(FakePool(cursor))
+
+    result = await repository.insert(
+        {
+            "conversation_id": "livechat:chat-1",
+            "inbound_event_id": 11,
+            "graph_thread_id": "thread-graph-1",
+            "node_name": "router",
+            "error_type": "RuntimeError",
+            "error_message": "graph exploded",
+            "retryable": 0,
+            "state_snapshot": {"conversation_id": "livechat:chat-1"},
+        }
+    )
+
+    return result, cursor
+
+
 def test_external_command_dedup_key_is_stable_for_payload_order():
     first = build_external_command_dedup_key(
         tenant_id="default",
@@ -212,6 +234,21 @@ def test_external_command_insert_idempotent_reports_duplicate():
     result, _cursor = asyncio.run(run_external_insert_idempotent(rowcount=0))
 
     assert result == {"inserted": False, "duplicate": True, "id": None}
+
+
+def test_graph_run_error_insert_writes_json_snapshot():
+    import asyncio
+
+    result, cursor = asyncio.run(run_graph_run_error_insert(rowcount=1))
+
+    assert "INSERT INTO graph_run_errors" in cursor.sql
+    assert "state_snapshot" in cursor.sql
+    assert cursor.args[0] == "livechat:chat-1"
+    assert cursor.args[1] == 11
+    assert cursor.args[4] == "RuntimeError"
+    assert cursor.args[6] == 0
+    assert cursor.args[7] == '{"conversation_id":"livechat:chat-1"}'
+    assert result == 77
 
 
 def test_external_command_fetch_pending_filters_pending_by_created_at():

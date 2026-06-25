@@ -668,6 +668,73 @@ class ExternalCommandResultRepository:
                 return cur.rowcount
 
 
+class GraphRunErrorRepository:
+    def __init__(self, pool) -> None:
+        self.pool = pool
+
+    async def insert(self, error_record: dict) -> int:
+        sql = """
+        INSERT INTO graph_run_errors (
+          conversation_id, inbound_event_id, graph_thread_id, node_name,
+          error_type, error_message, retryable, state_snapshot
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, CAST(%s AS JSON))
+        """
+        state_snapshot = error_record.get("state_snapshot")
+        state_snapshot_json = (
+            json.dumps(state_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if state_snapshot is not None
+            else None
+        )
+        args = (
+            error_record["conversation_id"],
+            error_record["inbound_event_id"],
+            error_record.get("graph_thread_id"),
+            error_record.get("node_name"),
+            error_record["error_type"],
+            error_record["error_message"],
+            error_record.get("retryable", 0),
+            state_snapshot_json,
+        )
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, args)
+                return cur.lastrowid
+
+    async def fetch_recent(self, conversation_id: str, limit: int = 20) -> list[dict]:
+        sql = """
+        SELECT id, conversation_id, inbound_event_id, graph_thread_id, node_name,
+               error_type, error_message, retryable, state_snapshot, created_at
+        FROM graph_run_errors
+        WHERE conversation_id = %s
+        ORDER BY created_at DESC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (conversation_id, limit))
+                rows = await cur.fetchall()
+        for row in rows:
+            row["state_snapshot"] = json_loads(row["state_snapshot"])
+        return rows
+
+    async def fetch_retryable(self, limit: int = 20) -> list[dict]:
+        sql = """
+        SELECT id, conversation_id, inbound_event_id, graph_thread_id, node_name,
+               error_type, error_message, retryable, state_snapshot, created_at
+        FROM graph_run_errors
+        WHERE retryable = 1
+        ORDER BY created_at ASC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (limit,))
+                rows = await cur.fetchall()
+        for row in rows:
+            row["state_snapshot"] = json_loads(row["state_snapshot"])
+        return rows
+
+
 class ExternalResultTransactionRepository:
     def __init__(
         self,
