@@ -1,0 +1,23 @@
+0 verbose cli /usr/local/bin/node /usr/local/bin/npm
+1 info using npm@11.9.0
+2 info using node@v24.14.0
+3 silly config load:file:/usr/local/lib/node_modules/npm/npmrc
+4 silly config load:file:/Users/idea3c/Documents/New project 2/bot66tornado/.npmrc
+5 silly config load:file:/usr/local/etc/npmrc
+6 verbose title npm run export:official-chat-report --since=2026-06-07T00:00:00+08:00 --until=2026-06-08T00:00:00+08:00 --label=2026-06-07-全天24小時
+7 verbose argv "run" "export:official-chat-report" "--" "--since=2026-06-07T00:00:00+08:00" "--until=2026-06-08T00:00:00+08:00" "--label=2026-06-07-全天24小時"
+8 verbose logfile logs-max:10 dir:/Users/idea3c/Documents/New project 2/bot66tornado/.npm/_logs/2026-06-08T03_49_30_785Z-
+9 verbose logfile /Users/idea3c/Documents/New project 2/bot66tornado/.npm/_logs/2026-06-08T03_49_30_785Z-debug-0.log
+10 silly logfile done cleaning log files
+11 http fetch GET 200 https://registry.npmjs.org/npm 689ms
+12 verbose cwd /Users/idea3c/Documents/New project 2/bot66tornado
+13 verbose os Darwin 25.5.0
+14 verbose node v24.14.0
+15 verbose npm  v11.9.0
+16 notice
+16 notice New minor version of npm available! 11.9.0 -> 11.16.0
+16 notice Changelog: https://github.com/npm/cli/releases/tag/v11.16.0
+16 notice To update run: npm install -g npm@11.16.0
+16 notice  { force: true, Symbol(proc-log.meta): true }
+17 verbose exit 0
+18 info ok
