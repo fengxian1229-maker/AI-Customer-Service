@@ -47,6 +47,14 @@ def test_classify_send_error_marks_closed_chat_as_business_failure():
     assert "Chat is closed" in result["last_error"]
 
 
+def test_classify_send_error_marks_inactive_chat_as_business_failure():
+    result = classify_send_error(LiveChatApiError(422, {"error": {"message": "Chat not active"}}))
+
+    assert result["status"] == "FAILED_BUSINESS"
+    assert result["retryable"] is False
+    assert "Chat not active" in result["last_error"]
+
+
 def test_classify_send_error_marks_unknown_failure():
     result = classify_send_error(RuntimeError("unexpected shape"))
 

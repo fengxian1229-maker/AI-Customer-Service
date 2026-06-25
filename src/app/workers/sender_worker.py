@@ -14,6 +14,7 @@ RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 BUSINESS_ERROR_MARKERS = (
     "chat is closed",
     "chat closed",
+    "chat not active",
     "thread not found",
     "thread does not exist",
     "cannot send",
