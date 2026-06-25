@@ -1,0 +1,3 @@
+-- Idempotent worker lease migration is applied by app.db.bootstrap.
+-- The bootstrap layer checks columns and indexes for MySQL and SQLite before
+-- adding lease metadata to external_commands and external_command_results.

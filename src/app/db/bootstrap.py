@@ -17,6 +17,8 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
             await ensure_inbound_events_compat(cur)
             await ensure_conversation_states_compat(cur)
             await ensure_outbound_messages_compat(cur)
+            await ensure_external_command_lease_compat(cur)
+            await ensure_external_command_result_lease_compat(cur)
 
 
 async def ensure_inbound_events_compat(cur) -> None:
@@ -53,11 +55,89 @@ async def ensure_conversation_states_compat(cur) -> None:
         await cur.execute("ALTER TABLE conversation_states ADD COLUMN workflow_stage VARCHAR(128) NULL")
 
 
+async def ensure_external_command_lease_compat(cur) -> None:
+    await ensure_columns(
+        cur,
+        "external_commands",
+        {
+            "leased_at": "ALTER TABLE external_commands ADD COLUMN leased_at DATETIME(6) NULL",
+            "lease_expires_at": "ALTER TABLE external_commands ADD COLUMN lease_expires_at DATETIME(6) NULL",
+            "locked_by": "ALTER TABLE external_commands ADD COLUMN locked_by VARCHAR(128) NULL",
+            "attempted_at": "ALTER TABLE external_commands ADD COLUMN attempted_at DATETIME(6) NULL",
+            "processed_at": "ALTER TABLE external_commands ADD COLUMN processed_at DATETIME(6) NULL",
+        },
+    )
+    await ensure_indexes(
+        cur,
+        "external_commands",
+        {
+            "idx_external_commands_status_lease_created": (
+                "CREATE INDEX idx_external_commands_status_lease_created "
+                "ON external_commands (status, lease_expires_at, created_at)"
+            ),
+            "idx_external_commands_locked_by": (
+                "CREATE INDEX idx_external_commands_locked_by ON external_commands (locked_by)"
+            ),
+        },
+    )
+
+
+async def ensure_external_command_result_lease_compat(cur) -> None:
+    await ensure_columns(
+        cur,
+        "external_command_results",
+        {
+            "leased_at": "ALTER TABLE external_command_results ADD COLUMN leased_at DATETIME(6) NULL",
+            "lease_expires_at": "ALTER TABLE external_command_results ADD COLUMN lease_expires_at DATETIME(6) NULL",
+            "locked_by": "ALTER TABLE external_command_results ADD COLUMN locked_by VARCHAR(128) NULL",
+            "attempted_at": "ALTER TABLE external_command_results ADD COLUMN attempted_at DATETIME(6) NULL",
+            "retry_count": "ALTER TABLE external_command_results ADD COLUMN retry_count INT NOT NULL DEFAULT 0",
+        },
+    )
+    await ensure_indexes(
+        cur,
+        "external_command_results",
+        {
+            "idx_external_command_results_status_lease_created": (
+                "CREATE INDEX idx_external_command_results_status_lease_created "
+                "ON external_command_results (status, lease_expires_at, created_at)"
+            ),
+            "idx_external_command_results_locked_by": (
+                "CREATE INDEX idx_external_command_results_locked_by ON external_command_results (locked_by)"
+            ),
+        },
+    )
+
+
+async def ensure_columns(cur, table_name: str, additions: dict[str, str]) -> None:
+    columns = await fetch_columns(cur, table_name)
+    for column, statement in additions.items():
+        if column not in columns:
+            await cur.execute(statement)
+
+
+async def ensure_indexes(cur, table_name: str, additions: dict[str, str]) -> None:
+    indexes = await fetch_indexes(cur, table_name)
+    for index, statement in additions.items():
+        if index not in indexes:
+            await cur.execute(statement)
+
+
 async def fetch_columns(cur, table_name: str) -> set[str]:
     try:
         await cur.execute(f"SHOW COLUMNS FROM {table_name}")
         return {row[0] for row in await cur.fetchall()}
     except Exception:
         await cur.execute(f"PRAGMA table_info({table_name})")
+        rows = await cur.fetchall()
+        return {row[1] for row in rows}
+
+
+async def fetch_indexes(cur, table_name: str) -> set[str]:
+    try:
+        await cur.execute(f"SHOW INDEX FROM {table_name}")
+        return {row[2] for row in await cur.fetchall()}
+    except Exception:
+        await cur.execute(f"PRAGMA index_list({table_name})")
         rows = await cur.fetchall()
         return {row[1] for row in rows}

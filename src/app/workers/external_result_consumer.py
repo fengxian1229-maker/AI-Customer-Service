@@ -1,12 +1,15 @@
 import argparse
 import asyncio
 import json
+import os
+import socket
 
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import (
     ConversationRepository,
     ExternalCommandResultRepository,
+    ExternalResultTransactionRepository,
     OutboundMessageRepository,
 )
 from app.services.outbox import build_text_outbox
@@ -47,8 +50,20 @@ async def process_pending_results(
     conversation_repository: ConversationRepository,
     outbound_repository: OutboundMessageRepository,
     limit: int = 20,
+    transaction_repository: ExternalResultTransactionRepository | None = None,
+    worker_id: str | None = None,
+    lease_seconds: int = 60,
+    max_retries: int = 3,
 ) -> list[dict]:
-    rows = await result_repository.fetch_pending(limit=limit)
+    worker_id = worker_id or default_worker_id()
+    rows = await result_repository.lease_pending(limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
+    if transaction_repository is None:
+        transaction_repository = ExternalResultTransactionRepository(
+            result_repository.pool,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            result_repository=result_repository,
+        )
     processed = []
     for row in rows:
         try:
@@ -62,7 +77,6 @@ async def process_pending_results(
                 "workflow_stage": handler.get("workflow_stage"),
                 "slot_memory": {},
             }
-            await conversation_repository.update_workflow_state(row["conversation_id"], graph_state)
             outbound = build_text_outbox(
                 chat_id=row["chat_id"],
                 thread_id=row.get("thread_id"),
@@ -70,11 +84,15 @@ async def process_pending_results(
                 inbound_event_id=row.get("inbound_event_id"),
                 text=handler["text"],
             )
-            await outbound_repository.insert_idempotent(outbound)
-            await result_repository.mark_processed(row["id"])
+            await transaction_repository.process_result_transactionally(
+                row,
+                graph_state=graph_state,
+                outbound_messages=[outbound],
+                external_commands=[],
+            )
             processed.append({"id": row["id"], "result_type": row["result_type"], "status": "PROCESSED"})
         except Exception as exc:
-            await result_repository.mark_failed(row["id"], str(exc))
+            await result_repository.mark_processing_failed(row["id"], str(exc), max_retries=max_retries)
             processed.append({"id": row["id"], "result_type": row.get("result_type"), "status": "FAILED", "error": str(exc)})
     return processed
 
@@ -83,10 +101,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Consume external_command_results into conversation state and outbox.")
     parser.add_argument("--once", action="store_true", help="Run one external result batch and exit.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum external command results to process.")
+    parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
+    parser.add_argument("--lease-seconds", type=int, default=60, help="Seconds before a queue lease expires.")
+    parser.add_argument("--max-retries", type=int, default=3, help="Maximum processing attempts before FAILED.")
     return parser
 
 
-async def run_once(limit: int) -> dict:
+def default_worker_id() -> str:
+    return f"external-result-consumer-{socket.gethostname()}-{os.getpid()}"
+
+
+async def run_once(
+    limit: int,
+    worker_id: str | None = None,
+    lease_seconds: int = 60,
+    max_retries: int = 3,
+) -> dict:
     settings = Settings(
         livechat_agent_access_token="unused-for-external-result-consumer",
         livechat_account_id="unused-for-external-result-consumer",
@@ -98,6 +128,10 @@ async def run_once(limit: int) -> dict:
             conversation_repository=ConversationRepository(pool),
             outbound_repository=OutboundMessageRepository(pool),
             limit=limit,
+            transaction_repository=ExternalResultTransactionRepository(pool),
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            max_retries=max_retries,
         )
         return {
             "worker": "external_result_consumer",
@@ -113,7 +147,14 @@ async def run_once(limit: int) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    result = asyncio.run(run_once(limit=args.limit))
+    result = asyncio.run(
+        run_once(
+            limit=args.limit,
+            worker_id=args.worker_id,
+            lease_seconds=args.lease_seconds,
+            max_retries=args.max_retries,
+        )
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

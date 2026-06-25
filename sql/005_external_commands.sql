@@ -10,11 +10,18 @@ CREATE TABLE IF NOT EXISTS external_commands (
   status VARCHAR(64) NOT NULL DEFAULT 'PENDING',
   retry_count INT NOT NULL DEFAULT 0,
   last_error TEXT NULL,
+  leased_at DATETIME(6) NULL,
+  lease_expires_at DATETIME(6) NULL,
+  locked_by VARCHAR(128) NULL,
+  attempted_at DATETIME(6) NULL,
+  processed_at DATETIME(6) NULL,
   dedup_key VARCHAR(255) NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_external_commands_dedup (dedup_key),
   KEY idx_external_commands_status_created (status, created_at),
+  KEY idx_external_commands_status_lease_created (status, lease_expires_at, created_at),
+  KEY idx_external_commands_locked_by (locked_by),
   KEY idx_external_commands_conversation (conversation_id),
   KEY idx_external_commands_inbound_event (inbound_event_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -288,7 +288,9 @@ class ExternalCommandRepository:
     async def fetch_pending(self, limit: int = 20) -> list[dict]:
         sql = """
         SELECT id, tenant_id, conversation_id, chat_id, thread_id, inbound_event_id,
-               command_type, payload_json, status, retry_count, last_error, dedup_key
+               command_type, payload_json, status, retry_count, last_error,
+               leased_at, lease_expires_at, locked_by, attempted_at, processed_at,
+               dedup_key
         FROM external_commands
         WHERE status = 'PENDING'
         ORDER BY created_at ASC
@@ -302,6 +304,71 @@ class ExternalCommandRepository:
             row["payload_json"] = json_loads(row["payload_json"])
         return rows
 
+    async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                rows = await self._lease_pending_on_connection(conn, limit, worker_id, lease_seconds)
+                await conn.commit()
+                return rows
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def _lease_pending_on_connection(self, conn, limit: int, worker_id: str, lease_seconds: int) -> list[dict]:
+        select_sql = """
+        SELECT id
+        FROM external_commands
+        WHERE status IN ('PENDING', 'RETRYABLE')
+          AND (locked_by IS NULL OR lease_expires_at IS NULL OR lease_expires_at < NOW(6))
+        ORDER BY created_at ASC
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+        """
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(select_sql, (limit,))
+            id_rows = await cur.fetchall()
+            ids = [row["id"] for row in id_rows]
+            if not ids:
+                return []
+
+            placeholders = ", ".join(["%s"] * len(ids))
+            update_sql = f"""
+            UPDATE external_commands
+            SET leased_at = NOW(6),
+                lease_expires_at = DATE_ADD(NOW(6), INTERVAL %s SECOND),
+                locked_by = %s,
+                attempted_at = NOW(6),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """
+            await cur.execute(update_sql, (lease_seconds, worker_id, *ids))
+
+            fetch_sql = f"""
+            SELECT id, tenant_id, conversation_id, chat_id, thread_id, inbound_event_id,
+                   command_type, payload_json, status, retry_count, last_error,
+                   leased_at, lease_expires_at, locked_by, attempted_at, processed_at,
+                   dedup_key
+            FROM external_commands
+            WHERE id IN ({placeholders})
+            ORDER BY created_at ASC
+            """
+            await cur.execute(fetch_sql, tuple(ids))
+            rows = await cur.fetchall()
+        for row in rows:
+            row["payload_json"] = json_loads(row["payload_json"])
+        return rows
+
+    async def release_lease(self, command_id: int) -> None:
+        sql = """
+        UPDATE external_commands
+        SET leased_at = NULL, lease_expires_at = NULL, locked_by = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (command_id,))
+
     async def mark_dry_run_done(self, command_id: int) -> None:
         await self._mark_status(command_id, "DRY_RUN_DONE")
 
@@ -309,7 +376,16 @@ class ExternalCommandRepository:
         await self._mark_status(command_id, "SENT")
 
     async def mark_failed(self, command_id: int, error: str) -> None:
-        sql = "UPDATE external_commands SET status = 'FAILED', last_error = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        sql = """
+        UPDATE external_commands
+        SET status = 'FAILED',
+            last_error = %s,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (error, command_id))
@@ -317,15 +393,59 @@ class ExternalCommandRepository:
     async def mark_retryable(self, command_id: int, error: str) -> None:
         sql = """
         UPDATE external_commands
-        SET status = 'RETRYABLE', retry_count = retry_count + 1, last_error = %s, updated_at = CURRENT_TIMESTAMP
+        SET status = 'RETRYABLE',
+            retry_count = retry_count + 1,
+            last_error = %s,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = %s
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (error, command_id))
 
+    async def mark_processing_failed(self, command_id: int, error: str, max_retries: int = 3) -> None:
+        sql = """
+        UPDATE external_commands
+        SET retry_count = retry_count + 1,
+            status = CASE WHEN retry_count + 1 >= %s THEN 'FAILED' ELSE 'RETRYABLE' END,
+            last_error = %s,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (max_retries, error, command_id))
+
+    async def recover_expired_leases(self) -> int:
+        sql = """
+        UPDATE external_commands
+        SET leased_at = NULL, lease_expires_at = NULL, locked_by = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE status IN ('PENDING', 'RETRYABLE')
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < NOW(6)
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, ())
+                return cur.rowcount
+
     async def _mark_status(self, command_id: int, status: str) -> None:
-        sql = f"UPDATE external_commands SET status = '{status}', updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        processed_sql = ", processed_at = NOW(6)" if status in {"DRY_RUN_DONE", "SENT"} else ""
+        sql = f"""
+        UPDATE external_commands
+        SET status = '{status}',
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL{processed_sql},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (command_id,))
@@ -388,8 +508,9 @@ class ExternalCommandResultRepository:
     async def fetch_pending(self, limit: int = 20) -> list[dict]:
         sql = """
         SELECT id, external_command_id, tenant_id, conversation_id, chat_id, thread_id,
-               inbound_event_id, command_type, result_type, result_json, status,
-               processed_at, last_error, dedup_key
+               inbound_event_id, command_type, result_type, result_json, status, retry_count,
+               processed_at, last_error, leased_at, lease_expires_at, locked_by,
+               attempted_at, dedup_key
         FROM external_command_results
         WHERE status = 'PENDING'
         ORDER BY created_at ASC
@@ -403,23 +524,209 @@ class ExternalCommandResultRepository:
             row["result_json"] = json_loads(row["result_json"])
         return rows
 
-    async def mark_processed(self, result_id: int) -> None:
-        sql = "UPDATE external_command_results SET status = 'PROCESSED', processed_at = NOW(6), updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+    async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                rows = await self._lease_pending_on_connection(conn, limit, worker_id, lease_seconds)
+                await conn.commit()
+                return rows
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def _lease_pending_on_connection(self, conn, limit: int, worker_id: str, lease_seconds: int) -> list[dict]:
+        select_sql = """
+        SELECT id
+        FROM external_command_results
+        WHERE status IN ('PENDING', 'RETRYABLE')
+          AND (locked_by IS NULL OR lease_expires_at IS NULL OR lease_expires_at < NOW(6))
+        ORDER BY created_at ASC
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+        """
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(select_sql, (limit,))
+            id_rows = await cur.fetchall()
+            ids = [row["id"] for row in id_rows]
+            if not ids:
+                return []
+
+            placeholders = ", ".join(["%s"] * len(ids))
+            update_sql = f"""
+            UPDATE external_command_results
+            SET leased_at = NOW(6),
+                lease_expires_at = DATE_ADD(NOW(6), INTERVAL %s SECOND),
+                locked_by = %s,
+                attempted_at = NOW(6),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """
+            await cur.execute(update_sql, (lease_seconds, worker_id, *ids))
+
+            fetch_sql = f"""
+            SELECT id, external_command_id, tenant_id, conversation_id, chat_id, thread_id,
+                   inbound_event_id, command_type, result_type, result_json, status, retry_count,
+                   processed_at, last_error, leased_at, lease_expires_at, locked_by,
+                   attempted_at, dedup_key
+            FROM external_command_results
+            WHERE id IN ({placeholders})
+            ORDER BY created_at ASC
+            """
+            await cur.execute(fetch_sql, tuple(ids))
+            rows = await cur.fetchall()
+        for row in rows:
+            row["result_json"] = json_loads(row["result_json"])
+        return rows
+
+    async def release_lease(self, result_id: int) -> None:
+        sql = """
+        UPDATE external_command_results
+        SET leased_at = NULL, lease_expires_at = NULL, locked_by = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (result_id,))
 
+    async def mark_processed(self, result_id: int) -> None:
+        async with self.pool.acquire() as conn:
+            await self.mark_processed_on_connection(conn, result_id)
+
+    async def mark_processed_on_connection(self, conn, result_id: int) -> None:
+        sql = """
+        UPDATE external_command_results
+        SET status = 'PROCESSED',
+            processed_at = NOW(6),
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL,
+            last_error = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with conn.cursor() as cur:
+            await cur.execute(sql, (result_id,))
+
     async def mark_failed(self, result_id: int, error: str) -> None:
-        sql = "UPDATE external_command_results SET status = 'FAILED', last_error = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        sql = """
+        UPDATE external_command_results
+        SET status = 'FAILED',
+            last_error = %s,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (error, result_id))
 
     async def mark_retryable(self, result_id: int, error: str) -> None:
-        sql = "UPDATE external_command_results SET status = 'RETRYABLE', last_error = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        sql = """
+        UPDATE external_command_results
+        SET status = 'RETRYABLE',
+            last_error = %s,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (error, result_id))
+
+    async def mark_processing_failed(self, result_id: int, error: str, max_retries: int = 3) -> None:
+        sql = """
+        UPDATE external_command_results
+        SET retry_count = retry_count + 1,
+            status = CASE WHEN retry_count + 1 >= %s THEN 'FAILED' ELSE 'RETRYABLE' END,
+            last_error = %s,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (max_retries, error, result_id))
+
+    async def recover_expired_leases(self) -> int:
+        sql = """
+        UPDATE external_command_results
+        SET leased_at = NULL, lease_expires_at = NULL, locked_by = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE status IN ('PENDING', 'RETRYABLE')
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < NOW(6)
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, ())
+                return cur.rowcount
+
+
+class ExternalResultTransactionRepository:
+    def __init__(
+        self,
+        pool,
+        conversation_repository: ConversationRepository | None = None,
+        outbound_repository: OutboundMessageRepository | None = None,
+        external_command_repository: ExternalCommandRepository | None = None,
+        result_repository: ExternalCommandResultRepository | None = None,
+    ) -> None:
+        self.pool = pool
+        self.conversation_repository = conversation_repository or ConversationRepository(pool)
+        self.outbound_repository = outbound_repository or OutboundMessageRepository(pool)
+        self.external_command_repository = external_command_repository or ExternalCommandRepository(pool)
+        self.result_repository = result_repository or ExternalCommandResultRepository(pool)
+
+    async def process_result_transactionally(
+        self,
+        result: dict,
+        graph_state: dict,
+        outbound_messages: list[dict],
+        external_commands: list[dict] | None = None,
+    ) -> dict:
+        external_commands = external_commands or []
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                conversation = await self.conversation_repository.get_or_create_on_connection(
+                    conn,
+                    chat_id=result["chat_id"],
+                    thread_id=result.get("thread_id"),
+                )
+                await self.conversation_repository.update_workflow_state_on_connection(
+                    conn,
+                    conversation["conversation_id"],
+                    graph_state,
+                )
+
+                outbound_inserts = []
+                for message in outbound_messages:
+                    message["conversation_id"] = conversation["conversation_id"]
+                    outbound_inserts.append(await self.outbound_repository.insert_idempotent_on_connection(conn, message))
+
+                external_command_inserts = []
+                for command in external_commands:
+                    command["conversation_id"] = conversation["conversation_id"]
+                    external_command_inserts.append(
+                        await self.external_command_repository.insert_idempotent_on_connection(conn, command)
+                    )
+
+                await self.result_repository.mark_processed_on_connection(conn, result["id"])
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return {
+            "conversation": conversation,
+            "outbound_inserts": outbound_inserts,
+            "external_command_inserts": external_command_inserts,
+        }
 
 
 def json_dumps(payload: dict) -> str:

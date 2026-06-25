@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import json
+import os
+import socket
 
 from app.core.settings import Settings
 from app.db.mysql import create_pool
@@ -75,42 +77,48 @@ async def process_pending_commands(
     limit: int = 20,
     dry_run: bool = True,
     emit_result: bool = False,
+    worker_id: str | None = None,
+    lease_seconds: int = 60,
+    max_retries: int = 3,
 ) -> list[dict]:
     if not dry_run:
         raise ValueError("external_command_worker currently supports --dry-run only")
     if emit_result and result_repository is None:
         raise ValueError("result_repository is required when emit_result=True")
 
-    commands = await repository.fetch_pending(limit=limit)
+    worker_id = worker_id or default_worker_id()
+    commands = await repository.lease_pending(limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
     results = []
     for command in commands:
         command_type = command["command_type"]
-        if command_type not in SUPPORTED_COMMAND_TYPES:
-            await repository.mark_failed(command["id"], f"unsupported command_type: {command_type}")
-            results.append({"id": command["id"], "command_type": command_type, "status": "FAILED"})
-            continue
-        print(json.dumps({"dry_run": True, "command": command}, ensure_ascii=False, default=str))
-        result_insert = None
-        if emit_result:
-            result_type, result_json = MOCK_RESULT_BY_COMMAND_TYPE[command_type]
-            result_insert = await result_repository.insert_idempotent(
-                {
-                    "external_command_id": command["id"],
-                    "tenant_id": command.get("tenant_id") or "default",
-                    "conversation_id": command["conversation_id"],
-                    "chat_id": command["chat_id"],
-                    "thread_id": command.get("thread_id"),
-                    "inbound_event_id": command.get("inbound_event_id"),
-                    "command_type": command_type,
-                    "result_type": result_type,
-                    "result_json": result_json,
-                }
-            )
-        await repository.mark_dry_run_done(command["id"])
-        item = {"id": command["id"], "command_type": command_type, "status": "DRY_RUN_DONE"}
-        if emit_result:
-            item["result_insert"] = result_insert
-        results.append(item)
+        try:
+            if command_type not in SUPPORTED_COMMAND_TYPES:
+                raise ValueError(f"unsupported command_type: {command_type}")
+            print(json.dumps({"dry_run": True, "command": command}, ensure_ascii=False, default=str))
+            result_insert = None
+            if emit_result:
+                result_type, result_json = MOCK_RESULT_BY_COMMAND_TYPE[command_type]
+                result_insert = await result_repository.insert_idempotent(
+                    {
+                        "external_command_id": command["id"],
+                        "tenant_id": command.get("tenant_id") or "default",
+                        "conversation_id": command["conversation_id"],
+                        "chat_id": command["chat_id"],
+                        "thread_id": command.get("thread_id"),
+                        "inbound_event_id": command.get("inbound_event_id"),
+                        "command_type": command_type,
+                        "result_type": result_type,
+                        "result_json": result_json,
+                    }
+                )
+            await repository.mark_dry_run_done(command["id"])
+            item = {"id": command["id"], "command_type": command_type, "status": "DRY_RUN_DONE"}
+            if emit_result:
+                item["result_insert"] = result_insert
+            results.append(item)
+        except Exception as exc:
+            await repository.mark_processing_failed(command["id"], str(exc), max_retries=max_retries)
+            results.append({"id": command["id"], "command_type": command_type, "status": "FAILED", "error": str(exc)})
     return results
 
 
@@ -120,10 +128,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=20, help="Maximum external commands to process.")
     parser.add_argument("--dry-run", action="store_true", help="Do not call real external systems.")
     parser.add_argument("--emit-result", action="store_true", help="Emit mock external_command_results in dry-run mode.")
+    parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
+    parser.add_argument("--lease-seconds", type=int, default=60, help="Seconds before a queue lease expires.")
+    parser.add_argument("--max-retries", type=int, default=3, help="Maximum processing attempts before FAILED.")
     return parser
 
 
-async def run_once(limit: int, dry_run: bool, emit_result: bool = False) -> dict:
+def default_worker_id() -> str:
+    return f"external-command-worker-{socket.gethostname()}-{os.getpid()}"
+
+
+async def run_once(
+    limit: int,
+    dry_run: bool,
+    emit_result: bool = False,
+    worker_id: str | None = None,
+    lease_seconds: int = 60,
+    max_retries: int = 3,
+) -> dict:
     settings = Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
@@ -138,6 +160,9 @@ async def run_once(limit: int, dry_run: bool, emit_result: bool = False) -> dict
             limit=limit,
             dry_run=dry_run,
             emit_result=emit_result,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            max_retries=max_retries,
         )
         return {
             "worker": "external_command_worker",
@@ -156,7 +181,16 @@ async def run_once(limit: int, dry_run: bool, emit_result: bool = False) -> dict
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    result = asyncio.run(run_once(limit=args.limit, dry_run=args.dry_run, emit_result=args.emit_result))
+    result = asyncio.run(
+        run_once(
+            limit=args.limit,
+            dry_run=args.dry_run,
+            emit_result=args.emit_result,
+            worker_id=args.worker_id,
+            lease_seconds=args.lease_seconds,
+            max_retries=args.max_retries,
+        )
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

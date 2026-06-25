@@ -160,6 +160,8 @@ def human_handoff_node(state: GraphState) -> GraphState:
     return {
         **state,
         "status": "HANDOFF_REQUESTED",
+        "active_workflow": "human_handoff",
+        "workflow_stage": "handoff_requested",
         "response_text": "我会为你转接真人客服继续协助。",
         "commands": [{"type": CommandType.HUMAN_HANDOFF_REQUESTED, "payload": {"reason": "explicit_human_request"}}],
     }
