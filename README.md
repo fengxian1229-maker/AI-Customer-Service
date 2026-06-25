@@ -8,7 +8,7 @@ Current scope:
 - Poll LiveChat Agent Chat API for allowed groups.
 - Normalize customer `message` and `file` events.
 - Store events in MySQL `inbound_events`.
-- Consume inbound events into `conversation_states` and `outbound_messages`.
+- Consume inbound events into `conversation_states`, `conversation_messages`, and LangGraph.
 - Send pending text replies through LiveChat `send_event`.
 
 Ingress Direction
@@ -23,6 +23,19 @@ The planned ingress stages are:
 - Production stage: webhook ingress.
 
 All ingress implementations must normalize into the same `inbound_events` structure through the shared ingress contract. The downstream path starts at `GatewayConsumer`, so `GatewayConsumer -> conversation_states / outbound_messages / external_commands -> workers` must not change when the ingress source changes.
+
+Gateway processing now uses this main path:
+
+```text
+inbound_events
+  -> gateway_consumer
+  -> conversation_states
+  -> conversation_messages
+  -> LangGraph with config.thread_id = conversation_id
+  -> outbound_messages / external_commands
+```
+
+P3-A has introduced the LangGraph checkpointer injection boundary and per-conversation thread config. Durable checkpoint storage plus interrupt/resume are later work.
 
 Current receiver boundaries:
 

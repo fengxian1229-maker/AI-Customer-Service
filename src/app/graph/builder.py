@@ -16,7 +16,7 @@ from app.graph.router import route_condition
 from app.graph.state import GraphState
 
 
-def build_workflow_graph():
+def build_workflow_graph(checkpointer=None):
     graph = StateGraph(GraphState)
     graph.add_node("rewrite_question_node", rewrite_question_node)
     graph.add_node("signal_judgement_node", signal_judgement_node)
@@ -47,4 +47,6 @@ def build_workflow_graph():
         graph.add_edge(node, "command_planner_node")
     graph.add_edge("command_planner_node", "persist_state_node")
     graph.add_edge("persist_state_node", END)
+    if checkpointer is not None:
+        return graph.compile(checkpointer=checkpointer)
     return graph.compile()

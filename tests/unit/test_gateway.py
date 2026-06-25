@@ -161,6 +161,38 @@ def test_gateway_splits_livechat_outbox_and_external_commands():
     assert result["external_commands"][0]["command_type"] == "telegram.send_case_card"
 
 
+class RecordingGraph:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def invoke(self, state: dict, config=None) -> dict:
+        self.calls.append((state, config))
+        return {
+            **state,
+            "response_text": "ok",
+            "commands": [{"type": "livechat.send_text", "payload": {"text": "ok"}}],
+        }
+
+
+def test_gateway_service_invokes_graph_with_conversation_thread_config():
+    graph = RecordingGraph()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=graph,
+    )
+
+    result = asyncio.run(service.process_event(11, make_inbound_event()))
+
+    state, config = graph.calls[0]
+    assert config == {"configurable": {"thread_id": "livechat:chat-1"}}
+    assert state["thread_id"] == "thread-1"
+    assert result["graph_state"]["thread_id"] == "thread-1"
+    assert result["outbound_message"]["payload_json"]["text"] == "ok"
+
+
 class FakeTransactionalGatewayRepository:
     def __init__(self, fail_on_outbox: bool = False) -> None:
         self.fail_on_outbox = fail_on_outbox
@@ -280,8 +312,8 @@ class ExplodingGraph:
         self.error = error
         self.calls = []
 
-    def invoke(self, state: dict) -> dict:
-        self.calls.append(state)
+    def invoke(self, state: dict, config=None) -> dict:
+        self.calls.append((state, config))
         raise self.error
 
 
@@ -319,6 +351,7 @@ def test_gateway_service_does_not_persist_side_effects_when_graph_invoke_fails()
     assert graph_error_repository.inserted[0]["error_type"] == "RuntimeError"
     assert graph_error_repository.inserted[0]["error_message"] == "graph exploded"
     assert graph_error_repository.inserted[0]["retryable"] == 0
+    assert graph_error_repository.inserted[0]["graph_thread_id"] == "livechat:chat-1"
     assert graph_error_repository.inserted[0]["state_snapshot"]["conversation_id"] == "livechat:chat-1"
     assert graph_error_repository.inserted[0]["state_snapshot"]["raw_user_input"] == "mi deposito no llegó"
 

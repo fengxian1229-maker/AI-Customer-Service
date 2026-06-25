@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. Current focus is P1 main-chain hardening around GatewayConsumer / GatewayService / LangGraph failure boundaries.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -35,9 +35,9 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-P1-B and later:
-- add retry handling for `graph_run_errors` only after main graph failure boundaries are stable
-- consider LangGraph checkpointer later; do not add it before failure semantics are agreed
+P3-B and later:
+- design durable checkpoint storage separately before adding a MySQL checkpoint store
+- add interrupt/resume only after checkpoint persistence semantics are agreed
 - keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change
 ```
 
@@ -45,6 +45,7 @@ P1-B and later:
 
 This session hardened the polling-first worker path without adding websocket or webhook ingress.
 P0 ingress contract is done, and P1-A added graph failure isolation with `graph_run_errors`.
+P2 added `conversation_messages` for conversation history, and P3-A added LangGraph `thread_id = conversation_id` config plus checkpointer injection support.
 
 Implemented:
 
@@ -59,6 +60,9 @@ Implemented:
 - `scripts/smoke_livechat_group23.sh`
 - `graph_run_errors` persistence for graph invoke failures before any outbox, external command, or conversation state side effect
 - `gateway_consumer` per-event failure isolation with `processed` / `failed` / `enqueued` summary output
+- `conversation_messages` for customer, assistant, and external summary history
+- LangGraph invoke config uses `configurable.thread_id = conversation_id`
+- `build_workflow_graph(checkpointer=...)` supports injecting a checkpointer without creating one internally
 
 Ingress staging remains:
 
@@ -71,7 +75,7 @@ TODO for later phases only:
 - WebSocket RTM receiver
 - Webhook receiver and signature verification
 - webhook registration docs
-- LangGraph checkpointer and resume
+- durable LangGraph checkpoint store, checkpoint management, and interrupt/resume
 - LangGraph, RAG, LLM automatic replies
 - Telegram full handoff loop
 - backend API fact lookup and withdrawal workflows

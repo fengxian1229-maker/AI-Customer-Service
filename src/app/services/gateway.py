@@ -42,6 +42,7 @@ class GatewayService:
         graph_run_error_repository=None,
         transactional_repository=None,
         workflow_graph=None,
+        checkpointer=None,
         recent_message_limit: int = 10,
     ) -> None:
         self.inbound_repository = inbound_repository
@@ -49,7 +50,7 @@ class GatewayService:
         self.outbound_repository = outbound_repository
         self.external_command_repository = external_command_repository
         self.transactional_repository = transactional_repository
-        self.workflow_graph = workflow_graph or build_workflow_graph()
+        self.workflow_graph = workflow_graph or build_workflow_graph(checkpointer=checkpointer)
         pool = getattr(transactional_repository, "pool", None)
         self.message_repository = (
             message_repository
@@ -139,13 +140,18 @@ class GatewayService:
         recent_messages: list[dict],
     ) -> dict:
         graph_state = build_graph_state_from_event(event, conversation, recent_messages=recent_messages)
+        graph_thread_id = conversation["conversation_id"]
         try:
-            return self.workflow_graph.invoke(graph_state)
+            return self.workflow_graph.invoke(
+                graph_state,
+                config={"configurable": {"thread_id": graph_thread_id}},
+            )
         except Exception as exc:
             await self._record_graph_run_error(
                 inbound_event_id=inbound_event_id,
                 conversation=conversation,
                 graph_state=graph_state,
+                graph_thread_id=graph_thread_id,
                 error=exc,
             )
             raise
@@ -163,6 +169,7 @@ class GatewayService:
         inbound_event_id: int,
         conversation: dict,
         graph_state: dict,
+        graph_thread_id: str,
         error: Exception,
     ) -> None:
         if not self.graph_run_error_repository:
@@ -171,7 +178,7 @@ class GatewayService:
             {
                 "conversation_id": conversation.get("conversation_id") or graph_state.get("conversation_id"),
                 "inbound_event_id": inbound_event_id,
-                "graph_thread_id": graph_state.get("thread_id"),
+                "graph_thread_id": graph_thread_id,
                 "node_name": None,
                 "error_type": type(error).__name__,
                 "error_message": str(error),
