@@ -14,7 +14,11 @@ from app.workflows.sop_handlers import run_sop
 from app.workflows.waiting_backend_classifier import handle_waiting_backend
 
 
-def build_graph_state_from_event(event: InboundEvent, conversation: dict[str, Any]) -> GraphState:
+def build_graph_state_from_event(
+    event: InboundEvent,
+    conversation: dict[str, Any],
+    recent_messages: list[dict[str, Any]] | None = None,
+) -> GraphState:
     payload = event.payload_json or {}
     raw_input = _extract_text(payload)
     return {
@@ -34,6 +38,7 @@ def build_graph_state_from_event(event: InboundEvent, conversation: dict[str, An
         "signal_result": None,
         "intent_result": None,
         "route": None,
+        "recent_messages": recent_messages or [],
         "response_text": None,
         "commands": [],
         "errors": [],

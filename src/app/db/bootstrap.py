@@ -20,6 +20,7 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
             await ensure_external_command_lease_compat(cur)
             await ensure_external_command_result_lease_compat(cur)
             await ensure_graph_run_errors_compat(cur)
+            await ensure_conversation_messages_compat(cur)
 
 
 async def ensure_inbound_events_compat(cur) -> None:
@@ -138,6 +139,55 @@ async def ensure_graph_run_errors_compat(cur) -> None:
             ),
             "idx_graph_run_errors_retryable": (
                 "CREATE INDEX idx_graph_run_errors_retryable ON graph_run_errors (retryable, created_at)"
+            ),
+        },
+    )
+
+
+async def ensure_conversation_messages_compat(cur) -> None:
+    await ensure_columns(
+        cur,
+        "conversation_messages",
+        {
+            "tenant_id": "ALTER TABLE conversation_messages ADD COLUMN tenant_id VARCHAR(128) NOT NULL DEFAULT 'default'",
+            "channel_type": "ALTER TABLE conversation_messages ADD COLUMN channel_type VARCHAR(64) NOT NULL DEFAULT 'livechat'",
+            "chat_id": "ALTER TABLE conversation_messages ADD COLUMN chat_id VARCHAR(128) NULL",
+            "thread_id": "ALTER TABLE conversation_messages ADD COLUMN thread_id VARCHAR(128) NULL",
+            "outbound_message_id": "ALTER TABLE conversation_messages ADD COLUMN outbound_message_id BIGINT UNSIGNED NULL",
+            "external_command_result_id": "ALTER TABLE conversation_messages ADD COLUMN external_command_result_id BIGINT UNSIGNED NULL",
+            "text_content": "ALTER TABLE conversation_messages ADD COLUMN text_content TEXT NULL",
+            "attachment_refs": "ALTER TABLE conversation_messages ADD COLUMN attachment_refs JSON NULL",
+            "source": "ALTER TABLE conversation_messages ADD COLUMN source VARCHAR(64) NOT NULL DEFAULT 'inbound_event'",
+            "occurred_at": "ALTER TABLE conversation_messages ADD COLUMN occurred_at DATETIME(6) NULL",
+            "created_at": (
+                "ALTER TABLE conversation_messages "
+                "ADD COLUMN created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"
+            ),
+        },
+    )
+    await ensure_indexes(
+        cur,
+        "conversation_messages",
+        {
+            "uk_conversation_messages_inbound": (
+                "CREATE UNIQUE INDEX uk_conversation_messages_inbound "
+                "ON conversation_messages (inbound_event_id, sender_role, message_type)"
+            ),
+            "uk_conversation_messages_outbound": (
+                "CREATE UNIQUE INDEX uk_conversation_messages_outbound "
+                "ON conversation_messages (outbound_message_id)"
+            ),
+            "uk_conversation_messages_external_result": (
+                "CREATE UNIQUE INDEX uk_conversation_messages_external_result "
+                "ON conversation_messages (external_command_result_id, sender_role, message_type)"
+            ),
+            "idx_conversation_messages_conversation_created": (
+                "CREATE INDEX idx_conversation_messages_conversation_created "
+                "ON conversation_messages (conversation_id, created_at, id)"
+            ),
+            "idx_conversation_messages_chat_thread_created": (
+                "CREATE INDEX idx_conversation_messages_chat_thread_created "
+                "ON conversation_messages (chat_id, thread_id, created_at)"
             ),
         },
     )

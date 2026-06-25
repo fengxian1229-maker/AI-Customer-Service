@@ -37,6 +37,7 @@ def test_load_sql_files_in_order():
             "006_external_command_results.sql",
             "007_add_worker_lease_fields.sql",
             "008_graph_run_errors.sql",
+            "009_conversation_messages.sql",
         ]
 
 
@@ -95,6 +96,20 @@ def test_graph_run_errors_schema_has_required_indexes():
     assert "KEY idx_graph_run_errors_conversation_created (conversation_id, created_at)" in sql
     assert "KEY idx_graph_run_errors_inbound_event (inbound_event_id)" in sql
     assert "KEY idx_graph_run_errors_retryable (retryable, created_at)" in sql
+
+
+def test_conversation_messages_schema_has_required_indexes():
+    from pathlib import Path
+
+    sql = Path("sql/009_conversation_messages.sql").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS conversation_messages" in sql
+    assert "attachment_refs JSON NULL" in sql
+    assert "UNIQUE KEY uk_conversation_messages_inbound" in sql
+    assert "UNIQUE KEY uk_conversation_messages_outbound" in sql
+    assert "UNIQUE KEY uk_conversation_messages_external_result" in sql
+    assert "KEY idx_conversation_messages_conversation_created" in sql
+    assert "KEY idx_conversation_messages_chat_thread_created" in sql
 
 
 def test_bootstrap_adds_missing_workflow_stage_for_mysql():
@@ -320,3 +335,98 @@ def test_graph_run_errors_bootstrap_keeps_existing_sqlite_columns_and_indexes():
 
     assert not any(sql.startswith("ALTER TABLE graph_run_errors ADD COLUMN") for sql in cursor.executed)
     assert not any(sql.startswith("CREATE INDEX") for sql in cursor.executed)
+
+
+def test_conversation_messages_bootstrap_adds_missing_mysql_indexes_only_once():
+    import asyncio
+
+    from app.db.bootstrap import ensure_conversation_messages_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+            self.phase = "columns"
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+            if sql == "SHOW INDEX FROM conversation_messages":
+                self.phase = "indexes"
+
+        async def fetchall(self):
+            if self.phase == "indexes":
+                return [("conversation_messages", 0, "uk_conversation_messages_inbound")]
+            return [
+                ("id",),
+                ("conversation_id",),
+                ("tenant_id",),
+                ("channel_type",),
+                ("inbound_event_id",),
+                ("sender_role",),
+                ("message_type",),
+                ("attachment_refs",),
+                ("source",),
+                ("created_at",),
+            ]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_conversation_messages_compat(cursor))
+
+    assert any("uk_conversation_messages_outbound" in sql for sql in cursor.executed)
+    assert any("uk_conversation_messages_external_result" in sql for sql in cursor.executed)
+    assert any("idx_conversation_messages_conversation_created" in sql for sql in cursor.executed)
+    assert any("idx_conversation_messages_chat_thread_created" in sql for sql in cursor.executed)
+    assert not any(sql == "ALTER TABLE conversation_messages ADD COLUMN attachment_refs JSON NULL" for sql in cursor.executed)
+
+
+def test_conversation_messages_bootstrap_keeps_existing_sqlite_columns_and_indexes():
+    import asyncio
+
+    from app.db.bootstrap import ensure_conversation_messages_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+            self.phase = "columns"
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+            if sql.startswith("SHOW"):
+                raise RuntimeError("sqlite")
+            if sql.startswith("PRAGMA index_list"):
+                self.phase = "indexes"
+
+        async def fetchall(self):
+            if self.phase == "indexes":
+                return [
+                    (0, "uk_conversation_messages_inbound"),
+                    (1, "uk_conversation_messages_outbound"),
+                    (2, "uk_conversation_messages_external_result"),
+                    (3, "idx_conversation_messages_conversation_created"),
+                    (4, "idx_conversation_messages_chat_thread_created"),
+                ]
+            return [
+                (0, "conversation_id"),
+                (1, "tenant_id"),
+                (2, "channel_type"),
+                (3, "chat_id"),
+                (4, "thread_id"),
+                (5, "inbound_event_id"),
+                (6, "outbound_message_id"),
+                (7, "external_command_result_id"),
+                (8, "sender_role"),
+                (9, "message_type"),
+                (10, "text_content"),
+                (11, "attachment_refs"),
+                (12, "source"),
+                (13, "occurred_at"),
+                (14, "created_at"),
+            ]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_conversation_messages_compat(cursor))
+
+    assert not any(sql.startswith("ALTER TABLE conversation_messages ADD COLUMN") for sql in cursor.executed)
+    assert not any(sql.startswith("CREATE INDEX") for sql in cursor.executed)
+    assert not any("CREATE UNIQUE INDEX" in sql for sql in cursor.executed)

@@ -46,8 +46,15 @@ class FakeTransactionRepository:
         self.outbound_repository = outbound_repository
         self.calls = []
 
-    async def process_result_transactionally(self, result: dict, graph_state: dict, outbound_messages: list[dict], external_commands=None):
-        self.calls.append((result, graph_state, outbound_messages, external_commands or []))
+    async def process_result_transactionally(
+        self,
+        result: dict,
+        graph_state: dict,
+        outbound_messages: list[dict],
+        external_commands=None,
+        summary_message=None,
+    ):
+        self.calls.append((result, graph_state, outbound_messages, external_commands or [], summary_message))
         await self.conversation_repository.update_workflow_state(result["conversation_id"], graph_state)
         for message in outbound_messages:
             await self.outbound_repository.insert_idempotent(message)
@@ -263,6 +270,34 @@ def test_result_consumer_telegram_case_created_updates_case_id():
     assert conversation_repository.updated[0][1]["workflow_stage"] == "case_created"
     assert conversation_repository.updated[0][1]["slot_memory"]["telegram_case_id"] == "mock_case_001"
     assert "案件已建立" in outbound_repository.inserted[0]["payload_json"]["text"]
+
+
+def test_result_consumer_builds_telegram_external_summary_message():
+    from app.workers.external_result_consumer import build_result_handler
+
+    row = make_result("telegram.case.created") | {"result_json": {"case_id": "mock_case_001", "status": "created"}}
+
+    handler = build_result_handler(row)
+    summary = handler["summary_message"]
+
+    assert summary["sender_role"] == "telegram"
+    assert summary["message_type"] == "external_result"
+    assert summary["external_command_result_id"] == 7
+    assert "case_id=mock_case_001" in summary["text_content"]
+
+
+def test_result_consumer_builds_backend_external_summary_message():
+    from app.workers.external_result_consumer import build_result_handler
+
+    row = make_result("backend.query.result") | {"result_json": {"status": "success", "answer": "查询已完成"}}
+
+    handler = build_result_handler(row)
+    summary = handler["summary_message"]
+
+    assert summary["sender_role"] == "backend"
+    assert summary["message_type"] == "external_result"
+    assert summary["external_command_result_id"] == 7
+    assert "后台查询成功" in summary["text_content"]
 
 
 def test_result_consumer_telegram_case_created_without_case_id_fails():

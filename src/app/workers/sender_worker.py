@@ -6,7 +6,8 @@ from urllib import error as url_error
 from app.channels.livechat.sender_client import LiveChatApiError, LiveChatSenderClient
 from app.core.settings import Settings
 from app.db.mysql import create_pool
-from app.db.repositories import OutboundMessageRepository
+from app.db.repositories import ConversationMessageRepository, OutboundMessageRepository, SenderTransactionRepository
+from app.services.message_history import build_assistant_message_from_outbound
 
 
 CONFIG_FAILURE_STATUSES = {401, 403}
@@ -49,7 +50,13 @@ def classify_send_error(exc: Exception) -> dict:
     return {"status": "FAILED_UNKNOWN", "last_error": message, "retryable": False}
 
 
-async def process_pending_message(outbound_repository, sender_client, message: dict) -> dict:
+async def process_pending_message(
+    outbound_repository,
+    sender_client,
+    message: dict,
+    message_repository=None,
+    transaction_repository=None,
+) -> dict:
     payload = message["payload_json"]
     try:
         response = await sender_client.send_text(
@@ -69,7 +76,13 @@ async def process_pending_message(outbound_repository, sender_client, message: d
 
     result = classify_send_result(response)
     if result["status"] == "SENT":
-        await outbound_repository.mark_sent(message["id"])
+        assistant_message = build_assistant_message_from_outbound(message)
+        if transaction_repository:
+            await transaction_repository.mark_sent_with_message(message["id"], assistant_message)
+        else:
+            await outbound_repository.mark_sent(message["id"])
+            if message_repository:
+                await message_repository.insert_idempotent(assistant_message)
     else:
         await outbound_repository.mark_failed(
             message["id"],
@@ -82,9 +95,23 @@ async def process_pending_message(outbound_repository, sender_client, message: d
 
 async def process_next_batch(pool, sender_client, limit: int = 20) -> list[dict]:
     repository = OutboundMessageRepository(pool)
+    message_repository = ConversationMessageRepository(pool)
+    transaction_repository = SenderTransactionRepository(
+        pool,
+        outbound_repository=repository,
+        conversation_message_repository=message_repository,
+    )
     results = []
     for message in await repository.fetch_pending(limit=limit):
-        results.append(await process_pending_message(repository, sender_client, message))
+        results.append(
+            await process_pending_message(
+                repository,
+                sender_client,
+                message,
+                message_repository=message_repository,
+                transaction_repository=transaction_repository,
+            )
+        )
     return results
 
 

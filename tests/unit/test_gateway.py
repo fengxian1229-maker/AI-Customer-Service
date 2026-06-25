@@ -95,13 +95,32 @@ class FakeGraphRunErrorRepository:
         return len(self.inserted)
 
 
+class FakeConversationMessageRepository:
+    def __init__(self, recent_messages=None) -> None:
+        self.recent_messages = recent_messages or []
+        self.inserted = []
+        self.fetch_calls = []
+
+    async def fetch_recent(self, conversation_id: str, limit: int = 10) -> list[dict]:
+        self.fetch_calls.append((conversation_id, limit))
+        return list(self.recent_messages)
+
+    async def insert_idempotent(self, message: dict) -> dict:
+        self.inserted.append(message)
+        return {"inserted": True, "duplicate": False, "id": len(self.inserted)}
+
+
 def test_gateway_service_processes_message_created():
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository(
+        recent_messages=[{"sender_role": "assistant", "message_type": "text", "text_content": "history"}]
+    )
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
         conversation_repository=conversation_repository,
         outbound_repository=outbound_repository,
+        message_repository=message_repository,
     )
 
     result = asyncio.run(service.process_event(11, make_inbound_event()))
@@ -110,7 +129,12 @@ def test_gateway_service_processes_message_created():
     assert result["outbound_message"]["action_type"] == "send_event"
     assert result["outbound_message"]["payload_json"]["text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
+    assert result["graph_state"]["recent_messages"][0]["text_content"] == "history"
     assert conversation_repository.updated[0][1]["active_workflow"] == "deposit_missing"
+    assert message_repository.fetch_calls == [("livechat:chat-1", 10)]
+    assert message_repository.inserted[0]["sender_role"] == "customer"
+    assert message_repository.inserted[0]["message_type"] == "text"
+    assert message_repository.inserted[0]["inbound_event_id"] == 11
 
 
 def test_gateway_splits_livechat_outbox_and_external_commands():
@@ -144,16 +168,18 @@ class FakeTransactionalGatewayRepository:
         self.committed = False
         self.rolled_back = False
         self.conversation_repository = FakeConversationRepository()
+        self.message_repository = FakeConversationMessageRepository()
 
     async def process_event_transactionally(
         self,
         inbound_event_id: int,
         event: InboundEvent,
+        customer_message: dict | None,
         outbound_messages: list[dict],
         external_commands: list[dict],
         graph_state: dict | None = None,
     ) -> dict:
-        self.calls.append((inbound_event_id, event, outbound_messages, external_commands, graph_state))
+        self.calls.append((inbound_event_id, event, customer_message, outbound_messages, external_commands, graph_state))
         try:
             if self.fail_on_outbox:
                 raise RuntimeError("outbox insert failed")
@@ -184,8 +210,9 @@ def test_gateway_service_uses_transactional_repository_for_state_outbox_and_proc
     assert transactional.committed is True
     assert transactional.rolled_back is False
     assert transactional.calls[0][0] == 11
-    assert transactional.calls[0][2][0]["inbound_event_id"] == 11
-    assert transactional.calls[0][4]["intent_result"]["intent"] == "deposit_missing"
+    assert transactional.calls[0][2]["inbound_event_id"] == 11
+    assert transactional.calls[0][3][0]["inbound_event_id"] == 11
+    assert transactional.calls[0][5]["intent_result"]["intent"] == "deposit_missing"
     assert result["outbound_insert"] == {"inserted": True, "duplicate": False, "id": 1}
 
 
@@ -193,10 +220,12 @@ def test_gateway_service_file_received_updates_slot_memory():
     conversation_repository = FakeConversationRepository()
     conversation_repository.get_or_create = async_get_or_create_with_active_deposit
     outbound_repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository()
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
         conversation_repository=conversation_repository,
         outbound_repository=outbound_repository,
+        message_repository=message_repository,
     )
     event = make_inbound_event()
     event.standard_event_type = "FILE_RECEIVED"
@@ -213,6 +242,8 @@ def test_gateway_service_file_received_updates_slot_memory():
 
     assert result["graph_state"]["slot_memory"]["deposit_screenshot"] == "https://cdn.example/deposit.png"
     assert result["graph_state"]["active_workflow"] == "deposit_missing"
+    assert message_repository.inserted[0]["message_type"] == "file"
+    assert message_repository.inserted[0]["attachment_refs"][0]["url"] == "https://cdn.example/deposit.png"
 
 
 async def async_get_or_create_with_active_deposit(chat_id: str, thread_id: str | None = None) -> dict:
@@ -260,12 +291,14 @@ def test_gateway_service_does_not_persist_side_effects_when_graph_invoke_fails()
     outbound_repository = FakeOutboundRepository()
     external_repository = FakeExternalCommandRepository()
     graph_error_repository = FakeGraphRunErrorRepository()
+    message_repository = FakeConversationMessageRepository()
     service = GatewayService(
         inbound_repository=inbound_repository,
         conversation_repository=conversation_repository,
         outbound_repository=outbound_repository,
         external_command_repository=external_repository,
         graph_run_error_repository=graph_error_repository,
+        message_repository=message_repository,
         workflow_graph=ExplodingGraph(RuntimeError("graph exploded")),
     )
 
@@ -278,6 +311,7 @@ def test_gateway_service_does_not_persist_side_effects_when_graph_invoke_fails()
 
     assert inbound_repository.processed == []
     assert conversation_repository.updated == []
+    assert message_repository.inserted == []
     assert outbound_repository.inserted == []
     assert external_repository.inserted == []
     assert graph_error_repository.inserted[0]["conversation_id"] == "livechat:chat-1"

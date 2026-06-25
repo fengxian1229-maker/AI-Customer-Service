@@ -75,11 +75,27 @@ class FakeOutboundRepository:
         self.failures.append((outbound_message_id, status, error, retryable))
 
 
+class FakeConversationMessageRepository:
+    def __init__(self) -> None:
+        self.inserted = []
+
+    async def insert_idempotent(self, message: dict) -> dict:
+        self.inserted.append(message)
+        return {"inserted": True, "duplicate": False, "id": 1}
+
+
 def make_message() -> dict:
     return {
         "id": 7,
+        "tenant_id": "default",
+        "channel_type": "livechat",
+        "conversation_id": "livechat:chat-1",
+        "inbound_event_id": 11,
         "chat_id": "chat-1",
         "thread_id": "thread-1",
+        "action_type": "send_event",
+        "message_type": "text",
+        "status": "PENDING",
         "payload_json": {"text": "hello"},
     }
 
@@ -90,12 +106,16 @@ def test_process_pending_message_marks_success_with_event_id():
             return {"event_id": "event-1"}
 
     repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository()
 
-    result = asyncio.run(process_pending_message(repository, SenderClient(), make_message()))
+    result = asyncio.run(process_pending_message(repository, SenderClient(), make_message(), message_repository=message_repository))
 
     assert result["status"] == "SENT"
     assert repository.sent == [7]
     assert repository.failures == []
+    assert message_repository.inserted[0]["outbound_message_id"] == 7
+    assert message_repository.inserted[0]["sender_role"] == "assistant"
+    assert message_repository.inserted[0]["text_content"] == "hello"
 
 
 def test_process_pending_message_marks_retryable_failure():
@@ -104,12 +124,14 @@ def test_process_pending_message_marks_retryable_failure():
             raise TimeoutError("timed out")
 
     repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository()
 
-    result = asyncio.run(process_pending_message(repository, SenderClient(), make_message()))
+    result = asyncio.run(process_pending_message(repository, SenderClient(), make_message(), message_repository=message_repository))
 
     assert result["status"] == "RETRYABLE"
     assert repository.sent == []
     assert repository.failures == [(7, "RETRYABLE", "timed out", True)]
+    assert message_repository.inserted == []
 
 
 def test_livechat_auth_header_uses_account_and_token():

@@ -200,10 +200,14 @@ class OutboundMessageRepository:
 
     async def fetch_pending(self, limit: int = 20) -> list[dict]:
         sql = """
-        SELECT id, chat_id, thread_id, payload_json, status
-        FROM outbound_messages
+        SELECT m.id, COALESCE(c.tenant_id, 'default') AS tenant_id,
+               COALESCE(c.channel_type, 'livechat') AS channel_type,
+               m.conversation_id, m.inbound_event_id, m.chat_id, m.thread_id,
+               m.action_type, m.message_type, m.payload_json, m.status
+        FROM outbound_messages m
+        LEFT JOIN conversation_states c ON c.conversation_id = m.conversation_id
         WHERE status = 'PENDING'
-        ORDER BY id ASC
+        ORDER BY m.id ASC
         LIMIT %s
         """
         async with self.pool.acquire() as conn:
@@ -215,10 +219,13 @@ class OutboundMessageRepository:
         return rows
 
     async def mark_sent(self, outbound_message_id: int) -> None:
-        sql = "UPDATE outbound_messages SET status = 'SENT', sent_at = NOW(6), last_error = NULL WHERE id = %s"
         async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, (outbound_message_id,))
+            await self.mark_sent_on_connection(conn, outbound_message_id)
+
+    async def mark_sent_on_connection(self, conn, outbound_message_id: int) -> None:
+        sql = "UPDATE outbound_messages SET status = 'SENT', sent_at = NOW(6), last_error = NULL WHERE id = %s"
+        async with conn.cursor() as cur:
+            await cur.execute(sql, (outbound_message_id,))
 
     async def mark_failed(
         self,
@@ -668,6 +675,67 @@ class ExternalCommandResultRepository:
                 return cur.rowcount
 
 
+class ConversationMessageRepository:
+    def __init__(self, pool) -> None:
+        self.pool = pool
+
+    async def insert_idempotent(self, message: dict) -> dict:
+        async with self.pool.acquire() as conn:
+            return await self.insert_idempotent_on_connection(conn, message)
+
+    async def insert_idempotent_on_connection(self, conn, message: dict) -> dict:
+        sql = """
+        INSERT INTO conversation_messages (
+          conversation_id, tenant_id, channel_type, chat_id, thread_id,
+          inbound_event_id, outbound_message_id, external_command_result_id,
+          sender_role, message_type, text_content, attachment_refs, source, occurred_at
+        ) VALUES (
+          %s, %s, %s, %s, %s,
+          %s, %s, %s,
+          %s, %s, %s, CAST(%s AS JSON), %s, %s
+        )
+        ON DUPLICATE KEY UPDATE id = id
+        """
+        args = (
+            message["conversation_id"],
+            message.get("tenant_id") or "default",
+            message.get("channel_type") or "livechat",
+            message.get("chat_id"),
+            message.get("thread_id"),
+            message.get("inbound_event_id"),
+            message.get("outbound_message_id"),
+            message.get("external_command_result_id"),
+            message["sender_role"],
+            message.get("message_type") or "text",
+            message.get("text_content"),
+            json.dumps(message.get("attachment_refs") or [], ensure_ascii=False, separators=(",", ":")),
+            message["source"],
+            message.get("occurred_at"),
+        )
+        async with conn.cursor() as cur:
+            await cur.execute(sql, args)
+            inserted = cur.rowcount == 1
+            return {"inserted": inserted, "duplicate": not inserted, "id": cur.lastrowid if inserted else None}
+
+    async def fetch_recent(self, conversation_id: str, limit: int = 10) -> list[dict]:
+        sql = """
+        SELECT id, conversation_id, sender_role, message_type, text_content,
+               attachment_refs, source, created_at
+        FROM conversation_messages
+        WHERE conversation_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (conversation_id, limit))
+                rows = await cur.fetchall()
+        rows = list(reversed(rows))
+        for row in rows:
+            row["attachment_refs"] = json_loads(row.get("attachment_refs") or "[]")
+        return rows
+
+
 class GraphRunErrorRepository:
     def __init__(self, pool) -> None:
         self.pool = pool
@@ -743,12 +811,14 @@ class ExternalResultTransactionRepository:
         outbound_repository: OutboundMessageRepository | None = None,
         external_command_repository: ExternalCommandRepository | None = None,
         result_repository: ExternalCommandResultRepository | None = None,
+        conversation_message_repository: ConversationMessageRepository | None = None,
     ) -> None:
         self.pool = pool
         self.conversation_repository = conversation_repository or ConversationRepository(pool)
         self.outbound_repository = outbound_repository or OutboundMessageRepository(pool)
         self.external_command_repository = external_command_repository or ExternalCommandRepository(pool)
         self.result_repository = result_repository or ExternalCommandResultRepository(pool)
+        self.conversation_message_repository = conversation_message_repository or ConversationMessageRepository(pool)
 
     async def process_result_transactionally(
         self,
@@ -756,6 +826,7 @@ class ExternalResultTransactionRepository:
         graph_state: dict,
         outbound_messages: list[dict],
         external_commands: list[dict] | None = None,
+        summary_message: dict | None = None,
     ) -> dict:
         external_commands = external_commands or []
         async with self.pool.acquire() as conn:
@@ -766,6 +837,10 @@ class ExternalResultTransactionRepository:
                     chat_id=result["chat_id"],
                     thread_id=result.get("thread_id"),
                 )
+                message_insert = None
+                if summary_message is not None:
+                    summary_message["conversation_id"] = conversation["conversation_id"]
+                    message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(conn, summary_message)
                 await self.conversation_repository.update_workflow_state_on_connection(
                     conn,
                     conversation["conversation_id"],
@@ -791,9 +866,34 @@ class ExternalResultTransactionRepository:
                 raise
         return {
             "conversation": conversation,
+            "message_insert": message_insert,
             "outbound_inserts": outbound_inserts,
             "external_command_inserts": external_command_inserts,
         }
+
+
+class SenderTransactionRepository:
+    def __init__(
+        self,
+        pool,
+        outbound_repository: OutboundMessageRepository | None = None,
+        conversation_message_repository: ConversationMessageRepository | None = None,
+    ) -> None:
+        self.pool = pool
+        self.outbound_repository = outbound_repository or OutboundMessageRepository(pool)
+        self.conversation_message_repository = conversation_message_repository or ConversationMessageRepository(pool)
+
+    async def mark_sent_with_message(self, outbound_message_id: int, message_record: dict) -> dict:
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                await self.outbound_repository.mark_sent_on_connection(conn, outbound_message_id)
+                message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(conn, message_record)
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return {"message_insert": message_insert}
 
 
 def json_dumps(payload: dict) -> str:
@@ -839,17 +939,20 @@ class GatewayTransactionRepository:
         conversation_repository: ConversationRepository | None = None,
         outbound_repository: OutboundMessageRepository | None = None,
         external_command_repository: ExternalCommandRepository | None = None,
+        conversation_message_repository: ConversationMessageRepository | None = None,
     ) -> None:
         self.pool = pool
         self.inbound_repository = inbound_repository or InboundEventRepository(pool)
         self.conversation_repository = conversation_repository or ConversationRepository(pool)
         self.outbound_repository = outbound_repository or OutboundMessageRepository(pool)
         self.external_command_repository = external_command_repository or ExternalCommandRepository(pool)
+        self.conversation_message_repository = conversation_message_repository or ConversationMessageRepository(pool)
 
     async def process_event_transactionally(
         self,
         inbound_event_id: int,
         event: InboundEvent,
+        customer_message: dict | None,
         outbound_message: dict | list[dict] | None,
         external_commands: list[dict] | None = None,
         graph_state: dict | None = None,
@@ -868,6 +971,10 @@ class GatewayTransactionRepository:
                     chat_id=event.chat_id or "unknown",
                     thread_id=event.thread_id,
                 )
+                message_insert = None
+                if customer_message is not None:
+                    customer_message["conversation_id"] = conversation["conversation_id"]
+                    message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(conn, customer_message)
                 if graph_state is not None:
                     await self.conversation_repository.update_workflow_state_on_connection(
                         conn,
@@ -889,6 +996,7 @@ class GatewayTransactionRepository:
                 raise
         return {
             "conversation": conversation,
+            "message_insert": message_insert,
             "outbound_insert": outbound_inserts[0] if len(outbound_inserts) == 1 else None,
             "outbound_inserts": outbound_inserts,
             "external_command_inserts": external_command_inserts,

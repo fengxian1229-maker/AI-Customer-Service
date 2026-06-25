@@ -1,4 +1,5 @@
 from app.db.repositories import (
+    ConversationMessageRepository,
     ExternalCommandRepository,
     ExternalCommandResultRepository,
     ExternalResultTransactionRepository,
@@ -196,6 +197,37 @@ async def run_graph_run_error_insert(rowcount: int):
     return result, cursor
 
 
+def make_conversation_message(**overrides) -> dict:
+    base = {
+        "conversation_id": "livechat:chat-1",
+        "tenant_id": "default",
+        "channel_type": "livechat",
+        "chat_id": "chat-1",
+        "thread_id": "thread-1",
+        "inbound_event_id": 11,
+        "outbound_message_id": None,
+        "external_command_result_id": None,
+        "sender_role": "customer",
+        "message_type": "text",
+        "text_content": "hola",
+        "attachment_refs": [],
+        "source": "inbound_event",
+        "occurred_at": "2026-06-24 00:00:00.000000",
+    }
+    base.update(overrides)
+    return base
+
+
+async def run_conversation_message_insert(rowcount: int, message: dict | None = None):
+    cursor = FakeCursor(rowcount=rowcount)
+    cursor.lastrowid = 88
+    repository = ConversationMessageRepository(FakePool(cursor))
+
+    result = await repository.insert_idempotent(message or make_conversation_message())
+
+    return result, cursor
+
+
 def test_external_command_dedup_key_is_stable_for_payload_order():
     first = build_external_command_dedup_key(
         tenant_id="default",
@@ -249,6 +281,103 @@ def test_graph_run_error_insert_writes_json_snapshot():
     assert cursor.args[6] == 0
     assert cursor.args[7] == '{"conversation_id":"livechat:chat-1"}'
     assert result == 77
+
+
+def test_conversation_message_insert_idempotent_for_inbound_message():
+    import asyncio
+
+    result, cursor = asyncio.run(run_conversation_message_insert(rowcount=1))
+
+    assert "INSERT INTO conversation_messages" in cursor.sql
+    assert "ON DUPLICATE KEY UPDATE id = id" in cursor.sql
+    assert cursor.args[0] == "livechat:chat-1"
+    assert cursor.args[5] == 11
+    assert cursor.args[8] == "customer"
+    assert cursor.args[10] == "hola"
+    assert cursor.args[11] == "[]"
+    assert result == {"inserted": True, "duplicate": False, "id": 88}
+
+
+def test_conversation_message_insert_idempotent_reports_duplicate():
+    import asyncio
+
+    result, _cursor = asyncio.run(run_conversation_message_insert(rowcount=0))
+
+    assert result == {"inserted": False, "duplicate": True, "id": None}
+
+
+def test_conversation_message_insert_supports_outbound_and_external_idempotency_keys():
+    import asyncio
+
+    outbound_result, outbound_cursor = asyncio.run(
+        run_conversation_message_insert(
+            rowcount=1,
+            message=make_conversation_message(
+                inbound_event_id=None,
+                outbound_message_id=21,
+                sender_role="assistant",
+                source="sender_worker",
+            ),
+        )
+    )
+    external_result, external_cursor = asyncio.run(
+        run_conversation_message_insert(
+            rowcount=1,
+            message=make_conversation_message(
+                inbound_event_id=None,
+                external_command_result_id=31,
+                sender_role="backend",
+                message_type="external_result",
+                source="external_result_consumer",
+            ),
+        )
+    )
+
+    assert outbound_result["inserted"] is True
+    assert outbound_cursor.args[6] == 21
+    assert external_result["inserted"] is True
+    assert external_cursor.args[7] == 31
+    assert external_cursor.args[9] == "external_result"
+
+
+def test_conversation_message_fetch_recent_returns_oldest_first_after_limit():
+    import asyncio
+
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 3,
+                    "conversation_id": "livechat:chat-1",
+                    "sender_role": "assistant",
+                    "message_type": "text",
+                    "text_content": "third",
+                    "attachment_refs": '[{"url":"https://cdn.example/file.png"}]',
+                    "source": "sender_worker",
+                    "created_at": "2026-06-24 00:00:03.000000",
+                },
+                {
+                    "id": 2,
+                    "conversation_id": "livechat:chat-1",
+                    "sender_role": "customer",
+                    "message_type": "text",
+                    "text_content": "second",
+                    "attachment_refs": "[]",
+                    "source": "inbound_event",
+                    "created_at": "2026-06-24 00:00:02.000000",
+                },
+            ]
+
+    cursor = FetchCursor(rowcount=2)
+    repository = ConversationMessageRepository(FakePool(cursor))
+
+    rows = asyncio.run(repository.fetch_recent("livechat:chat-1", limit=2))
+
+    assert "FROM conversation_messages" in cursor.sql
+    assert "ORDER BY created_at DESC, id DESC" in cursor.sql
+    assert cursor.args == ("livechat:chat-1", 2)
+    assert [row["text_content"] for row in rows] == ["second", "third"]
+    assert rows[1]["attachment_refs"] == [{"url": "https://cdn.example/file.png"}]
 
 
 def test_external_command_fetch_pending_filters_pending_by_created_at():

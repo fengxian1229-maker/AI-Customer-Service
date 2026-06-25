@@ -1,10 +1,11 @@
+from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
 from app.graph.builder import build_workflow_graph
 from app.graph.nodes import build_graph_state_from_event
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
+from app.services.message_history import build_customer_message_from_inbound
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
 from app.workflows.command_contracts import CommandType
-from app.db.repositories import GraphRunErrorRepository
 
 
 EXTERNAL_COMMAND_TYPES = {
@@ -37,9 +38,11 @@ class GatewayService:
         conversation_repository=None,
         outbound_repository=None,
         external_command_repository=None,
+        message_repository=None,
         graph_run_error_repository=None,
         transactional_repository=None,
         workflow_graph=None,
+        recent_message_limit: int = 10,
     ) -> None:
         self.inbound_repository = inbound_repository
         self.conversation_repository = conversation_repository
@@ -48,18 +51,27 @@ class GatewayService:
         self.transactional_repository = transactional_repository
         self.workflow_graph = workflow_graph or build_workflow_graph()
         pool = getattr(transactional_repository, "pool", None)
+        self.message_repository = (
+            message_repository
+            or getattr(transactional_repository, "message_repository", None)
+            or (ConversationMessageRepository(pool) if pool else None)
+        )
         self.graph_run_error_repository = graph_run_error_repository or (GraphRunErrorRepository(pool) if pool else None)
+        self.recent_message_limit = recent_message_limit
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
         if self.transactional_repository:
             should_reply = should_enqueue_reply(event)
             conversation = await self._load_transactional_conversation(event)
-            graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation) if should_reply or event.standard_event_type == "FILE_RECEIVED" else None
+            recent_messages = await self._load_recent_messages(conversation)
+            graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation, recent_messages) if should_reply or event.standard_event_type == "FILE_RECEIVED" else None
+            customer_message = build_customer_message_from_inbound(event, conversation, inbound_event_id) if graph_state else None
             outbound_messages = self._build_outbound_messages(inbound_event_id, event, conversation["conversation_id"], graph_state)
             external_commands = self._build_external_commands(inbound_event_id, event, conversation, graph_state)
             result = await self.transactional_repository.process_event_transactionally(
                 inbound_event_id,
                 event,
+                customer_message,
                 outbound_messages,
                 external_commands,
                 graph_state,
@@ -74,6 +86,7 @@ class GatewayService:
                 "outbound_insert": result["outbound_insert"],
                 "outbound_inserts": result["outbound_inserts"],
                 "external_command_inserts": result["external_command_inserts"],
+                "message_insert": result.get("message_insert"),
             }
 
         conversation = await self.conversation_repository.get_or_create(
@@ -83,14 +96,19 @@ class GatewayService:
 
         graph_state = None
         outbound_messages = []
+        customer_message = None
         if should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED":
-            graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation)
+            recent_messages = await self._load_recent_messages(conversation)
+            graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation, recent_messages)
+            customer_message = build_customer_message_from_inbound(event, conversation, inbound_event_id)
             outbound_messages = self._build_outbound_messages(
                 inbound_event_id,
                 event,
                 conversation["conversation_id"],
                 graph_state,
             )
+            if self.message_repository and customer_message:
+                await self.message_repository.insert_idempotent(customer_message)
             if hasattr(self.conversation_repository, "update_workflow_state"):
                 await self.conversation_repository.update_workflow_state(conversation["conversation_id"], graph_state)
             for outbound_message in outbound_messages:
@@ -113,8 +131,14 @@ class GatewayService:
             "external_commands": external_commands,
         }
 
-    async def _run_graph_with_boundary(self, inbound_event_id: int, event: InboundEvent, conversation: dict) -> dict:
-        graph_state = build_graph_state_from_event(event, conversation)
+    async def _run_graph_with_boundary(
+        self,
+        inbound_event_id: int,
+        event: InboundEvent,
+        conversation: dict,
+        recent_messages: list[dict],
+    ) -> dict:
+        graph_state = build_graph_state_from_event(event, conversation, recent_messages=recent_messages)
         try:
             return self.workflow_graph.invoke(graph_state)
         except Exception as exc:
@@ -125,6 +149,14 @@ class GatewayService:
                 error=exc,
             )
             raise
+
+    async def _load_recent_messages(self, conversation: dict) -> list[dict]:
+        if not self.message_repository:
+            return []
+        return await self.message_repository.fetch_recent(
+            conversation["conversation_id"],
+            limit=self.recent_message_limit,
+        )
 
     async def _record_graph_run_error(
         self,

@@ -9,11 +9,13 @@ import time
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import (
+    ConversationMessageRepository,
     ConversationRepository,
     ExternalCommandResultRepository,
     ExternalResultTransactionRepository,
     OutboundMessageRepository,
 )
+from app.services.message_history import build_external_result_summary_message
 from app.services.outbox import build_text_outbox
 
 
@@ -68,6 +70,7 @@ async def process_pending_results(
             conversation_repository=conversation_repository,
             outbound_repository=outbound_repository,
             result_repository=result_repository,
+            conversation_message_repository=ConversationMessageRepository(result_repository.pool),
         )
     processed = []
     for row in rows:
@@ -86,6 +89,7 @@ async def process_pending_results(
                 graph_state=graph_state,
                 outbound_messages=[outbound],
                 external_commands=[],
+                summary_message=handler["summary_message"],
             )
             processed.append({"id": row["id"], "result_type": row["result_type"], "status": "PROCESSED"})
         except Exception as exc:
@@ -101,8 +105,10 @@ def build_result_handler(row: dict) -> dict:
         case_id = result_json.get("case_id")
         if not case_id:
             raise ValueError("telegram.case.created result missing case_id")
-        return {
+        resolved = {
             "text": "案件已建立，我们会继续跟进，请稍候。",
+            "summary_sender_role": "telegram",
+            "summary_text": f"案件已建立，case_id={case_id}",
             "graph_state": {
                 "status": "WAITING_EXTERNAL",
                 "active_workflow": None,
@@ -110,11 +116,15 @@ def build_result_handler(row: dict) -> dict:
                 "slot_memory": {"telegram_case_id": case_id},
             },
         }
+        resolved["summary_message"] = build_external_result_summary_message(row, resolved)
+        return resolved
     if result_type == "telegram.append_to_case.result":
         if result_json.get("status") not in {"appended", "success", "MOCKED"}:
             raise ValueError("telegram.append_to_case.result failed")
-        return {
+        resolved = {
             "text": result_json.get("message") or "补充资料已收到，我们会继续跟进，请稍候。",
+            "summary_sender_role": "telegram",
+            "summary_text": result_json.get("message") or "案件补充资料已追加。",
             "graph_state": {
                 "status": "WAITING_EXTERNAL",
                 "active_workflow": None,
@@ -122,11 +132,15 @@ def build_result_handler(row: dict) -> dict:
                 "slot_memory": {"telegram_append_status": result_json.get("status")},
             },
         }
+        resolved["summary_message"] = build_external_result_summary_message(row, resolved)
+        return resolved
     if result_type == "pending_reply.lookup.result":
         if result_json.get("status") != "found" or not result_json.get("reply_text"):
             raise ValueError("pending_reply.lookup.result not found")
-        return {
+        resolved = {
             "text": result_json["reply_text"],
+            "summary_sender_role": "system",
+            "summary_text": "pending reply 查询成功，已生成可回复摘要。",
             "graph_state": {
                 "status": "AI_ACTIVE",
                 "active_workflow": "pending_reply_lookup",
@@ -134,6 +148,8 @@ def build_result_handler(row: dict) -> dict:
                 "slot_memory": {"pending_reply_status": "found"},
             },
         }
+        resolved["summary_message"] = build_external_result_summary_message(row, resolved)
+        return resolved
     if result_type == "backend.query.result":
         if result_json.get("status") != "success":
             error_code = result_json.get("error_code") or "UNKNOWN"
@@ -142,8 +158,10 @@ def build_result_handler(row: dict) -> dict:
         answer = result_json.get("answer")
         if not answer:
             raise ValueError("backend.query.result missing answer")
-        return {
+        resolved = {
             "text": answer,
+            "summary_sender_role": "backend",
+            "summary_text": "后台查询成功，已生成可回复摘要。",
             "graph_state": {
                 "status": "AI_ACTIVE",
                 "active_workflow": None,
@@ -151,12 +169,16 @@ def build_result_handler(row: dict) -> dict:
                 "slot_memory": {"backend_query_status": "success"},
             },
         }
+        resolved["summary_message"] = build_external_result_summary_message(row, resolved)
+        return resolved
 
     handler = RESULT_HANDLERS.get(result_type)
     if handler is None:
         raise ValueError(f"unsupported result_type: {result_type}")
-    return {
+    resolved = {
         "text": handler["text"],
+        "summary_sender_role": _summary_sender_role_for_result_type(result_type),
+        "summary_text": handler["text"],
         "graph_state": {
             "status": handler.get("status") or "WAITING_EXTERNAL",
             "active_workflow": handler.get("active_workflow"),
@@ -164,6 +186,18 @@ def build_result_handler(row: dict) -> dict:
             "slot_memory": {},
         },
     }
+    resolved["summary_message"] = build_external_result_summary_message(row, resolved)
+    return resolved
+
+
+def _summary_sender_role_for_result_type(result_type: str) -> str:
+    if result_type.startswith("telegram."):
+        return "telegram"
+    if result_type.startswith("backend."):
+        return "backend"
+    if result_type.startswith("human_handoff."):
+        return "human"
+    return "system"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
