@@ -1,8 +1,10 @@
 from app.db.repositories import (
     ExternalCommandRepository,
+    ExternalCommandResultRepository,
     InboundEventRepository,
     OutboundMessageRepository,
     build_external_command_dedup_key,
+    build_external_command_result_dedup_key,
 )
 from app.schemas.events import InboundEvent
 
@@ -249,3 +251,120 @@ def test_external_command_mark_status_methods():
     assert failed_args == ("bad", 3)
     assert "SET status = 'RETRYABLE', retry_count = retry_count + 1, last_error = %s" in retryable_sql
     assert retryable_args == ("temporary", 4)
+
+
+def make_external_command_result() -> dict:
+    return {
+        "external_command_id": 55,
+        "tenant_id": "default",
+        "conversation_id": "livechat:chat-1",
+        "chat_id": "chat-1",
+        "thread_id": "thread-1",
+        "inbound_event_id": 11,
+        "command_type": "backend.query",
+        "result_type": "backend.query.mock_result",
+        "result_json": {"status": "MOCKED"},
+    }
+
+
+async def run_external_result_insert_idempotent(rowcount: int):
+    cursor = FakeCursor(rowcount=rowcount)
+    cursor.lastrowid = 456
+    repository = ExternalCommandResultRepository(FakePool(cursor))
+
+    result = await repository.insert_idempotent(make_external_command_result())
+
+    return result, cursor
+
+
+def test_external_command_result_dedup_key_is_stable_for_payload_order():
+    first = build_external_command_result_dedup_key(
+        tenant_id="default",
+        conversation_id="livechat:chat-1",
+        external_command_id=55,
+        command_type="backend.query",
+        result_type="backend.query.mock_result",
+        result={"b": 2, "a": 1},
+    )
+    second = build_external_command_result_dedup_key(
+        tenant_id="default",
+        conversation_id="livechat:chat-1",
+        external_command_id=55,
+        command_type="backend.query",
+        result_type="backend.query.mock_result",
+        result={"a": 1, "b": 2},
+    )
+
+    assert first == second
+    assert first.startswith("default:livechat:chat-1:55:backend.query:backend.query.mock_result:")
+
+
+def test_external_command_result_insert_idempotent_uses_dedup_key():
+    import asyncio
+
+    result, cursor = asyncio.run(run_external_result_insert_idempotent(rowcount=1))
+
+    assert "INSERT INTO external_command_results" in cursor.sql
+    assert "ON DUPLICATE KEY UPDATE id = id" in cursor.sql
+    assert cursor.args[6] == "backend.query"
+    assert cursor.args[12].startswith("default:livechat:chat-1:55:backend.query:backend.query.mock_result:")
+    assert result == {"inserted": True, "duplicate": False, "id": 456}
+
+
+def test_external_command_result_insert_idempotent_reports_duplicate():
+    import asyncio
+
+    result, _cursor = asyncio.run(run_external_result_insert_idempotent(rowcount=0))
+
+    assert result == {"inserted": False, "duplicate": True, "id": None}
+
+
+def test_external_command_result_fetch_pending_filters_pending_by_created_at():
+    import asyncio
+
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 1,
+                    "result_json": '{"ok": true}',
+                    "status": "PENDING",
+                }
+            ]
+
+    cursor = FetchCursor(rowcount=1)
+    repository = ExternalCommandResultRepository(FakePool(cursor))
+
+    rows = asyncio.run(repository.fetch_pending(limit=5))
+
+    assert "FROM external_command_results" in cursor.sql
+    assert "WHERE status = 'PENDING'" in cursor.sql
+    assert "ORDER BY created_at ASC" in cursor.sql
+    assert cursor.args == (5,)
+    assert rows[0]["result_json"] == {"ok": True}
+
+
+def test_external_command_result_mark_status_methods():
+    import asyncio
+
+    async def run_marks():
+        cursor = FakeCursor(rowcount=1)
+        repository = ExternalCommandResultRepository(FakePool(cursor))
+
+        await repository.mark_processed(1)
+        processed_sql = cursor.sql
+        await repository.mark_failed(2, "bad")
+        failed_sql = cursor.sql
+        failed_args = cursor.args
+        await repository.mark_retryable(3, "temporary")
+        retryable_sql = cursor.sql
+        retryable_args = cursor.args
+        return processed_sql, failed_sql, failed_args, retryable_sql, retryable_args
+
+    processed_sql, failed_sql, failed_args, retryable_sql, retryable_args = asyncio.run(run_marks())
+
+    assert "SET status = 'PROCESSED', processed_at =" in processed_sql
+    assert "SET status = 'FAILED', last_error = %s" in failed_sql
+    assert failed_args == ("bad", 2)
+    assert "SET status = 'RETRYABLE', last_error = %s" in retryable_sql
+    assert retryable_args == ("temporary", 3)

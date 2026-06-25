@@ -1,0 +1,9 @@
+{
+  "input_messages": ["quiero hablar con un agente humano"],
+  "expected_intent": "human_handoff",
+  "expected_active_workflow": "human_handoff",
+  "expected_workflow_stage": "handoff_requested",
+  "expected_required_slots": [],
+  "expected_outbound_command_types": ["livechat.send_text"],
+  "expected_external_command_types": ["human_handoff.requested"]
+}

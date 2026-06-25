@@ -1,0 +1,9 @@
+{
+  "input_messages": ["mi deposito no llegó"],
+  "expected_intent": "deposit_missing",
+  "expected_active_workflow": "deposit_missing",
+  "expected_workflow_stage": "collecting_slots",
+  "expected_required_slots": ["account_or_phone", "deposit_screenshot"],
+  "expected_outbound_command_types": ["livechat.send_text"],
+  "expected_external_command_types": []
+}

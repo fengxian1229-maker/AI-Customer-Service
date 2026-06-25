@@ -1,0 +1,9 @@
+{
+  "input_messages": ["no puedo retirar por rollover"],
+  "expected_intent": "withdrawal_blocked_or_rollover",
+  "expected_active_workflow": "withdrawal_blocked_or_rollover",
+  "expected_workflow_stage": "collecting_slots",
+  "expected_required_slots": ["account_or_phone"],
+  "expected_outbound_command_types": ["livechat.send_text"],
+  "expected_external_command_types": []
+}

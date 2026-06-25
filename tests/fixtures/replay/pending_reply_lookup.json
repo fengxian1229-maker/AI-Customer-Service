@@ -1,0 +1,9 @@
+{
+  "input_messages": ["quiero consultar mi caso anterior"],
+  "expected_intent": "pending_reply_lookup",
+  "expected_active_workflow": "pending_reply_lookup",
+  "expected_workflow_stage": "collecting_slots",
+  "expected_required_slots": ["pending_reply_identity"],
+  "expected_outbound_command_types": ["livechat.send_text"],
+  "expected_external_command_types": []
+}

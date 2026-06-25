@@ -34,6 +34,7 @@ def test_load_sql_files_in_order():
         "003_outbound_messages.sql",
         "004_add_workflow_stage.sql",
         "005_external_commands.sql",
+        "006_external_command_results.sql",
     ]
 
 
@@ -63,6 +64,19 @@ def test_external_commands_schema_has_required_indexes():
     assert "KEY idx_external_commands_status_created (status, created_at)" in sql
     assert "KEY idx_external_commands_conversation (conversation_id)" in sql
     assert "KEY idx_external_commands_inbound_event (inbound_event_id)" in sql
+
+
+def test_external_command_results_schema_has_required_indexes():
+    from pathlib import Path
+
+    sql = Path("sql/006_external_command_results.sql").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS external_command_results" in sql
+    assert "UNIQUE KEY uk_external_command_results_dedup (dedup_key)" in sql
+    assert "KEY idx_external_command_results_status_created (status, created_at)" in sql
+    assert "KEY idx_external_command_results_external_command (external_command_id)" in sql
+    assert "KEY idx_external_command_results_conversation (conversation_id)" in sql
+    assert "KEY idx_external_command_results_inbound_event (inbound_event_id)" in sql
 
 
 def test_bootstrap_adds_missing_workflow_stage_for_mysql():

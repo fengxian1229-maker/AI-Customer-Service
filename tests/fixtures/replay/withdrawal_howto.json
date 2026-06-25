@@ -1,0 +1,9 @@
+{
+  "input_messages": ["como retirar"],
+  "expected_intent": "withdrawal_howto",
+  "expected_active_workflow": null,
+  "expected_workflow_stage": null,
+  "expected_required_slots": [],
+  "expected_outbound_command_types": ["livechat.send_text"],
+  "expected_external_command_types": []
+}

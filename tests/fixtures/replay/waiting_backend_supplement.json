@@ -1,0 +1,9 @@
+{
+  "input_messages": ["adjunto otro comprobante"],
+  "expected_intent": "waiting_backend_supplement",
+  "expected_active_workflow": "deposit_missing",
+  "expected_workflow_stage": "waiting_backend",
+  "expected_required_slots": ["forwarded_attachment_urls"],
+  "expected_outbound_command_types": ["livechat.send_text"],
+  "expected_external_command_types": ["telegram.append_to_case"]
+}

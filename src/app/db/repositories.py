@@ -117,14 +117,14 @@ class ConversationRepository:
     async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict) -> None:
         sql = """
         UPDATE conversation_states
-        SET status = %s,
-            active_workflow = %s,
-            workflow_stage = %s,
+        SET status = COALESCE(%s, status),
+            active_workflow = COALESCE(%s, active_workflow),
+            workflow_stage = COALESCE(%s, workflow_stage),
             slot_memory = CAST(%s AS JSON)
         WHERE conversation_id = %s
         """
         args = (
-            graph_state.get("status") or "AI_ACTIVE",
+            graph_state.get("status"),
             graph_state.get("active_workflow"),
             graph_state.get("workflow_stage"),
             json_dumps(graph_state.get("slot_memory") or {}),
@@ -331,6 +331,97 @@ class ExternalCommandRepository:
                 await cur.execute(sql, (command_id,))
 
 
+class ExternalCommandResultRepository:
+    def __init__(self, pool) -> None:
+        self.pool = pool
+
+    async def insert_idempotent(self, result: dict) -> dict:
+        async with self.pool.acquire() as conn:
+            return await self.insert_idempotent_on_connection(conn, result)
+
+    async def insert_idempotent_on_connection(self, conn, result: dict) -> dict:
+        result_json = result.get("result_json") or {}
+        dedup_key = result.get("dedup_key") or build_external_command_result_dedup_key(
+            tenant_id=result.get("tenant_id") or "default",
+            conversation_id=result["conversation_id"],
+            external_command_id=result["external_command_id"],
+            command_type=result["command_type"],
+            result_type=result["result_type"],
+            result=result_json,
+        )
+        sql = """
+        INSERT INTO external_command_results (
+          external_command_id, tenant_id, conversation_id, chat_id, thread_id,
+          inbound_event_id, command_type, result_type, result_json, status,
+          processed_at, last_error, dedup_key
+        ) VALUES (
+          %s, %s, %s, %s, %s,
+          %s, %s, %s, CAST(%s AS JSON), %s,
+          %s, %s, %s
+        )
+        ON DUPLICATE KEY UPDATE id = id
+        """
+        args = (
+            result["external_command_id"],
+            result.get("tenant_id") or "default",
+            result["conversation_id"],
+            result["chat_id"],
+            result.get("thread_id"),
+            result.get("inbound_event_id"),
+            result["command_type"],
+            result["result_type"],
+            json_dumps(result_json),
+            result.get("status") or "PENDING",
+            result.get("processed_at"),
+            result.get("last_error"),
+            dedup_key,
+        )
+        async with conn.cursor() as cur:
+            await cur.execute(sql, args)
+            inserted = cur.rowcount == 1
+            return {
+                "inserted": inserted,
+                "duplicate": not inserted,
+                "id": cur.lastrowid if inserted else None,
+            }
+
+    async def fetch_pending(self, limit: int = 20) -> list[dict]:
+        sql = """
+        SELECT id, external_command_id, tenant_id, conversation_id, chat_id, thread_id,
+               inbound_event_id, command_type, result_type, result_json, status,
+               processed_at, last_error, dedup_key
+        FROM external_command_results
+        WHERE status = 'PENDING'
+        ORDER BY created_at ASC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (limit,))
+                rows = await cur.fetchall()
+        for row in rows:
+            row["result_json"] = json_loads(row["result_json"])
+        return rows
+
+    async def mark_processed(self, result_id: int) -> None:
+        sql = "UPDATE external_command_results SET status = 'PROCESSED', processed_at = NOW(6), updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (result_id,))
+
+    async def mark_failed(self, result_id: int, error: str) -> None:
+        sql = "UPDATE external_command_results SET status = 'FAILED', last_error = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (error, result_id))
+
+    async def mark_retryable(self, result_id: int, error: str) -> None:
+        sql = "UPDATE external_command_results SET status = 'RETRYABLE', last_error = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (error, result_id))
+
+
 def json_dumps(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
@@ -351,6 +442,19 @@ def build_external_command_dedup_key(
     raw_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     payload_hash = hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
     return f"{tenant_id}:{conversation_id}:{inbound_event_id}:{command_type}:{payload_hash}"
+
+
+def build_external_command_result_dedup_key(
+    tenant_id: str,
+    conversation_id: str,
+    external_command_id: int,
+    command_type: str,
+    result_type: str,
+    result: dict,
+) -> str:
+    raw_result = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    result_hash = hashlib.sha256(raw_result.encode("utf-8")).hexdigest()
+    return f"{tenant_id}:{conversation_id}:{external_command_id}:{command_type}:{result_type}:{result_hash}"
 
 
 class GatewayTransactionRepository:
