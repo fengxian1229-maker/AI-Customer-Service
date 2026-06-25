@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.channels.livechat.normalizer import normalize_polling_event
+from app.channels.ingress import BaseIngressReceiver, IngressEvent
+from app.channels.livechat.normalizer import normalize_ingress_event, normalize_polling_event
 from app.channels.livechat.sender_client import LiveChatApiError
 
 
@@ -15,7 +16,7 @@ def build_receiver_state() -> ReceiverState:
     return ReceiverState()
 
 
-def extract_polling_events_from_chat_detail(chat: dict) -> list[dict]:
+def extract_polling_events_from_chat_detail(chat: dict, include_agent_messages: bool = False) -> list[dict]:
     payloads = []
     group_ids = sorted(chat_group_ids(chat))
     chat_users = chat.get("users") or []
@@ -34,7 +35,7 @@ def extract_polling_events_from_chat_detail(chat: dict) -> list[dict]:
         thread_id = thread.get("id") or thread.get("thread_id")
         for event in thread.get("events") or []:
             author = users_by_id.get(str(event.get("author_id")))
-            if author and author.get("type") == "agent":
+            if author and author.get("type") == "agent" and not include_agent_messages:
                 continue
             if event.get("type") not in {"message", "file"}:
                 continue
@@ -51,7 +52,7 @@ def extract_polling_events_from_chat_detail(chat: dict) -> list[dict]:
     return payloads
 
 
-def extract_polling_events_from_chat_summary(summary: dict) -> list[dict]:
+def extract_polling_events_from_chat_summary(summary: dict, include_agent_messages: bool = False) -> list[dict]:
     payloads = []
     group_ids = sorted(chat_group_ids(summary))
     chat_users = summary.get("users") or []
@@ -66,7 +67,7 @@ def extract_polling_events_from_chat_summary(summary: dict) -> list[dict]:
             continue
         event = entry.get("event") or {}
         author = users_by_id.get(str(event.get("author_id")))
-        if author and author.get("type") == "agent":
+        if author and author.get("type") == "agent" and not include_agent_messages:
             continue
         if event.get("type") not in {"message", "file"}:
             continue
@@ -184,3 +185,89 @@ async def poll_once(
             )
         )
     return inserted
+
+
+def empty_polling_stats(listed: int = 0) -> dict[str, Any]:
+    return {
+        "listed": listed,
+        "matched_group": 0,
+        "inserted": 0,
+        "duplicates": 0,
+        "ignored": 0,
+        "ignored_self": 0,
+        "ignored_agent": 0,
+        "ignored_group": 0,
+        "events": [],
+    }
+
+
+def apply_normalize_ignored_stats(stats: dict[str, Any], ignore_reason: str | None) -> None:
+    stats["ignored"] = stats.get("ignored", 0) + 1
+    if ignore_reason == "self_message":
+        stats["ignored_self"] = stats.get("ignored_self", 0) + 1
+    elif ignore_reason == "agent_message":
+        stats["ignored_agent"] = stats.get("ignored_agent", 0) + 1
+
+
+class PollingIngressReceiver(BaseIngressReceiver):
+    def __init__(
+        self,
+        client,
+        repository,
+        allowed_group_ids: set[int],
+        self_author_ids: set[str],
+        state: ReceiverState | None = None,
+    ) -> None:
+        self.client = client
+        self.repository = repository
+        self.allowed_group_ids = allowed_group_ids
+        self.self_author_ids = self_author_ids
+        self.state = state or build_receiver_state()
+
+    async def receive_once(self, limit: int = 20) -> dict[str, Any]:
+        listed = await self.client.list_chats(limit=limit)
+        stats = empty_polling_stats(listed=len(listed))
+
+        for summary in listed:
+            if not chat_matches_allowed_groups(summary, self.allowed_group_ids):
+                stats["ignored_group"] += 1
+                continue
+
+            stats["matched_group"] += 1
+            try:
+                chat = await self.client.get_chat(summary["id"])
+                if not chat_matches_allowed_groups(chat, self.allowed_group_ids):
+                    stats["ignored_group"] += 1
+                    continue
+                payloads = extract_polling_events_from_chat_detail(chat, include_agent_messages=True)
+            except LiveChatApiError as exc:
+                if exc.status != 403:
+                    raise
+                payloads = extract_polling_events_from_chat_summary(summary, include_agent_messages=True)
+
+            for payload in payloads:
+                ingress_event = IngressEvent(
+                    source="polling_fallback",
+                    raw_action="polling.event",
+                    payload=payload,
+                )
+                normalized = normalize_ingress_event(ingress_event, self_author_ids=self.self_author_ids)
+                if normalized.ignored:
+                    apply_normalize_ignored_stats(stats, normalized.ignore_reason)
+                    continue
+                if normalized.event is None:
+                    continue
+                if normalized.event.event_id and normalized.event.event_id in self.state.last_seen_event_ids:
+                    stats["duplicates"] += 1
+                    continue
+
+                was_inserted, was_duplicate = insert_result_flags(await self.repository.insert(normalized.event))
+                stats["inserted"] += int(was_inserted)
+                stats["duplicates"] += int(was_duplicate)
+                if was_inserted:
+                    stats["events"].append(normalized.event)
+                    if normalized.event.event_id:
+                        self.state.last_seen_event_ids.add(normalized.event.event_id)
+                    self.state.last_seen_created_at = normalized.event.occurred_at or self.state.last_seen_created_at
+
+        return stats

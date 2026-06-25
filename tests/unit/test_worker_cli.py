@@ -30,6 +30,65 @@ def test_polling_cli_parser_accepts_once_limit_and_groups():
     assert args.limit == 20
 
 
+def test_polling_cli_parser_accepts_simple_loop_options():
+    from app.workers.polling_receiver import build_arg_parser
+
+    args = build_arg_parser().parse_args([
+        "--groups",
+        "23",
+        "--sleep-seconds",
+        "0.5",
+        "--max-iterations",
+        "2",
+    ])
+
+    assert args.once is False
+    assert args.sleep_seconds == 0.5
+    assert args.max_iterations == 2
+
+
+def test_polling_run_loop_executes_max_iterations_with_sleep():
+    import asyncio
+
+    from app.workers.polling_receiver import run_polling_loop
+
+    calls = {"cycles": 0, "sleeps": []}
+
+    async def fake_run_once(limit: int, groups: set[int]):
+        calls["cycles"] += 1
+        return {
+            "worker": "polling_receiver",
+            "mode": "once",
+            "groups": sorted(groups),
+            "listed": limit,
+            "matched_group": 1,
+            "inserted": 1,
+            "duplicates": 0,
+            "ignored": 0,
+            "ignored_self": 0,
+            "ignored_agent": 0,
+            "ignored_group": 0,
+        }
+
+    async def fake_sleep(seconds: float):
+        calls["sleeps"].append(seconds)
+
+    results = asyncio.run(
+        run_polling_loop(
+            limit=20,
+            groups={23},
+            sleep_seconds=0.25,
+            max_iterations=2,
+            run_once_func=fake_run_once,
+            sleep_func=fake_sleep,
+        )
+    )
+
+    assert calls["cycles"] == 2
+    assert calls["sleeps"] == [0.25]
+    assert [result["mode"] for result in results] == ["loop", "loop"]
+
+
 def test_gateway_cli_parser_accepts_once_and_limit():
     from app.workers.gateway_consumer import build_arg_parser
 
