@@ -4,6 +4,8 @@ import hashlib
 import aiomysql
 
 from app.schemas.events import InboundEvent
+from app.services.rag import score_knowledge_document
+from app.workflows.slot_extractors import normalize_text
 
 
 class InboundEventRepository:
@@ -734,6 +736,62 @@ class ConversationMessageRepository:
         for row in rows:
             row["attachment_refs"] = json_loads(row.get("attachment_refs") or "[]")
         return rows
+
+
+class KnowledgeDocumentRepository:
+    def __init__(self, pool) -> None:
+        self.pool = pool
+
+    async def insert_idempotent(self, document: dict) -> dict:
+        sql = """
+        INSERT INTO knowledge_documents (
+          tenant_id, kb_scope, title, content, keywords, language, priority, enabled
+        ) VALUES (%s, %s, %s, %s, CAST(%s AS JSON), %s, %s, %s)
+        """
+        args = (
+            document.get("tenant_id") or "default",
+            document.get("kb_scope") or "default",
+            document["title"],
+            document["content"],
+            json.dumps(document.get("keywords") or [], ensure_ascii=False, separators=(",", ":")),
+            document.get("language"),
+            document.get("priority", 100),
+            1 if document.get("enabled", True) else 0,
+        )
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, args)
+                return {"inserted": cur.rowcount == 1, "id": cur.lastrowid}
+
+    async def search(
+        self,
+        tenant_id: str,
+        query: str,
+        kb_scope: str = "default",
+        limit: int = 3,
+    ) -> list[dict]:
+        sql = """
+        SELECT id, tenant_id, kb_scope, title, content, keywords, language, priority
+        FROM knowledge_documents
+        WHERE tenant_id = %s
+          AND kb_scope = %s
+          AND enabled = 1
+        ORDER BY priority ASC, id ASC
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (tenant_id, kb_scope))
+                rows = await cur.fetchall()
+
+        query_text = normalize_text(query)
+        scored = []
+        for row in rows:
+            row["keywords"] = json_loads(row.get("keywords") or "[]")
+            score = score_knowledge_document(row, query_text)
+            if score > 0:
+                scored.append({**row, "score": score})
+        scored.sort(key=lambda item: (-item["score"], item.get("priority", 100), item["id"]))
+        return scored[:limit]
 
 
 class GraphRunErrorRepository:

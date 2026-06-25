@@ -5,6 +5,7 @@ from app.db.repositories import (
     ExternalResultTransactionRepository,
     GraphRunErrorRepository,
     InboundEventRepository,
+    KnowledgeDocumentRepository,
     OutboundMessageRepository,
     build_external_command_dedup_key,
     build_external_command_result_dedup_key,
@@ -378,6 +379,93 @@ def test_conversation_message_fetch_recent_returns_oldest_first_after_limit():
     assert cursor.args == ("livechat:chat-1", 2)
     assert [row["text_content"] for row in rows] == ["second", "third"]
     assert rows[1]["attachment_refs"] == [{"url": "https://cdn.example/file.png"}]
+
+
+def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores_matches():
+    import asyncio
+
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 1,
+                    "tenant_id": "default",
+                    "kb_scope": "default",
+                    "title": "Bonus rules",
+                    "content": "奖金规则以活动页面说明为准。",
+                    "keywords": '["bonus","rules"]',
+                    "language": "en",
+                    "priority": 20,
+                },
+                {
+                    "id": 2,
+                    "tenant_id": "default",
+                    "kb_scope": "default",
+                    "title": "Deposit guide",
+                    "content": "how to deposit",
+                    "keywords": '["deposit"]',
+                    "language": "en",
+                    "priority": 10,
+                },
+            ]
+
+    cursor = FetchCursor(rowcount=2)
+    repository = KnowledgeDocumentRepository(FakePool(cursor))
+
+    rows = asyncio.run(repository.search("default", "bonus rules", limit=1))
+
+    assert "FROM knowledge_documents" in cursor.sql
+    assert "enabled = 1" in cursor.sql
+    assert cursor.args == ("default", "default")
+    assert rows[0]["id"] == 1
+    assert rows[0]["keywords"] == ["bonus", "rules"]
+    assert rows[0]["score"] > 0
+    assert len(rows) == 1
+
+
+def test_knowledge_document_search_returns_empty_without_match():
+    import asyncio
+
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 1,
+                    "tenant_id": "default",
+                    "kb_scope": "default",
+                    "title": "Bonus rules",
+                    "content": "奖金规则以活动页面说明为准。",
+                    "keywords": '["bonus"]',
+                    "language": "en",
+                    "priority": 20,
+                },
+            ]
+
+    cursor = FetchCursor(rowcount=1)
+    repository = KnowledgeDocumentRepository(FakePool(cursor))
+
+    rows = asyncio.run(repository.search("default", "withdrawal status", limit=3))
+
+    assert rows == []
+
+
+def test_knowledge_document_search_sorts_by_score_priority_and_id():
+    import asyncio
+
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {"id": 3, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "bonus", "keywords": "[]", "language": None, "priority": 30},
+                {"id": 1, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "", "keywords": '["bonus"]', "language": None, "priority": 10},
+                {"id": 2, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "", "keywords": '["bonus"]', "language": None, "priority": 10},
+            ]
+
+    cursor = FetchCursor(rowcount=3)
+    repository = KnowledgeDocumentRepository(FakePool(cursor))
+
+    rows = asyncio.run(repository.search("default", "bonus", limit=3))
+
+    assert [row["id"] for row in rows] == [1, 2, 3]
 
 
 def test_external_command_fetch_pending_filters_pending_by_created_at():

@@ -420,12 +420,11 @@ created_at
 
 ## 6. 第五阶段：RAG 从 placeholder 变成真实知识库问答
 
-当前 RAG 可以先保持 placeholder，但后续应改为真正的知识库链路：
+P4-A 已将普通 FAQ/RAG 从 placeholder 改为最小 deterministic KB-backed 链路：
 
 ```text
 route = rag
-  -> rag_node 根据 tenant_id / kb_scope 检索知识库
-  -> answer_generation_node 根据检索文档 + 客服提示词生成回答
+  -> rag_node 根据 tenant_id / kb_scope 检索知识
   -> response_text
   -> outbound_messages
 ```
@@ -434,6 +433,16 @@ route = rag
 
 ```text
 普通 RAG 问答不应走 external_commands。
+```
+
+P4-A 仍不包含：
+
+```text
+vector database
+embedding
+LLM answer generation
+real backend facts
+real Telegram
 ```
 
 external_commands 只用于：

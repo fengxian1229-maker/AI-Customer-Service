@@ -3,6 +3,7 @@ from typing import Any
 from app.graph.state import GraphState
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
+from app.services.rag import answer_from_static_knowledge
 from app.workflows.slot_extractors import (
     extract_amount,
     extract_identity,
@@ -38,6 +39,7 @@ def build_graph_state_from_event(
         "signal_result": None,
         "intent_result": None,
         "route": None,
+        "rag_result": None,
         "recent_messages": recent_messages or [],
         "response_text": None,
         "commands": [],
@@ -153,11 +155,13 @@ def sop_node(state: GraphState) -> GraphState:
     return run_sop(state)
 
 
-def rag_placeholder_node(state: GraphState) -> GraphState:
+def rag_node(state: GraphState) -> GraphState:
+    rag_result = answer_from_static_knowledge(state)
     return {
         **state,
-        "response_text": "这个问题我先记录下来，目前知识库仍在接入中，请补充更具体的问题或选择真人客服。",
-        "commands": [{"type": CommandType.RAG_PLACEHOLDER, "payload": {"intent": "faq_general"}}],
+        "rag_result": rag_result,
+        "response_text": rag_result["answer"],
+        "commands": [],
     }
 
 

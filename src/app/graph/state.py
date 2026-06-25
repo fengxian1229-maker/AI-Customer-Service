@@ -22,6 +22,7 @@ class GraphState(TypedDict, total=False):
     signal_result: dict[str, Any] | None
     intent_result: dict[str, Any] | None
     route: str | None
+    rag_result: dict[str, Any] | None
 
     recent_messages: list[dict[str, Any]]
 

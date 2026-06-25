@@ -38,6 +38,7 @@ def test_load_sql_files_in_order():
             "007_add_worker_lease_fields.sql",
             "008_graph_run_errors.sql",
             "009_conversation_messages.sql",
+            "010_knowledge_documents.sql",
         ]
 
 
@@ -110,6 +111,23 @@ def test_conversation_messages_schema_has_required_indexes():
     assert "UNIQUE KEY uk_conversation_messages_external_result" in sql
     assert "KEY idx_conversation_messages_conversation_created" in sql
     assert "KEY idx_conversation_messages_chat_thread_created" in sql
+
+
+def test_knowledge_documents_schema_has_required_indexes():
+    from pathlib import Path
+
+    sql = Path("sql/010_knowledge_documents.sql").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS knowledge_documents" in sql
+    assert "tenant_id VARCHAR(128) NOT NULL DEFAULT 'default'" in sql
+    assert "kb_scope VARCHAR(128) NOT NULL DEFAULT 'default'" in sql
+    assert "title VARCHAR(255) NOT NULL" in sql
+    assert "content TEXT NOT NULL" in sql
+    assert "keywords JSON NULL" in sql
+    assert "enabled TINYINT(1) NOT NULL DEFAULT 1" in sql
+    assert "priority INT NOT NULL DEFAULT 100" in sql
+    assert "KEY idx_knowledge_documents_tenant_enabled_priority" in sql
+    assert "KEY idx_knowledge_documents_scope" in sql
 
 
 def test_bootstrap_adds_missing_workflow_stage_for_mysql():
@@ -430,3 +448,77 @@ def test_conversation_messages_bootstrap_keeps_existing_sqlite_columns_and_index
     assert not any(sql.startswith("ALTER TABLE conversation_messages ADD COLUMN") for sql in cursor.executed)
     assert not any(sql.startswith("CREATE INDEX") for sql in cursor.executed)
     assert not any("CREATE UNIQUE INDEX" in sql for sql in cursor.executed)
+
+
+def test_knowledge_documents_bootstrap_adds_missing_mysql_columns_and_indexes():
+    import asyncio
+
+    from app.db.bootstrap import ensure_knowledge_documents_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+            self.phase = "columns"
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+            if sql == "SHOW INDEX FROM knowledge_documents":
+                self.phase = "indexes"
+
+        async def fetchall(self):
+            if self.phase == "indexes":
+                return []
+            return [("id",), ("tenant_id",), ("title",), ("content",)]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_knowledge_documents_compat(cursor))
+
+    assert any("ADD COLUMN kb_scope" in sql for sql in cursor.executed)
+    assert any("ADD COLUMN keywords" in sql for sql in cursor.executed)
+    assert any("idx_knowledge_documents_tenant_enabled_priority" in sql for sql in cursor.executed)
+    assert any("idx_knowledge_documents_scope" in sql for sql in cursor.executed)
+
+
+def test_knowledge_documents_bootstrap_keeps_existing_sqlite_columns_and_indexes():
+    import asyncio
+
+    from app.db.bootstrap import ensure_knowledge_documents_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+            self.phase = "columns"
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+            if sql.startswith("SHOW"):
+                raise RuntimeError("sqlite")
+            if sql.startswith("PRAGMA index_list"):
+                self.phase = "indexes"
+
+        async def fetchall(self):
+            if self.phase == "indexes":
+                return [
+                    (0, "idx_knowledge_documents_tenant_enabled_priority"),
+                    (1, "idx_knowledge_documents_scope"),
+                ]
+            return [
+                (0, "tenant_id"),
+                (1, "kb_scope"),
+                (2, "title"),
+                (3, "content"),
+                (4, "keywords"),
+                (5, "language"),
+                (6, "priority"),
+                (7, "enabled"),
+                (8, "created_at"),
+                (9, "updated_at"),
+            ]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_knowledge_documents_compat(cursor))
+
+    assert not any(sql.startswith("ALTER TABLE knowledge_documents ADD COLUMN") for sql in cursor.executed)
+    assert not any(sql.startswith("CREATE INDEX") for sql in cursor.executed)

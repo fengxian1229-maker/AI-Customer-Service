@@ -21,6 +21,7 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
             await ensure_external_command_result_lease_compat(cur)
             await ensure_graph_run_errors_compat(cur)
             await ensure_conversation_messages_compat(cur)
+            await ensure_knowledge_documents_compat(cur)
 
 
 async def ensure_inbound_events_compat(cur) -> None:
@@ -188,6 +189,45 @@ async def ensure_conversation_messages_compat(cur) -> None:
             "idx_conversation_messages_chat_thread_created": (
                 "CREATE INDEX idx_conversation_messages_chat_thread_created "
                 "ON conversation_messages (chat_id, thread_id, created_at)"
+            ),
+        },
+    )
+
+
+async def ensure_knowledge_documents_compat(cur) -> None:
+    await ensure_columns(
+        cur,
+        "knowledge_documents",
+        {
+            "tenant_id": "ALTER TABLE knowledge_documents ADD COLUMN tenant_id VARCHAR(128) NOT NULL DEFAULT 'default'",
+            "kb_scope": "ALTER TABLE knowledge_documents ADD COLUMN kb_scope VARCHAR(128) NOT NULL DEFAULT 'default'",
+            "title": "ALTER TABLE knowledge_documents ADD COLUMN title VARCHAR(255) NOT NULL",
+            "content": "ALTER TABLE knowledge_documents ADD COLUMN content TEXT NOT NULL",
+            "keywords": "ALTER TABLE knowledge_documents ADD COLUMN keywords JSON NULL",
+            "language": "ALTER TABLE knowledge_documents ADD COLUMN language VARCHAR(32) NULL",
+            "priority": "ALTER TABLE knowledge_documents ADD COLUMN priority INT NOT NULL DEFAULT 100",
+            "enabled": "ALTER TABLE knowledge_documents ADD COLUMN enabled TINYINT(1) NOT NULL DEFAULT 1",
+            "created_at": (
+                "ALTER TABLE knowledge_documents "
+                "ADD COLUMN created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"
+            ),
+            "updated_at": (
+                "ALTER TABLE knowledge_documents "
+                "ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+            ),
+        },
+    )
+    await ensure_indexes(
+        cur,
+        "knowledge_documents",
+        {
+            "idx_knowledge_documents_tenant_enabled_priority": (
+                "CREATE INDEX idx_knowledge_documents_tenant_enabled_priority "
+                "ON knowledge_documents (tenant_id, enabled, priority, id)"
+            ),
+            "idx_knowledge_documents_scope": (
+                "CREATE INDEX idx_knowledge_documents_scope "
+                "ON knowledge_documents (tenant_id, kb_scope, enabled)"
             ),
         },
     )

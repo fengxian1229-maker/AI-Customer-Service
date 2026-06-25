@@ -161,6 +161,29 @@ def test_gateway_splits_livechat_outbox_and_external_commands():
     assert result["external_commands"][0]["command_type"] == "telegram.send_case_card"
 
 
+def test_gateway_service_rag_faq_writes_outbound_without_external_command():
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        message_repository=FakeConversationMessageRepository(),
+    )
+    event = make_inbound_event()
+    event.payload_json = {"event": {"type": "message", "text": "bonus rules"}}
+
+    result = asyncio.run(service.process_event(13, event))
+
+    assert result["graph_state"]["route"] == "rag"
+    assert result["graph_state"]["rag_result"]["matched"] is True
+    assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
+    assert result["external_commands"] == []
+    assert external_repository.inserted == []
+
+
 class RecordingGraph:
     def __init__(self) -> None:
         self.calls = []
