@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS external_commands (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id VARCHAR(128) NOT NULL DEFAULT 'default',
+  conversation_id VARCHAR(128) NOT NULL,
+  chat_id VARCHAR(128) NOT NULL,
+  thread_id VARCHAR(128) NULL,
+  inbound_event_id BIGINT UNSIGNED NULL,
+  command_type VARCHAR(128) NOT NULL,
+  payload_json JSON NOT NULL,
+  status VARCHAR(64) NOT NULL DEFAULT 'PENDING',
+  retry_count INT NOT NULL DEFAULT 0,
+  last_error TEXT NULL,
+  dedup_key VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_external_commands_dedup (dedup_key),
+  KEY idx_external_commands_status_created (status, created_at),
+  KEY idx_external_commands_conversation (conversation_id),
+  KEY idx_external_commands_inbound_event (inbound_event_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -32,6 +32,8 @@ def test_load_sql_files_in_order():
         "001_inbound_events.sql",
         "002_conversation_states.sql",
         "003_outbound_messages.sql",
+        "004_add_workflow_stage.sql",
+        "005_external_commands.sql",
     ]
 
 
@@ -41,6 +43,70 @@ def test_outbound_messages_schema_has_inbound_action_idempotency_key():
     sql = Path("sql/003_outbound_messages.sql").read_text()
 
     assert "UNIQUE KEY uk_inbound_action (inbound_event_id, action_type)" in sql
+
+
+def test_conversation_states_schema_has_workflow_stage():
+    from pathlib import Path
+
+    sql = Path("sql/002_conversation_states.sql").read_text()
+
+    assert "workflow_stage VARCHAR(128) NULL" in sql
+
+
+def test_external_commands_schema_has_required_indexes():
+    from pathlib import Path
+
+    sql = Path("sql/005_external_commands.sql").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS external_commands" in sql
+    assert "UNIQUE KEY uk_external_commands_dedup (dedup_key)" in sql
+    assert "KEY idx_external_commands_status_created (status, created_at)" in sql
+    assert "KEY idx_external_commands_conversation (conversation_id)" in sql
+    assert "KEY idx_external_commands_inbound_event (inbound_event_id)" in sql
+
+
+def test_bootstrap_adds_missing_workflow_stage_for_mysql():
+    import asyncio
+
+    from app.db.bootstrap import ensure_conversation_states_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+
+        async def fetchall(self):
+            return [("conversation_id",), ("slot_memory",)]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_conversation_states_compat(cursor))
+
+    assert "ALTER TABLE conversation_states ADD COLUMN workflow_stage VARCHAR(128) NULL" in cursor.executed
+
+
+def test_bootstrap_does_not_add_existing_workflow_stage_for_mysql():
+    import asyncio
+
+    from app.db.bootstrap import ensure_conversation_states_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+
+        async def fetchall(self):
+            return [("conversation_id",), ("workflow_stage",)]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_conversation_states_compat(cursor))
+
+    assert cursor.executed == ["SHOW COLUMNS FROM conversation_states"]
 
 
 def test_bootstrap_worker_does_not_require_livechat_credentials(monkeypatch):

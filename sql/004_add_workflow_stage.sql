@@ -1,0 +1,3 @@
+-- Idempotent workflow_stage migration is applied by app.db.bootstrap.
+-- The bootstrap layer checks existing columns for MySQL and SQLite before
+-- running ALTER TABLE conversation_states ADD COLUMN workflow_stage.

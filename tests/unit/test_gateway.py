@@ -77,6 +77,15 @@ class FakeInboundRepository:
         self.processed.append(inbound_event_id)
 
 
+class FakeExternalCommandRepository:
+    def __init__(self) -> None:
+        self.inserted = []
+
+    async def insert_idempotent(self, command: dict) -> dict:
+        self.inserted.append(command)
+        return {"inserted": True, "duplicate": False, "id": len(self.inserted)}
+
+
 def test_gateway_service_processes_message_created():
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
@@ -95,6 +104,30 @@ def test_gateway_service_processes_message_created():
     assert conversation_repository.updated[0][1]["active_workflow"] == "deposit_missing"
 
 
+def test_gateway_splits_livechat_outbox_and_external_commands():
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+    )
+    event = make_inbound_event()
+    event.payload_json = {
+        "event": {"type": "message", "text": "mi usuario es andy123, deposito no llegó"},
+        "attachments": [{"url": "https://cdn.example/deposit.png"}],
+    }
+
+    result = asyncio.run(service.process_event(11, event))
+
+    assert [message["action_type"] for message in outbound_repository.inserted] == ["send_event"]
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "已收到你的存款案件资料，我们会继续确认，有更新会在这里通知你。"
+    assert [command["command_type"] for command in external_repository.inserted] == ["telegram.send_case_card"]
+    assert result["external_commands"][0]["command_type"] == "telegram.send_case_card"
+
+
 class FakeTransactionalGatewayRepository:
     def __init__(self, fail_on_outbox: bool = False) -> None:
         self.fail_on_outbox = fail_on_outbox
@@ -108,9 +141,10 @@ class FakeTransactionalGatewayRepository:
         inbound_event_id: int,
         event: InboundEvent,
         outbound_messages: list[dict],
+        external_commands: list[dict],
         graph_state: dict | None = None,
     ) -> dict:
-        self.calls.append((inbound_event_id, event, outbound_messages, graph_state))
+        self.calls.append((inbound_event_id, event, outbound_messages, external_commands, graph_state))
         try:
             if self.fail_on_outbox:
                 raise RuntimeError("outbox insert failed")
@@ -121,6 +155,10 @@ class FakeTransactionalGatewayRepository:
                 "outbound_inserts": [
                     {"inserted": True, "duplicate": False, "id": index + 1}
                     for index, _message in enumerate(outbound_messages)
+                ],
+                "external_command_inserts": [
+                    {"inserted": True, "duplicate": False, "id": index + 1}
+                    for index, _command in enumerate(external_commands)
                 ],
             }
         except Exception:
@@ -138,7 +176,7 @@ def test_gateway_service_uses_transactional_repository_for_state_outbox_and_proc
     assert transactional.rolled_back is False
     assert transactional.calls[0][0] == 11
     assert transactional.calls[0][2][0]["inbound_event_id"] == 11
-    assert transactional.calls[0][3]["intent_result"]["intent"] == "deposit_missing"
+    assert transactional.calls[0][4]["intent_result"]["intent"] == "deposit_missing"
     assert result["outbound_insert"] == {"inserted": True, "duplicate": False, "id": 1}
 
 

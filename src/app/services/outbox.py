@@ -39,16 +39,25 @@ def build_command_outbox(
             inbound_event_id=inbound_event_id,
             text=str((command.get("payload") or {}).get("text") or ""),
         )
+    raise ValueError(f"Unsupported outbound command type: {command_type}")
+
+
+def build_external_command_record(
+    tenant_id: str,
+    chat_id: str | None,
+    thread_id: str | None,
+    conversation_id: str,
+    inbound_event_id: int,
+    command: dict,
+) -> dict:
+    command_type = str(command["type"])
     return {
+        "tenant_id": tenant_id,
+        "conversation_id": conversation_id,
         "chat_id": chat_id,
         "thread_id": thread_id,
-        "action_type": command_type,
-        "message_type": "external_command",
-        "payload_json": {
-            "type": command_type,
-            "payload": command.get("payload") or {},
-        },
-        "status": "PENDING_EXTERNAL",
-        "conversation_id": conversation_id,
         "inbound_event_id": inbound_event_id,
+        "command_type": command_type,
+        "payload_json": command.get("payload") or {},
+        "status": "PENDING",
     }

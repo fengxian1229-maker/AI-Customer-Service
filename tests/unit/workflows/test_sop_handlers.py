@@ -88,3 +88,71 @@ def test_withdrawal_blocked_or_rollover_generates_backend_query_and_no_tg():
     command_types = [command["type"] for command in state["commands"]]
     assert command_types == [CommandType.BACKEND_QUERY]
     assert CommandType.TELEGRAM_SEND_CASE_CARD not in command_types
+
+
+def test_deposit_howto_returns_fixed_tutorial_without_facts():
+    state = run_sop({"intent_result": {"intent": "deposit_howto"}, "commands": []})
+
+    assert "充值" in state["response_text"]
+    assert "到账" not in state["response_text"]
+
+
+def test_withdrawal_howto_returns_fixed_tutorial_without_status_facts():
+    state = run_sop({"intent_result": {"intent": "withdrawal_howto"}, "commands": []})
+
+    assert "提款" in state["response_text"]
+    assert "账户状态" not in state["response_text"]
+
+
+def test_forgot_password_first_time_returns_tutorial():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "forgot_password"},
+            "rewritten_question": "olvidé mi contraseña",
+            "slot_memory": {},
+            "commands": [],
+        }
+    )
+
+    assert "忘记密码" in state["response_text"]
+    assert state["commands"] == []
+
+
+def test_forgot_password_followup_failure_generates_human_handoff():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "forgot_password"},
+            "rewritten_question": "还是不行，无法登录",
+            "slot_memory": {"forgot_password_tutorial_sent": True},
+            "commands": [],
+        }
+    )
+
+    assert state["commands"][0]["type"] == CommandType.HUMAN_HANDOFF_REQUESTED
+
+
+def test_pending_reply_lookup_asks_identity_when_missing():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "pending_reply_lookup"},
+            "signal_result": {},
+            "slot_memory": {},
+            "commands": [],
+        }
+    )
+
+    assert "识别资料" in state["response_text"]
+    assert state["commands"] == []
+
+
+def test_pending_reply_lookup_generates_lookup_when_identity_present():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "pending_reply_lookup"},
+            "signal_result": {"has_identity": True, "identity_value": "andy123", "identity_type": "username"},
+            "slot_memory": {},
+            "commands": [],
+        }
+    )
+
+    assert state["commands"][0]["type"] == CommandType.PENDING_REPLY_LOOKUP

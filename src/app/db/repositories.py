@@ -1,4 +1,5 @@
 import json
+import hashlib
 
 import aiomysql
 
@@ -233,6 +234,103 @@ class OutboundMessageRepository:
                 await cur.execute(sql, (status, error, outbound_message_id))
 
 
+class ExternalCommandRepository:
+    def __init__(self, pool) -> None:
+        self.pool = pool
+
+    async def insert_idempotent(self, command: dict) -> dict:
+        async with self.pool.acquire() as conn:
+            return await self.insert_idempotent_on_connection(conn, command)
+
+    async def insert_idempotent_on_connection(self, conn, command: dict) -> dict:
+        payload = command.get("payload_json") or {}
+        dedup_key = command.get("dedup_key") or build_external_command_dedup_key(
+            tenant_id=command.get("tenant_id") or "default",
+            conversation_id=command["conversation_id"],
+            inbound_event_id=command.get("inbound_event_id"),
+            command_type=command["command_type"],
+            payload=payload,
+        )
+        sql = """
+        INSERT INTO external_commands (
+          tenant_id, conversation_id, chat_id, thread_id, inbound_event_id,
+          command_type, payload_json, status, retry_count, last_error,
+          dedup_key
+        ) VALUES (
+          %s, %s, %s, %s, %s,
+          %s, CAST(%s AS JSON), %s, %s, %s,
+          %s
+        )
+        ON DUPLICATE KEY UPDATE id = id
+        """
+        args = (
+            command.get("tenant_id") or "default",
+            command["conversation_id"],
+            command["chat_id"],
+            command.get("thread_id"),
+            command.get("inbound_event_id"),
+            command["command_type"],
+            json_dumps(payload),
+            command.get("status") or "PENDING",
+            command.get("retry_count") or 0,
+            command.get("last_error"),
+            dedup_key,
+        )
+        async with conn.cursor() as cur:
+            await cur.execute(sql, args)
+            inserted = cur.rowcount == 1
+            return {
+                "inserted": inserted,
+                "duplicate": not inserted,
+                "id": cur.lastrowid if inserted else None,
+            }
+
+    async def fetch_pending(self, limit: int = 20) -> list[dict]:
+        sql = """
+        SELECT id, tenant_id, conversation_id, chat_id, thread_id, inbound_event_id,
+               command_type, payload_json, status, retry_count, last_error, dedup_key
+        FROM external_commands
+        WHERE status = 'PENDING'
+        ORDER BY created_at ASC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (limit,))
+                rows = await cur.fetchall()
+        for row in rows:
+            row["payload_json"] = json_loads(row["payload_json"])
+        return rows
+
+    async def mark_dry_run_done(self, command_id: int) -> None:
+        await self._mark_status(command_id, "DRY_RUN_DONE")
+
+    async def mark_sent(self, command_id: int) -> None:
+        await self._mark_status(command_id, "SENT")
+
+    async def mark_failed(self, command_id: int, error: str) -> None:
+        sql = "UPDATE external_commands SET status = 'FAILED', last_error = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (error, command_id))
+
+    async def mark_retryable(self, command_id: int, error: str) -> None:
+        sql = """
+        UPDATE external_commands
+        SET status = 'RETRYABLE', retry_count = retry_count + 1, last_error = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (error, command_id))
+
+    async def _mark_status(self, command_id: int, status: str) -> None:
+        sql = f"UPDATE external_commands SET status = '{status}', updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (command_id,))
+
+
 def json_dumps(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
@@ -243,6 +341,18 @@ def json_loads(payload) -> dict:
     return payload
 
 
+def build_external_command_dedup_key(
+    tenant_id: str,
+    conversation_id: str,
+    inbound_event_id: int | None,
+    command_type: str,
+    payload: dict,
+) -> str:
+    raw_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload_hash = hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
+    return f"{tenant_id}:{conversation_id}:{inbound_event_id}:{command_type}:{payload_hash}"
+
+
 class GatewayTransactionRepository:
     def __init__(
         self,
@@ -250,17 +360,20 @@ class GatewayTransactionRepository:
         inbound_repository: InboundEventRepository | None = None,
         conversation_repository: ConversationRepository | None = None,
         outbound_repository: OutboundMessageRepository | None = None,
+        external_command_repository: ExternalCommandRepository | None = None,
     ) -> None:
         self.pool = pool
         self.inbound_repository = inbound_repository or InboundEventRepository(pool)
         self.conversation_repository = conversation_repository or ConversationRepository(pool)
         self.outbound_repository = outbound_repository or OutboundMessageRepository(pool)
+        self.external_command_repository = external_command_repository or ExternalCommandRepository(pool)
 
     async def process_event_transactionally(
         self,
         inbound_event_id: int,
         event: InboundEvent,
         outbound_message: dict | list[dict] | None,
+        external_commands: list[dict] | None = None,
         graph_state: dict | None = None,
     ) -> dict:
         outbound_messages = []
@@ -268,6 +381,7 @@ class GatewayTransactionRepository:
             outbound_messages = outbound_message
         elif outbound_message:
             outbound_messages = [outbound_message]
+        external_commands = external_commands or []
         async with self.pool.acquire() as conn:
             await conn.begin()
             try:
@@ -286,6 +400,10 @@ class GatewayTransactionRepository:
                 for message in outbound_messages:
                     message["conversation_id"] = conversation["conversation_id"]
                     outbound_inserts.append(await self.outbound_repository.insert_idempotent_on_connection(conn, message))
+                external_command_inserts = []
+                for command in external_commands:
+                    command["conversation_id"] = conversation["conversation_id"]
+                    external_command_inserts.append(await self.external_command_repository.insert_idempotent_on_connection(conn, command))
                 await self.inbound_repository.mark_processed_on_connection(conn, inbound_event_id)
                 await conn.commit()
             except Exception:
@@ -295,4 +413,5 @@ class GatewayTransactionRepository:
             "conversation": conversation,
             "outbound_insert": outbound_inserts[0] if len(outbound_inserts) == 1 else None,
             "outbound_inserts": outbound_inserts,
+            "external_command_inserts": external_command_inserts,
         }

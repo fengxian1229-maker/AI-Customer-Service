@@ -6,12 +6,16 @@ def load_sql_files(sql_dir: Path) -> list[Path]:
 
 
 async def bootstrap_database(pool, sql_dir: Path) -> None:
-    statements = [path.read_text(encoding="utf-8") for path in load_sql_files(sql_dir)]
+    sql_files = load_sql_files(sql_dir)
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            for statement in statements:
+            for path in sql_files:
+                if path.name == "004_add_workflow_stage.sql":
+                    continue
+                statement = path.read_text(encoding="utf-8")
                 await cur.execute(statement)
             await ensure_inbound_events_compat(cur)
+            await ensure_conversation_states_compat(cur)
             await ensure_outbound_messages_compat(cur)
 
 
@@ -41,3 +45,19 @@ async def ensure_outbound_messages_compat(cur) -> None:
     existing = await cur.fetchall()
     if not existing:
         await cur.execute("ALTER TABLE outbound_messages ADD UNIQUE KEY uk_inbound_action (inbound_event_id, action_type)")
+
+
+async def ensure_conversation_states_compat(cur) -> None:
+    columns = await fetch_columns(cur, "conversation_states")
+    if "workflow_stage" not in columns:
+        await cur.execute("ALTER TABLE conversation_states ADD COLUMN workflow_stage VARCHAR(128) NULL")
+
+
+async def fetch_columns(cur, table_name: str) -> set[str]:
+    try:
+        await cur.execute(f"SHOW COLUMNS FROM {table_name}")
+        return {row[0] for row in await cur.fetchall()}
+    except Exception:
+        await cur.execute(f"PRAGMA table_info({table_name})")
+        rows = await cur.fetchall()
+        return {row[1] for row in rows}

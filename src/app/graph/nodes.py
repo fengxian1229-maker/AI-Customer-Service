@@ -192,7 +192,16 @@ def _intent_result(intent: str, reason: str | None = None, continue_workflow: bo
         "confidence": 0.9 if intent != "unknown" else 0.2,
         "reason": reason or "Deterministic first-pass routing.",
         "should_continue_active_workflow": continue_workflow,
-        "requires_sop": intent in {"deposit_missing", "withdrawal_missing", "withdrawal_blocked_or_rollover"},
+        "requires_sop": intent
+        in {
+            "deposit_missing",
+            "withdrawal_missing",
+            "withdrawal_blocked_or_rollover",
+            "deposit_howto",
+            "withdrawal_howto",
+            "forgot_password",
+            "pending_reply_lookup",
+        },
         "requires_rag": intent == "faq_general",
         "requires_human": intent == "human_handoff",
         "requires_backend": intent == "withdrawal_blocked_or_rollover",
