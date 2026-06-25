@@ -26,35 +26,33 @@ logger = logging.getLogger(__name__)
 
 MOCK_RESULT_BY_COMMAND_TYPE = {
     "telegram.send_case_card": (
-        "telegram.send_case_card.mock_result",
+        "telegram.case.created",
         {
-            "status": "MOCKED",
+            "status": "created",
+            "case_id": "mock_case",
             "message": "telegram.send_case_card dry-run completed",
-            "case_status": "SENT_TO_TG_MOCK",
         },
     ),
     "telegram.append_to_case": (
-        "telegram.append_to_case.mock_result",
+        "telegram.append_to_case.result",
         {
-            "status": "MOCKED",
+            "status": "appended",
             "message": "telegram.append_to_case dry-run completed",
-            "case_status": "APPENDED_TO_TG_CASE_MOCK",
         },
     ),
     "backend.query": (
-        "backend.query.mock_result",
+        "backend.query.result",
         {
-            "status": "MOCKED",
-            "message": "backend.query dry-run completed",
-            "query_status": "BACKEND_QUERY_MOCK",
+            "status": "success",
+            "answer": "已收到查询请求，当前为 dry-run 模式，未连接真实后台。",
+            "raw": {"mock": True},
         },
     ),
     "pending_reply.lookup": (
-        "pending_reply.lookup.mock_result",
+        "pending_reply.lookup.result",
         {
-            "status": "MOCKED",
-            "message": "pending_reply.lookup dry-run completed",
-            "lookup_status": "PENDING_REPLY_LOOKUP_MOCK",
+            "status": "found",
+            "reply_text": "已收到查询请求，当前为 dry-run 模式，未连接真实 pending reply 查询源。",
         },
     ),
     "human_handoff.requested": (
@@ -228,29 +226,62 @@ async def run_forever(
     try:
         repository = ExternalCommandRepository(pool)
         result_repository = ExternalCommandResultRepository(pool) if emit_result else None
-        while True:
-            last_recovered_at = await maybe_recover_expired_leases(
-                repository,
-                last_recovered_at=last_recovered_at,
-                recover_interval_seconds=recover_interval_seconds,
-            )
-            try:
-                await process_pending_commands(
-                    repository,
-                    result_repository=result_repository,
-                    limit=limit,
-                    dry_run=dry_run,
-                    emit_result=emit_result,
-                    worker_id=worker_id,
-                    lease_seconds=lease_seconds,
-                    max_retries=max_retries,
-                )
-            except Exception:
-                logger.exception("external_command_worker polling iteration failed.")
-            await asyncio.sleep(settings.poll_seconds)
+        await run_polling_loop(
+            repository=repository,
+            result_repository=result_repository,
+            poll_seconds=settings.poll_seconds,
+            limit=limit,
+            dry_run=dry_run,
+            emit_result=emit_result,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            max_retries=max_retries,
+            recover_interval_seconds=recover_interval_seconds,
+            last_recovered_at=last_recovered_at,
+        )
     finally:
         pool.close()
         await pool.wait_closed()
+
+
+async def run_polling_loop(
+    repository: ExternalCommandRepository,
+    result_repository: ExternalCommandResultRepository | None,
+    poll_seconds: int,
+    limit: int,
+    dry_run: bool,
+    emit_result: bool = False,
+    worker_id: str | None = None,
+    lease_seconds: int = 60,
+    max_retries: int = 3,
+    recover_interval_seconds: int = 30,
+    last_recovered_at: float | None = None,
+    iterations: int | None = None,
+    sleep=asyncio.sleep,
+) -> None:
+    iteration = 0
+    while iterations is None or iteration < iterations:
+        last_recovered_at = await maybe_recover_expired_leases(
+            repository,
+            last_recovered_at=last_recovered_at,
+            recover_interval_seconds=recover_interval_seconds,
+        )
+        try:
+            await process_pending_commands(
+                repository,
+                result_repository=result_repository,
+                limit=limit,
+                dry_run=dry_run,
+                emit_result=emit_result,
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+                max_retries=max_retries,
+            )
+        except Exception:
+            logger.exception("external_command_worker polling iteration failed.")
+        iteration += 1
+        if iterations is None or iteration < iterations:
+            await sleep(poll_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:

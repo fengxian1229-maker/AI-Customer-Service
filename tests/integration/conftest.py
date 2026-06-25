@@ -2,7 +2,7 @@ import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -35,13 +35,18 @@ def settings_from_dsn(dsn: str) -> Settings:
     database = parsed.path.lstrip("/")
     if not database:
         pytest.skip("MySQL integration DSN must include a database name")
+    if "test" not in database.lower():
+        pytest.fail(
+            f"MySQL integration database name must contain 'test' for safety; got {database!r}. "
+            "Use a dedicated test database such as ai_customer_service_test."
+        )
     return Settings(
         livechat_agent_access_token="unused-for-integration",
         livechat_account_id="unused-for-integration",
         mysql_host=parsed.hostname or "127.0.0.1",
         mysql_port=parsed.port or 3306,
-        mysql_user=parsed.username or "root",
-        mysql_password=parsed.password or "",
+        mysql_user=unquote(parsed.username or "root"),
+        mysql_password=unquote(parsed.password or ""),
         mysql_database=database,
     )
 
@@ -57,6 +62,19 @@ async def create_bootstrapped_mysql_pool():
         await pool.wait_closed()
         raise
     return pool
+
+
+async def assert_mysql_test_database(pool) -> None:
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT DATABASE()")
+            row = await cur.fetchone()
+    database = row[0] if row else None
+    if not database or "test" not in str(database).lower():
+        pytest.fail(
+            f"Refusing to run integration cleanup against non-test database: {database!r}. "
+            "Set MYSQL_TEST_DSN to a dedicated test database."
+        )
 
 
 async def ensure_skip_locked_supported(pool) -> None:

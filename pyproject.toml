@@ -24,3 +24,10 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+    "unit: unit tests that do not require external services",
+    "integration: integration tests that may require configured services",
+    "mysql: tests that require a MySQL test database",
+    "replay: deterministic replay tests",
+    "slow: slower tests that exercise multi-step workflows",
+]

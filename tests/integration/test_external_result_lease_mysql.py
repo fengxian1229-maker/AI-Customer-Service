@@ -3,7 +3,12 @@ import uuid
 
 from app.db.repositories import ExternalCommandResultRepository
 
-from conftest import create_bootstrapped_mysql_pool, mysql_test_config, run
+import pytest
+
+from conftest import assert_mysql_test_database, create_bootstrapped_mysql_pool, mysql_test_config, run
+
+
+pytestmark = [pytest.mark.integration, pytest.mark.mysql]
 
 
 def test_external_command_result_concurrent_lease_mysql():
@@ -104,6 +109,7 @@ async def fetch_result_status_rows(pool, result_ids: list[int]) -> dict[int, dic
 
 
 async def cleanup_external_command_results(pool, test_id: str) -> None:
+    await assert_mysql_test_database(pool)
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("DELETE FROM external_command_results WHERE tenant_id = %s", (test_id,))

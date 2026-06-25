@@ -60,8 +60,41 @@ def extract_transaction_signal(text: str | None) -> dict[str, str] | None:
 
 def extract_amount(text: str | None) -> str | None:
     raw = normalize_text(text)
+    labelled = re.search(
+        r"(?:金额|金額|monto|valor|amount)\s*[:：-]?\s*([A-Z]{0,3}\s*\d{4,}|[A-Z]{0,3}\s*\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|[A-Z]{0,3}\s*\d{1,3}(?:[.,]\d{2})?)",
+        raw,
+        re.I,
+    )
+    if labelled:
+        return labelled.group(1).strip()
     match = re.search(r"\b(?:\d{4,}|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d{1,3}(?:[.,]\d{2}))\b", raw)
     return match.group(0) if match else None
+
+
+def extract_order_id(text: str | None) -> str | None:
+    raw = normalize_text(text)
+    labelled = re.search(
+        r"(?:订单|訂單|order|orden|pedido|transacci[oó]n|transaction|ref(?:erencia)?)\s*(?:号|號|id|number|n[uú]mero)?\s*[:：#-]?\s*([A-Z]{1,6}\d{4,})",
+        raw,
+        re.I,
+    )
+    if labelled:
+        return labelled.group(1).upper()
+    generic = re.search(r"\b([A-Z]{1,6}\d{4,})\b", raw, re.I)
+    return generic.group(1).upper() if generic else None
+
+
+def extract_channel(text: str | None) -> str | None:
+    raw = normalize_text(text)
+    labelled = re.search(
+        r"(?:渠道|通道|channel|canal|via|v[ií]a)\s*[:：-]?\s*([A-Za-z0-9_\-\u4e00-\u9fff]{2,30})",
+        raw,
+        re.I,
+    )
+    if labelled:
+        return labelled.group(1).strip()
+    known = re.search(r"\b(GCASH|MAYA|PIX|SPEI|OXXO|PSE|NEQUI|DAVIPLATA)\b", raw, re.I)
+    return known.group(1).upper() if known else None
 
 
 def is_explicit_human_request(text: str | None) -> bool:

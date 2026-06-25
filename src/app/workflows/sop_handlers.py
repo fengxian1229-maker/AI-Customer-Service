@@ -1,7 +1,7 @@
 from typing import Any
 
 from app.workflows.command_contracts import CommandType
-from app.workflows.slot_extractors import attachment_urls
+from app.workflows.slot_extractors import attachment_urls, extract_amount, extract_channel, extract_order_id
 
 
 def run_sop(state: dict[str, Any]) -> dict[str, Any]:
@@ -30,10 +30,21 @@ def run_sop(state: dict[str, Any]) -> dict[str, Any]:
 def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) -> dict[str, Any]:
     slot_memory = dict(state.get("slot_memory") or {})
     signal = state.get("signal_result") or {}
+    text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")
     urls = attachment_urls(state.get("attachments", []))
+    order_key = "deposit_order_id" if intent == "deposit_missing" else "withdrawal_order_id"
 
     if signal.get("has_identity") and signal.get("identity_value"):
         slot_memory["account_or_phone"] = signal["identity_value"]
+    order_id = extract_order_id(text)
+    amount = extract_amount(text)
+    channel = extract_channel(text)
+    if order_id:
+        slot_memory[order_key] = order_id
+    if amount:
+        slot_memory["amount"] = amount
+    if channel:
+        slot_memory["channel"] = channel
     if urls:
         slot_memory[screenshot_key] = urls[0]
         forwarded = list(dict.fromkeys([*slot_memory.get("forwarded_attachment_urls", []), *urls]))
@@ -41,28 +52,29 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
 
     has_identity = bool(slot_memory.get("account_or_phone"))
     has_screenshot = bool(slot_memory.get(screenshot_key))
+    has_structured_case = bool(slot_memory.get(order_key) and slot_memory.get("amount") and slot_memory.get("channel"))
     commands: list[dict[str, Any]] = []
 
     if intent == "deposit_missing":
-        if not has_identity and not has_screenshot:
+        if has_structured_case or (has_identity and has_screenshot):
+            response = "已收到你的存款案件资料，我们会继续确认，有更新会在这里通知你。"
+            commands.append(_case_card_command(intent, slot_memory))
+        elif not has_identity and not has_screenshot:
             response = "请提供用户名或注册手机号，并上传存款付款截图。"
         elif has_screenshot and not has_identity:
             response = "已收到存款截图，请再提供用户名或注册手机号。"
         elif has_identity and not has_screenshot:
             response = "收到，请上传付款成功截图。"
-        else:
-            response = "已收到你的存款案件资料，我们会继续确认，有更新会在这里通知你。"
-            commands.append(_case_card_command(intent, slot_memory))
     else:
-        if not has_identity and not has_screenshot:
+        if has_structured_case or (has_identity and has_screenshot):
+            response = "已收到你的提款案件资料，我们会继续确认，有更新会在这里通知你。"
+            commands.append(_case_card_command(intent, slot_memory))
+        elif not has_identity and not has_screenshot:
             response = "请提供用户名或注册手机号，并上传提款截图。"
         elif has_screenshot and not has_identity:
             response = "已收到提款截图，请再提供用户名或注册手机号。"
         elif has_identity and not has_screenshot:
             response = "收到，请上传提款申请截图。"
-        else:
-            response = "已收到你的提款案件资料，我们会继续确认，有更新会在这里通知你。"
-            commands.append(_case_card_command(intent, slot_memory))
 
     next_state = {
         **state,

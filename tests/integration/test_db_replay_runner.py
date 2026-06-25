@@ -1,6 +1,8 @@
 import uuid
+import json
 
 import aiomysql
+import pytest
 
 from app.db.repositories import (
     ConversationRepository,
@@ -16,7 +18,10 @@ from app.services.gateway import GatewayService
 from app.workers.external_command_worker import process_pending_commands
 from app.workers.external_result_consumer import process_pending_results
 
-from conftest import create_bootstrapped_mysql_pool, mysql_test_config, run
+from conftest import assert_mysql_test_database, create_bootstrapped_mysql_pool, mysql_test_config, run
+
+
+pytestmark = [pytest.mark.integration, pytest.mark.mysql, pytest.mark.replay]
 
 
 def test_db_replay_runner_mysql_mock_closed_loop():
@@ -30,11 +35,44 @@ async def _test_db_replay_runner_mysql_mock_closed_loop():
     try:
         cases = [
             {
-                "name": "deposit_missing",
-                "text": "mi deposito no llegó",
+                "name": "deposit_missing_incomplete",
+                "text": "我的存款还没到账",
                 "expected_workflow_stage": "collecting_slots",
                 "expected_external_command_types": [],
                 "run_mock_result": False,
+            },
+            {
+                "name": "deposit_missing_complete",
+                "text": "我的存款订单 D123456 没到账，金额 1000，渠道 GCASH",
+                "expected_workflow_stage": "waiting_backend",
+                "expected_external_command_types": ["telegram.send_case_card"],
+                "expected_command_slots": {
+                    "deposit_order_id": "D123456",
+                    "amount": "1000",
+                    "channel": "GCASH",
+                },
+                "run_mock_result": True,
+                "expected_result_stage": "case_created",
+            },
+            {
+                "name": "withdrawal_missing_incomplete",
+                "text": "我的提款一直没到账",
+                "expected_workflow_stage": "collecting_slots",
+                "expected_external_command_types": [],
+                "run_mock_result": False,
+            },
+            {
+                "name": "withdrawal_missing_complete",
+                "text": "我的提款订单 W987654 没到账，金额 500，渠道 银行卡",
+                "expected_workflow_stage": "waiting_backend",
+                "expected_external_command_types": ["telegram.send_case_card"],
+                "expected_command_slots": {
+                    "withdrawal_order_id": "W987654",
+                    "amount": "500",
+                    "channel": "银行卡",
+                },
+                "run_mock_result": True,
+                "expected_result_stage": "case_created",
             },
             {
                 "name": "rag_placeholder",
@@ -83,11 +121,16 @@ async def run_db_replay_case(pool, test_id: str, case: dict) -> None:
     assert conversation["workflow_stage"] == case["expected_workflow_stage"]
 
     outbound_rows = await fetch_outbound_rows(pool, conversation["conversation_id"])
-    assert [row["action_type"] for row in outbound_rows].count("livechat.send_text") == 1
+    assert [row["action_type"] for row in outbound_rows].count("send_event") == 1
 
     command_rows = await fetch_external_command_rows(pool, conversation["conversation_id"])
     assert [row["command_type"] for row in command_rows] == case["expected_external_command_types"]
     assert len({row["dedup_key"] for row in command_rows}) == len(command_rows)
+    if case.get("expected_command_slots"):
+        payload = command_rows[0]["payload_json"]
+        slot_memory = payload["slot_memory"]
+        for key, expected in case["expected_command_slots"].items():
+            assert slot_memory[key] == expected
 
     duplicate_insert = await inbound_repository.insert(event)
     assert duplicate_insert["duplicate"] is True
@@ -192,10 +235,14 @@ async def fetch_external_command_rows(pool, conversation_id: str) -> list[dict]:
     async with pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                "SELECT id, command_type, status, dedup_key FROM external_commands WHERE conversation_id = %s ORDER BY id",
+                "SELECT id, command_type, status, dedup_key, payload_json FROM external_commands WHERE conversation_id = %s ORDER BY id",
                 (conversation_id,),
             )
-            return list(await cur.fetchall())
+            rows = list(await cur.fetchall())
+    for row in rows:
+        if isinstance(row["payload_json"], str):
+            row["payload_json"] = json.loads(row["payload_json"])
+    return rows
 
 
 async def fetch_external_command_result_rows(pool, conversation_id: str) -> list[dict]:
@@ -209,6 +256,7 @@ async def fetch_external_command_result_rows(pool, conversation_id: str) -> list
 
 
 async def cleanup_db_replay(pool, test_id: str) -> None:
+    await assert_mysql_test_database(pool)
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("DELETE FROM external_command_results WHERE chat_id LIKE %s", (f"{test_id}:%",))

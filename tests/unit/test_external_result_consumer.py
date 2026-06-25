@@ -253,6 +253,89 @@ def test_result_consumer_rag_placeholder_does_not_fabricate_facts():
     assert "尚未接入真实知识库" in text
 
 
+def test_result_consumer_telegram_case_created_updates_case_id():
+    processed, result_repository, conversation_repository, outbound_repository = run_consumer_for(
+        make_result("telegram.case.created") | {"result_json": {"case_id": "mock_case_001", "status": "created"}}
+    )
+
+    assert processed[0]["status"] == "PROCESSED"
+    assert result_repository.processed == [7]
+    assert conversation_repository.updated[0][1]["workflow_stage"] == "case_created"
+    assert conversation_repository.updated[0][1]["slot_memory"]["telegram_case_id"] == "mock_case_001"
+    assert "案件已建立" in outbound_repository.inserted[0]["payload_json"]["text"]
+
+
+def test_result_consumer_telegram_case_created_without_case_id_fails():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository([make_result("telegram.case.created") | {"result_json": {"status": "created"}}])
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository=result_repository,
+            conversation_repository=FakeConversationRepository(),
+            outbound_repository=FakeOutboundRepository(),
+            transaction_repository=FakeTransactionRepository(result_repository, FakeConversationRepository(), FakeOutboundRepository()),
+            limit=20,
+            worker_id="consumer-a",
+            max_retries=2,
+        )
+    )
+
+    assert result_repository.processed == []
+    assert result_repository.failed == [(7, "telegram.case.created result missing case_id", 2)]
+    assert processed[0]["status"] == "FAILED"
+
+
+def test_result_consumer_pending_reply_lookup_result_found_writes_reply():
+    _processed, result_repository, conversation_repository, outbound_repository = run_consumer_for(
+        make_result("pending_reply.lookup.result")
+        | {"result_json": {"status": "found", "reply_text": "上一笔案件仍在处理中，请稍候。"}}
+    )
+
+    assert result_repository.processed == [7]
+    assert conversation_repository.updated[0][1]["workflow_stage"] == "pending_reply_found"
+    assert "上一笔案件仍在处理中" in outbound_repository.inserted[0]["payload_json"]["text"]
+
+
+def test_result_consumer_backend_query_result_success_uses_result_answer():
+    _processed, result_repository, conversation_repository, outbound_repository = run_consumer_for(
+        make_result("backend.query.result")
+        | {"result_json": {"status": "success", "answer": "查询已完成，当前为 mock 后台结果。"}}
+    )
+
+    assert result_repository.processed == [7]
+    assert conversation_repository.updated[0][1]["workflow_stage"] == "completed"
+    assert "mock 后台结果" in outbound_repository.inserted[0]["payload_json"]["text"]
+
+
+def test_result_consumer_backend_query_result_failed_is_retryable_failure():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {"result_json": {"status": "failed", "error_code": "NOT_FOUND", "error_message": "找不到订单"}}
+        ]
+    )
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository=result_repository,
+            conversation_repository=FakeConversationRepository(),
+            outbound_repository=FakeOutboundRepository(),
+            transaction_repository=FakeTransactionRepository(result_repository, FakeConversationRepository(), FakeOutboundRepository()),
+            limit=20,
+            worker_id="consumer-a",
+            max_retries=2,
+        )
+    )
+
+    assert result_repository.processed == []
+    assert result_repository.failed == [(7, "backend.query.result failed: NOT_FOUND 找不到订单", 2)]
+    assert processed[0]["status"] == "FAILED"
+
+
 def test_result_consumer_marks_failed_when_outbound_write_fails():
     from app.workers.external_result_consumer import process_pending_results
 
@@ -317,3 +400,162 @@ def test_external_result_consumer_two_worker_leases_do_not_overlap():
 
     assert [item["id"] for item in first] == [7]
     assert second == []
+
+
+def test_external_result_consumer_polling_loop_sleeps_then_processes_second_round():
+    from app.workers.external_result_consumer import run_polling_loop
+
+    class DelayedResultRepository(FakeResultRepository):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.round = 0
+            self.recovered = 0
+
+        async def recover_expired_leases(self):
+            self.recovered += 1
+            return 0
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            self.round += 1
+            if self.round == 1:
+                return []
+            return [make_result("backend.query.result") | {"result_json": {"status": "success", "answer": "mock ok"}}]
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    result_repository = DelayedResultRepository()
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+
+    asyncio.run(
+        run_polling_loop(
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            transaction_repository=FakeTransactionRepository(result_repository, conversation_repository, outbound_repository),
+            poll_seconds=5,
+            limit=20,
+            worker_id="consumer-a",
+            recover_interval_seconds=0,
+            iterations=2,
+            sleep=fake_sleep,
+        )
+    )
+
+    assert sleeps == [5]
+    assert result_repository.processed == [7]
+    assert "mock ok" in outbound_repository.inserted[0]["payload_json"]["text"]
+
+
+def test_external_result_consumer_polling_loop_recovery_failure_continues(caplog):
+    from app.workers.external_result_consumer import run_polling_loop
+
+    class RecoveringResultRepository(FakeResultRepository):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.recovery_calls = 0
+            self.lease_calls = 0
+
+        async def recover_expired_leases(self):
+            self.recovery_calls += 1
+            if self.recovery_calls == 1:
+                raise RuntimeError("recover failed")
+            return 0
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            self.lease_calls += 1
+            if self.lease_calls == 2:
+                return [make_result("backend.query.result") | {"result_json": {"status": "success", "answer": "mock ok"}}]
+            return []
+
+    async def fake_sleep(seconds):
+        return None
+
+    result_repository = RecoveringResultRepository()
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+
+    asyncio.run(
+        run_polling_loop(
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            transaction_repository=FakeTransactionRepository(result_repository, conversation_repository, outbound_repository),
+            poll_seconds=5,
+            limit=20,
+            worker_id="consumer-a",
+            recover_interval_seconds=1,
+            last_recovered_at=-10.0,
+            iterations=2,
+            sleep=fake_sleep,
+        )
+    )
+
+    assert "Failed to recover expired external_command_result leases." in caplog.text
+    assert result_repository.processed == [7]
+
+
+def test_external_result_consumer_crash_recovery_processes_expired_result_once():
+    from app.workers.external_result_consumer import process_pending_results
+
+    class InMemoryResultRepository(FakeResultRepository):
+        def __init__(self) -> None:
+            super().__init__([make_result("backend.query.result") | {"result_json": {"status": "success", "answer": "mock ok"}}])
+            self.rows[0]["locked_by"] = None
+            self.rows[0]["expired"] = False
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            row = self.rows[0]
+            if row.get("status") == "PROCESSED":
+                return []
+            if row.get("locked_by") is None or row.get("expired"):
+                row["locked_by"] = worker_id
+                row["expired"] = False
+                return [row]
+            return []
+
+        async def recover_expired_leases(self):
+            row = self.rows[0]
+            if row.get("locked_by") and row.get("expired"):
+                row["locked_by"] = None
+                return 1
+            return 0
+
+        async def mark_processed(self, result_id: int) -> None:
+            await super().mark_processed(result_id)
+            self.rows[0]["status"] = "PROCESSED"
+
+    result_repository = InMemoryResultRepository()
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+
+    first = asyncio.run(result_repository.lease_pending(limit=1, worker_id="consumer-a", lease_seconds=1))
+    result_repository.rows[0]["expired"] = True
+    recovered = asyncio.run(result_repository.recover_expired_leases())
+    second = asyncio.run(
+        process_pending_results(
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            transaction_repository=FakeTransactionRepository(result_repository, conversation_repository, outbound_repository),
+            worker_id="consumer-b",
+        )
+    )
+    third = asyncio.run(
+        process_pending_results(
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            transaction_repository=FakeTransactionRepository(result_repository, conversation_repository, outbound_repository),
+            worker_id="consumer-c",
+        )
+    )
+
+    assert [row["id"] for row in first] == [7]
+    assert recovered == 1
+    assert [item["id"] for item in second] == [7]
+    assert third == []
+    assert result_repository.processed == [7]

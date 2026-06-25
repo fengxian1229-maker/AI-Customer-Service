@@ -72,16 +72,8 @@ async def process_pending_results(
     processed = []
     for row in rows:
         try:
-            handler = RESULT_HANDLERS.get(row["result_type"])
-            if handler is None:
-                raise ValueError(f"unsupported result_type: {row['result_type']}")
-
-            graph_state = {
-                "status": handler.get("status") or "WAITING_EXTERNAL",
-                "active_workflow": handler.get("active_workflow"),
-                "workflow_stage": handler.get("workflow_stage"),
-                "slot_memory": {},
-            }
+            handler = build_result_handler(row)
+            graph_state = handler["graph_state"]
             outbound = build_text_outbox(
                 chat_id=row["chat_id"],
                 thread_id=row.get("thread_id"),
@@ -100,6 +92,78 @@ async def process_pending_results(
             await result_repository.mark_processing_failed(row["id"], str(exc), max_retries=max_retries)
             processed.append({"id": row["id"], "result_type": row.get("result_type"), "status": "FAILED", "error": str(exc)})
     return processed
+
+
+def build_result_handler(row: dict) -> dict:
+    result_type = row["result_type"]
+    result_json = row.get("result_json") or {}
+    if result_type == "telegram.case.created":
+        case_id = result_json.get("case_id")
+        if not case_id:
+            raise ValueError("telegram.case.created result missing case_id")
+        return {
+            "text": "案件已建立，我们会继续跟进，请稍候。",
+            "graph_state": {
+                "status": "WAITING_EXTERNAL",
+                "active_workflow": None,
+                "workflow_stage": "case_created",
+                "slot_memory": {"telegram_case_id": case_id},
+            },
+        }
+    if result_type == "telegram.append_to_case.result":
+        if result_json.get("status") not in {"appended", "success", "MOCKED"}:
+            raise ValueError("telegram.append_to_case.result failed")
+        return {
+            "text": result_json.get("message") or "补充资料已收到，我们会继续跟进，请稍候。",
+            "graph_state": {
+                "status": "WAITING_EXTERNAL",
+                "active_workflow": None,
+                "workflow_stage": "case_appended",
+                "slot_memory": {"telegram_append_status": result_json.get("status")},
+            },
+        }
+    if result_type == "pending_reply.lookup.result":
+        if result_json.get("status") != "found" or not result_json.get("reply_text"):
+            raise ValueError("pending_reply.lookup.result not found")
+        return {
+            "text": result_json["reply_text"],
+            "graph_state": {
+                "status": "AI_ACTIVE",
+                "active_workflow": "pending_reply_lookup",
+                "workflow_stage": "pending_reply_found",
+                "slot_memory": {"pending_reply_status": "found"},
+            },
+        }
+    if result_type == "backend.query.result":
+        if result_json.get("status") != "success":
+            error_code = result_json.get("error_code") or "UNKNOWN"
+            error_message = result_json.get("error_message") or ""
+            raise ValueError(f"backend.query.result failed: {error_code} {error_message}".strip())
+        answer = result_json.get("answer")
+        if not answer:
+            raise ValueError("backend.query.result missing answer")
+        return {
+            "text": answer,
+            "graph_state": {
+                "status": "AI_ACTIVE",
+                "active_workflow": None,
+                "workflow_stage": "completed",
+                "slot_memory": {"backend_query_status": "success"},
+            },
+        }
+
+    handler = RESULT_HANDLERS.get(result_type)
+    if handler is None:
+        raise ValueError(f"unsupported result_type: {result_type}")
+    return {
+        "text": handler["text"],
+        "graph_state": {
+            "status": handler.get("status") or "WAITING_EXTERNAL",
+            "active_workflow": handler.get("active_workflow"),
+            "workflow_stage": handler.get("workflow_stage"),
+            "slot_memory": {},
+        },
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -194,29 +258,62 @@ async def run_forever(
         conversation_repository = ConversationRepository(pool)
         outbound_repository = OutboundMessageRepository(pool)
         transaction_repository = ExternalResultTransactionRepository(pool)
-        while True:
-            last_recovered_at = await maybe_recover_expired_leases(
-                result_repository,
-                last_recovered_at=last_recovered_at,
-                recover_interval_seconds=recover_interval_seconds,
-            )
-            try:
-                await process_pending_results(
-                    result_repository=result_repository,
-                    conversation_repository=conversation_repository,
-                    outbound_repository=outbound_repository,
-                    limit=limit,
-                    transaction_repository=transaction_repository,
-                    worker_id=worker_id,
-                    lease_seconds=lease_seconds,
-                    max_retries=max_retries,
-                )
-            except Exception:
-                logger.exception("external_result_consumer polling iteration failed.")
-            await asyncio.sleep(settings.poll_seconds)
+        await run_polling_loop(
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            transaction_repository=transaction_repository,
+            poll_seconds=settings.poll_seconds,
+            limit=limit,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            max_retries=max_retries,
+            recover_interval_seconds=recover_interval_seconds,
+            last_recovered_at=last_recovered_at,
+        )
     finally:
         pool.close()
         await pool.wait_closed()
+
+
+async def run_polling_loop(
+    result_repository: ExternalCommandResultRepository,
+    conversation_repository: ConversationRepository,
+    outbound_repository: OutboundMessageRepository,
+    transaction_repository: ExternalResultTransactionRepository,
+    poll_seconds: int,
+    limit: int,
+    worker_id: str | None = None,
+    lease_seconds: int = 60,
+    max_retries: int = 3,
+    recover_interval_seconds: int = 30,
+    last_recovered_at: float | None = None,
+    iterations: int | None = None,
+    sleep=asyncio.sleep,
+) -> None:
+    iteration = 0
+    while iterations is None or iteration < iterations:
+        last_recovered_at = await maybe_recover_expired_leases(
+            result_repository,
+            last_recovered_at=last_recovered_at,
+            recover_interval_seconds=recover_interval_seconds,
+        )
+        try:
+            await process_pending_results(
+                result_repository=result_repository,
+                conversation_repository=conversation_repository,
+                outbound_repository=outbound_repository,
+                limit=limit,
+                transaction_repository=transaction_repository,
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+                max_retries=max_retries,
+            )
+        except Exception:
+            logger.exception("external_result_consumer polling iteration failed.")
+        iteration += 1
+        if iterations is None or iteration < iterations:
+            await sleep(poll_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:
