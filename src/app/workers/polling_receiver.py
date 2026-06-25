@@ -3,8 +3,9 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from typing import Awaitable, Callable
 
-from app.channels.livechat.polling_receiver import ReceiverState, build_receiver_state, poll_once
+from app.channels.livechat.polling_receiver import PollingIngressReceiver, ReceiverState, build_receiver_state
 from app.channels.livechat.sender_client import LiveChatSenderClient
 from app.core.settings import Settings
 from app.db.bootstrap import bootstrap_database
@@ -19,25 +20,13 @@ async def run_polling_cycle(
     limit: int = 20,
     allowed_group_ids: set[int] | None = None,
 ) -> dict:
-    listed = await client.list_chats(limit=limit)
-    stats = {
-        "listed": len(listed),
-        "matched_group": 0,
-        "inserted": 0,
-        "duplicates": 0,
-        "ignored_self": 0,
-        "ignored_agent": 0,
-    }
-    inserted = await poll_once(
-        client=StaticChatClient(listed, client),
+    receiver = PollingIngressReceiver(
+        client=client,
         repository=repository,
+        allowed_group_ids=allowed_group_ids or set(),
         self_author_ids=self_author_ids,
-        limit=limit,
-        allowed_group_ids=allowed_group_ids,
-        stats=stats,
     )
-    stats["events"] = inserted
-    return stats
+    return await receiver.receive_once(limit=limit)
 
 
 class StaticChatClient:
@@ -81,6 +70,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--once", action="store_true", help="Run one polling cycle and exit.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum chats to list in one cycle.")
     parser.add_argument("--groups", help="Comma-separated LiveChat group ids, for example 23 or 23,0.")
+    parser.add_argument("--sleep-seconds", type=float, default=5.0, help="Seconds to sleep between polling cycles.")
+    parser.add_argument("--max-iterations", type=int, help="Maximum polling cycles before exiting.")
     return parser
 
 
@@ -129,12 +120,36 @@ async def run_once(limit: int, groups: set[int]) -> dict:
             "matched_group": result["matched_group"],
             "inserted": result["inserted"],
             "duplicates": result["duplicates"],
+            "ignored": result["ignored"],
             "ignored_self": result["ignored_self"],
             "ignored_agent": result["ignored_agent"],
+            "ignored_group": result["ignored_group"],
         }
     finally:
         pool.close()
         await pool.wait_closed()
+
+
+async def run_polling_loop(
+    limit: int,
+    groups: set[int],
+    sleep_seconds: float,
+    max_iterations: int | None = None,
+    run_once_func: Callable[[int, set[int]], Awaitable[dict]] = run_once,
+    sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> list[dict]:
+    results = []
+    iteration = 0
+    while max_iterations is None or iteration < max_iterations:
+        iteration += 1
+        result = await run_once_func(limit, groups)
+        result = {**result, "mode": "loop", "iteration": iteration}
+        results.append(result)
+        print(json.dumps(result, ensure_ascii=False))
+        if max_iterations is not None and iteration >= max_iterations:
+            break
+        await sleep_func(sleep_seconds)
+    return results
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,8 +160,18 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"worker": "polling_receiver", "error": str(exc)}, ensure_ascii=False))
         return 2
 
-    result = asyncio.run(run_once(limit=args.limit, groups=groups))
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.once:
+        result = asyncio.run(run_once(limit=args.limit, groups=groups))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        asyncio.run(
+            run_polling_loop(
+                limit=args.limit,
+                groups=groups,
+                sleep_seconds=args.sleep_seconds,
+                max_iterations=args.max_iterations,
+            )
+        )
     return 0
 
 
@@ -159,6 +184,7 @@ __all__ = [
     "build_arg_parser",
     "build_receiver_state",
     "parse_group_ids",
+    "run_polling_loop",
     "run_polling_cycle",
     "smoke_test_polling",
 ]

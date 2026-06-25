@@ -11,6 +11,26 @@ Current scope:
 - Consume inbound events into `conversation_states` and `outbound_messages`.
 - Send pending text replies through LiveChat `send_event`.
 
+Ingress Direction
+-----------------
+
+The current LiveChat polling path is an early-stage fallback ingress. It is intentionally light: it lists chats, fetches chat details when permitted, filters allowed groups and agent/self messages, normalizes supported events, and writes `inbound_events`.
+
+The planned ingress stages are:
+
+- Early stage: polling fallback receiver for local smoke tests and bounded fallback intake.
+- Mid stage: WebSocket realtime ingress.
+- Production stage: webhook ingress.
+
+All ingress implementations must normalize into the same `inbound_events` structure through the shared ingress contract. The downstream path starts at `GatewayConsumer`, so `GatewayConsumer -> conversation_states / outbound_messages / external_commands -> workers` must not change when the ingress source changes.
+
+Current receiver boundaries:
+
+- Polling does not call LangGraph.
+- Polling does not run SOP, RAG, backend lookup, Telegram handoff, or sender logic.
+- Polling does not implement worker lease, production scheduling, or cursor tables.
+- `--groups` or `LIVECHAT_ALLOWED_GROUP_IDS` must be explicit.
+
 Setup
 -----
 
@@ -44,6 +64,19 @@ Poll LiveChat Once
 
 ```bash
 PYTHONPATH=src LIVECHAT_ALLOWED_GROUP_IDS=23 uv run --group dev python -m app.workers.polling_receiver --once --groups 23 --limit 20
+```
+
+Run Polling Fallback Loop
+-------------------------
+
+```bash
+PYTHONPATH=src LIVECHAT_ALLOWED_GROUP_IDS=23 uv run --group dev python -m app.workers.polling_receiver --groups 23 --limit 20 --sleep-seconds 5
+```
+
+For bounded local tests:
+
+```bash
+PYTHONPATH=src LIVECHAT_ALLOWED_GROUP_IDS=23 uv run --group dev python -m app.workers.polling_receiver --groups 23 --limit 20 --sleep-seconds 1 --max-iterations 2
 ```
 
 Run Gateway Once

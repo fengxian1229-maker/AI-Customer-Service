@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from app.channels.ingress import IngressEvent, IngressNormalizeResult
 from app.schemas.events import InboundEvent
 
 
@@ -31,6 +32,16 @@ def sender_role_from_author(author_id: str | None, self_author_ids: set[str]) ->
     if author_id in self_author_ids:
         return "self_agent"
     return "external"
+
+
+def author_type_from_payload(payload: dict[str, Any], author_id: str | None) -> str | None:
+    if not author_id:
+        return None
+    for user in payload.get("chat_users") or []:
+        if str(user.get("id")) == str(author_id):
+            user_type = user.get("type")
+            return str(user_type) if user_type is not None else None
+    return None
 
 
 def standard_event_from_type(event_type: str | None) -> str:
@@ -70,4 +81,23 @@ def normalize_polling_event(payload: dict[str, Any], self_author_ids: set[str]) 
         payload_json=normalized_payload,
         ignored=ignored,
         ignore_reason="self_message" if ignored else None,
+    )
+
+
+def normalize_ingress_event(ingress_event: IngressEvent, self_author_ids: set[str]) -> IngressNormalizeResult:
+    if ingress_event.source != "polling_fallback":
+        return IngressNormalizeResult(event=None, ignored=True, ignore_reason="unsupported_source")
+
+    payload = ingress_event.payload
+    event = payload.get("event") or {}
+    author_id = event.get("author_id")
+    if author_id and str(author_id) in self_author_ids:
+        return IngressNormalizeResult(event=None, ignored=True, ignore_reason="self_message")
+    if author_type_from_payload(payload, author_id) == "agent":
+        return IngressNormalizeResult(event=None, ignored=True, ignore_reason="agent_message")
+
+    return IngressNormalizeResult(
+        event=normalize_polling_event(payload, self_author_ids=self_author_ids),
+        ignored=False,
+        ignore_reason=None,
     )
