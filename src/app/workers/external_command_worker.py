@@ -1,8 +1,10 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import socket
+import time
 
 from app.core.settings import Settings
 from app.db.mysql import create_pool
@@ -17,6 +19,9 @@ SUPPORTED_COMMAND_TYPES = {
     "human_handoff.requested",
     "rag.placeholder",
 }
+
+
+logger = logging.getLogger(__name__)
 
 
 MOCK_RESULT_BY_COMMAND_TYPE = {
@@ -131,6 +136,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
     parser.add_argument("--lease-seconds", type=int, default=60, help="Seconds before a queue lease expires.")
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum processing attempts before FAILED.")
+    parser.add_argument(
+        "--recover-interval-seconds",
+        type=int,
+        default=30,
+        help="Seconds between expired lease recovery attempts in long-running mode. Use <= 0 to disable.",
+    )
     return parser
 
 
@@ -179,19 +190,95 @@ async def run_once(
         await pool.wait_closed()
 
 
+async def maybe_recover_expired_leases(
+    repository: ExternalCommandRepository,
+    last_recovered_at: float | None,
+    recover_interval_seconds: int,
+    now: float | None = None,
+) -> float | None:
+    if recover_interval_seconds <= 0:
+        return last_recovered_at
+    now = time.monotonic() if now is None else now
+    if last_recovered_at is not None and now - last_recovered_at < recover_interval_seconds:
+        return last_recovered_at
+    try:
+        recovered = await repository.recover_expired_leases()
+        if recovered:
+            logger.info("Recovered %s expired external_command leases.", recovered)
+    except Exception:
+        logger.exception("Failed to recover expired external_command leases.")
+    return now
+
+
+async def run_forever(
+    limit: int,
+    dry_run: bool,
+    emit_result: bool = False,
+    worker_id: str | None = None,
+    lease_seconds: int = 60,
+    max_retries: int = 3,
+    recover_interval_seconds: int = 30,
+) -> None:
+    settings = Settings(
+        livechat_agent_access_token="unused-for-external-command-worker",
+        livechat_account_id="unused-for-external-command-worker",
+    )
+    pool = await create_pool(settings)
+    last_recovered_at = None
+    try:
+        repository = ExternalCommandRepository(pool)
+        result_repository = ExternalCommandResultRepository(pool) if emit_result else None
+        while True:
+            last_recovered_at = await maybe_recover_expired_leases(
+                repository,
+                last_recovered_at=last_recovered_at,
+                recover_interval_seconds=recover_interval_seconds,
+            )
+            try:
+                await process_pending_commands(
+                    repository,
+                    result_repository=result_repository,
+                    limit=limit,
+                    dry_run=dry_run,
+                    emit_result=emit_result,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                    max_retries=max_retries,
+                )
+            except Exception:
+                logger.exception("external_command_worker polling iteration failed.")
+            await asyncio.sleep(settings.poll_seconds)
+    finally:
+        pool.close()
+        await pool.wait_closed()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    result = asyncio.run(
-        run_once(
-            limit=args.limit,
-            dry_run=args.dry_run,
-            emit_result=args.emit_result,
-            worker_id=args.worker_id,
-            lease_seconds=args.lease_seconds,
-            max_retries=args.max_retries,
+    if args.once:
+        result = asyncio.run(
+            run_once(
+                limit=args.limit,
+                dry_run=args.dry_run,
+                emit_result=args.emit_result,
+                worker_id=args.worker_id,
+                lease_seconds=args.lease_seconds,
+                max_retries=args.max_retries,
+            )
         )
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        asyncio.run(
+            run_forever(
+                limit=args.limit,
+                dry_run=args.dry_run,
+                emit_result=args.emit_result,
+                worker_id=args.worker_id,
+                lease_seconds=args.lease_seconds,
+                max_retries=args.max_retries,
+                recover_interval_seconds=args.recover_interval_seconds,
+            )
+        )
     return 0
 
 

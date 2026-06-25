@@ -585,6 +585,74 @@ def test_external_result_transaction_repository_commits_state_outbox_and_process
     assert pool.last_connection.rolled_back is False
 
 
+def test_external_result_transaction_repository_writes_external_commands_in_same_transaction():
+    import asyncio
+
+    calls = []
+    captured_commands = []
+
+    class ConversationRepo:
+        async def get_or_create_on_connection(self, conn, chat_id: str, thread_id: str | None = None):
+            calls.append("get_conversation")
+            return {"conversation_id": "livechat:chat-1"}
+
+        async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict):
+            calls.append("update_state")
+
+    class OutboundRepo:
+        async def insert_idempotent_on_connection(self, conn, message: dict):
+            calls.append("insert_outbound")
+            return {"inserted": True}
+
+    class ExternalCommandRepo:
+        async def insert_idempotent_on_connection(self, conn, command: dict):
+            calls.append("insert_external_command")
+            captured_commands.append(dict(command))
+            return {"inserted": True, "duplicate": False, "id": 55}
+
+    class ResultRepo:
+        async def mark_processed_on_connection(self, conn, result_id: int):
+            calls.append("mark_processed")
+
+    pool = FakePool(FakeCursor(rowcount=1))
+    repository = ExternalResultTransactionRepository(
+        pool,
+        conversation_repository=ConversationRepo(),
+        outbound_repository=OutboundRepo(),
+        external_command_repository=ExternalCommandRepo(),
+        result_repository=ResultRepo(),
+    )
+
+    asyncio.run(
+        repository.process_result_transactionally(
+            {
+                "id": 7,
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "conversation_id": "livechat:chat-1",
+            },
+            graph_state={"workflow_stage": "needs_user_supplement", "slot_memory": {}},
+            outbound_messages=[{"conversation_id": "livechat:chat-1"}],
+            external_commands=[
+                {
+                    "tenant_id": "default",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 11,
+                    "command_type": "telegram.append_to_case",
+                    "payload_json": {"text": "needs screenshot"},
+                }
+            ],
+        )
+    )
+
+    assert calls == ["get_conversation", "update_state", "insert_outbound", "insert_external_command", "mark_processed"]
+    assert captured_commands[0]["conversation_id"] == "livechat:chat-1"
+    assert captured_commands[0]["command_type"] == "telegram.append_to_case"
+    assert pool.last_connection.committed is True
+    assert pool.last_connection.rolled_back is False
+
+
 def test_external_result_transaction_repository_rolls_back_before_processed_on_outbox_failure():
     import asyncio
 
@@ -636,3 +704,115 @@ def test_external_result_transaction_repository_rolls_back_before_processed_on_o
     assert calls == ["get_conversation", "update_state", "insert_outbound"]
     assert pool.last_connection.committed is False
     assert pool.last_connection.rolled_back is True
+
+
+def test_external_result_transaction_repository_rolls_back_on_state_external_command_and_processed_failures():
+    import asyncio
+
+    async def assert_failure(conversation_repo, outbound_repo, external_command_repo, result_repo, expected_calls, error):
+        calls.clear()
+        pool = FakePool(FakeCursor(rowcount=1))
+        repository = ExternalResultTransactionRepository(
+            pool,
+            conversation_repository=conversation_repo,
+            outbound_repository=outbound_repo,
+            external_command_repository=external_command_repo,
+            result_repository=result_repo,
+        )
+        try:
+            await repository.process_result_transactionally(
+                {
+                    "id": 7,
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "conversation_id": "livechat:chat-1",
+                },
+                graph_state={"workflow_stage": "completed", "slot_memory": {}},
+                outbound_messages=[{"conversation_id": "livechat:chat-1"}],
+                external_commands=[
+                    {
+                        "tenant_id": "default",
+                        "chat_id": "chat-1",
+                        "thread_id": "thread-1",
+                        "command_type": "backend.query",
+                        "payload_json": {"next": True},
+                    }
+                ],
+            )
+        except RuntimeError as exc:
+            assert str(exc) == error
+        else:
+            raise AssertionError(f"expected {error}")
+        assert calls == expected_calls
+        assert pool.last_connection.committed is False
+        assert pool.last_connection.rolled_back is True
+
+    calls = []
+
+    class BaseConversationRepo:
+        async def get_or_create_on_connection(self, conn, chat_id: str, thread_id: str | None = None):
+            calls.append("get_conversation")
+            return {"conversation_id": "livechat:chat-1"}
+
+        async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict):
+            calls.append("update_state")
+
+    class FailingConversationRepo(BaseConversationRepo):
+        async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict):
+            calls.append("update_state")
+            raise RuntimeError("state failed")
+
+    class OutboundRepo:
+        async def insert_idempotent_on_connection(self, conn, message: dict):
+            calls.append("insert_outbound")
+            return {"inserted": True}
+
+    class ExternalCommandRepo:
+        async def insert_idempotent_on_connection(self, conn, command: dict):
+            calls.append("insert_external_command")
+            return {"inserted": True, "duplicate": False, "id": 55}
+
+    class FailingExternalCommandRepo:
+        async def insert_idempotent_on_connection(self, conn, command: dict):
+            calls.append("insert_external_command")
+            raise RuntimeError("external command failed")
+
+    class ResultRepo:
+        async def mark_processed_on_connection(self, conn, result_id: int):
+            calls.append("mark_processed")
+
+    class FailingResultRepo:
+        async def mark_processed_on_connection(self, conn, result_id: int):
+            calls.append("mark_processed")
+            raise RuntimeError("mark processed failed")
+
+    asyncio.run(
+        assert_failure(
+            FailingConversationRepo(),
+            OutboundRepo(),
+            ExternalCommandRepo(),
+            ResultRepo(),
+            ["get_conversation", "update_state"],
+            "state failed",
+        )
+    )
+    asyncio.run(
+        assert_failure(
+            BaseConversationRepo(),
+            OutboundRepo(),
+            FailingExternalCommandRepo(),
+            ResultRepo(),
+            ["get_conversation", "update_state", "insert_outbound", "insert_external_command"],
+            "external command failed",
+        )
+    )
+    asyncio.run(
+        assert_failure(
+            BaseConversationRepo(),
+            OutboundRepo(),
+            ExternalCommandRepo(),
+            FailingResultRepo(),
+            ["get_conversation", "update_state", "insert_outbound", "insert_external_command", "mark_processed"],
+            "mark processed failed",
+        )
+    )

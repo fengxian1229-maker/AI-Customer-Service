@@ -1,0 +1,218 @@
+import uuid
+
+import aiomysql
+
+from app.db.repositories import (
+    ConversationRepository,
+    ExternalCommandRepository,
+    ExternalCommandResultRepository,
+    ExternalResultTransactionRepository,
+    GatewayTransactionRepository,
+    InboundEventRepository,
+    OutboundMessageRepository,
+)
+from app.schemas.events import InboundEvent
+from app.services.gateway import GatewayService
+from app.workers.external_command_worker import process_pending_commands
+from app.workers.external_result_consumer import process_pending_results
+
+from conftest import create_bootstrapped_mysql_pool, mysql_test_config, run
+
+
+def test_db_replay_runner_mysql_mock_closed_loop():
+    mysql_test_config()
+    run(_test_db_replay_runner_mysql_mock_closed_loop())
+
+
+async def _test_db_replay_runner_mysql_mock_closed_loop():
+    test_id = f"db-replay-{uuid.uuid4().hex}"
+    pool = await create_bootstrapped_mysql_pool()
+    try:
+        cases = [
+            {
+                "name": "deposit_missing",
+                "text": "mi deposito no llegó",
+                "expected_workflow_stage": "collecting_slots",
+                "expected_external_command_types": [],
+                "run_mock_result": False,
+            },
+            {
+                "name": "rag_placeholder",
+                "text": "que promociones tienen hoy",
+                "expected_workflow_stage": None,
+                "expected_external_command_types": ["rag.placeholder"],
+                "run_mock_result": True,
+                "expected_result_stage": "rag_placeholder_dry_run",
+            },
+            {
+                "name": "human_handoff",
+                "text": "quiero hablar con un agente humano",
+                "expected_workflow_stage": "handoff_requested",
+                "expected_external_command_types": ["human_handoff.requested"],
+                "run_mock_result": True,
+                "expected_result_stage": "handoff_requested",
+            },
+        ]
+
+        for case in cases:
+            await run_db_replay_case(pool, test_id, case)
+    finally:
+        await cleanup_db_replay(pool, test_id)
+        pool.close()
+        await pool.wait_closed()
+
+
+async def run_db_replay_case(pool, test_id: str, case: dict) -> None:
+    event = make_replay_event(test_id, case)
+    inbound_repository = InboundEventRepository(pool)
+    insert_result = await inbound_repository.insert(event)
+    assert insert_result["inserted"] is True
+    inbound_event_id = await fetch_inbound_event_id(pool, event.dedup_key)
+
+    service = GatewayService(
+        transactional_repository=GatewayTransactionRepository(pool),
+    )
+    first_result = await service.process_event(inbound_event_id, event)
+    second_result = await service.process_event(inbound_event_id, event)
+
+    assert first_result["graph_state"]["workflow_stage"] == case["expected_workflow_stage"]
+    assert second_result["graph_state"]["workflow_stage"] == case["expected_workflow_stage"]
+
+    conversation = await fetch_conversation(pool, event.chat_id)
+    assert conversation["conversation_id"] == f"livechat:{event.chat_id}"
+    assert conversation["workflow_stage"] == case["expected_workflow_stage"]
+
+    outbound_rows = await fetch_outbound_rows(pool, conversation["conversation_id"])
+    assert [row["action_type"] for row in outbound_rows].count("livechat.send_text") == 1
+
+    command_rows = await fetch_external_command_rows(pool, conversation["conversation_id"])
+    assert [row["command_type"] for row in command_rows] == case["expected_external_command_types"]
+    assert len({row["dedup_key"] for row in command_rows}) == len(command_rows)
+
+    duplicate_insert = await inbound_repository.insert(event)
+    assert duplicate_insert["duplicate"] is True
+    assert len(await fetch_external_command_rows(pool, conversation["conversation_id"])) == len(command_rows)
+    assert len(await fetch_outbound_rows(pool, conversation["conversation_id"])) == len(outbound_rows)
+
+    if not case["run_mock_result"]:
+        return
+
+    command_repository = ExternalCommandRepository(pool)
+    result_repository = ExternalCommandResultRepository(pool)
+    worker_results = await process_pending_commands(
+        command_repository,
+        result_repository=result_repository,
+        limit=20,
+        dry_run=True,
+        emit_result=True,
+        worker_id=f"{test_id}:command-worker",
+    )
+    assert len(worker_results) == len(command_rows)
+
+    result_rows = await fetch_external_command_result_rows(pool, conversation["conversation_id"])
+    assert len(result_rows) == len(command_rows)
+    assert {row["status"] for row in result_rows} == {"PENDING"}
+
+    consumer_results = await process_pending_results(
+        result_repository=result_repository,
+        conversation_repository=ConversationRepository(pool),
+        outbound_repository=OutboundMessageRepository(pool),
+        transaction_repository=ExternalResultTransactionRepository(pool),
+        limit=20,
+        worker_id=f"{test_id}:result-consumer",
+    )
+    assert len(consumer_results) == len(result_rows)
+    assert {row["status"] for row in await fetch_external_command_result_rows(pool, conversation["conversation_id"])} == {
+        "PROCESSED"
+    }
+
+    updated_conversation = await fetch_conversation(pool, event.chat_id)
+    assert updated_conversation["workflow_stage"] == case["expected_result_stage"]
+
+    processed_again = await process_pending_results(
+        result_repository=result_repository,
+        conversation_repository=ConversationRepository(pool),
+        outbound_repository=OutboundMessageRepository(pool),
+        transaction_repository=ExternalResultTransactionRepository(pool),
+        limit=20,
+        worker_id=f"{test_id}:result-consumer-repeat",
+    )
+    assert processed_again == []
+
+
+def make_replay_event(test_id: str, case: dict) -> InboundEvent:
+    chat_id = f"{test_id}:{case['name']}:chat"
+    event_id = f"{test_id}:{case['name']}:event"
+    return InboundEvent(
+        source="db_replay",
+        raw_action="db_replay.message",
+        chat_id=chat_id,
+        thread_id=f"{test_id}:{case['name']}:thread",
+        event_id=event_id,
+        event_type="message",
+        standard_event_type="MESSAGE_CREATED",
+        author_id="customer",
+        sender_role="external",
+        occurred_at="2026-06-25 00:00:00.000000",
+        dedup_key=f"db_replay:{event_id}",
+        payload_json={"event": {"text": case["text"]}, "text": case["text"]},
+        ignored=False,
+    )
+
+
+async def fetch_inbound_event_id(pool, dedup_key: str) -> int:
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT id FROM inbound_events WHERE dedup_key = %s", (dedup_key,))
+            row = await cur.fetchone()
+    return row[0]
+
+
+async def fetch_conversation(pool, chat_id: str) -> dict:
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT conversation_id, chat_id, active_workflow, workflow_stage FROM conversation_states WHERE chat_id = %s",
+                (chat_id,),
+            )
+            return await cur.fetchone()
+
+
+async def fetch_outbound_rows(pool, conversation_id: str) -> list[dict]:
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT id, action_type, status FROM outbound_messages WHERE conversation_id = %s ORDER BY id",
+                (conversation_id,),
+            )
+            return list(await cur.fetchall())
+
+
+async def fetch_external_command_rows(pool, conversation_id: str) -> list[dict]:
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT id, command_type, status, dedup_key FROM external_commands WHERE conversation_id = %s ORDER BY id",
+                (conversation_id,),
+            )
+            return list(await cur.fetchall())
+
+
+async def fetch_external_command_result_rows(pool, conversation_id: str) -> list[dict]:
+    async with pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT id, result_type, status FROM external_command_results WHERE conversation_id = %s ORDER BY id",
+                (conversation_id,),
+            )
+            return list(await cur.fetchall())
+
+
+async def cleanup_db_replay(pool, test_id: str) -> None:
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM external_command_results WHERE chat_id LIKE %s", (f"{test_id}:%",))
+            await cur.execute("DELETE FROM external_commands WHERE chat_id LIKE %s", (f"{test_id}:%",))
+            await cur.execute("DELETE FROM outbound_messages WHERE chat_id LIKE %s", (f"{test_id}:%",))
+            await cur.execute("DELETE FROM conversation_states WHERE chat_id LIKE %s", (f"{test_id}:%",))
+            await cur.execute("DELETE FROM inbound_events WHERE dedup_key LIKE %s", (f"db_replay:{test_id}:%",))

@@ -102,6 +102,95 @@ def test_external_result_consumer_cli_accepts_lease_options():
     assert args.worker_id == "local-dev-1"
     assert args.lease_seconds == 60
     assert args.max_retries == 5
+    assert args.recover_interval_seconds == 30
+
+
+def test_external_result_consumer_cli_accepts_recover_interval():
+    from app.workers.external_result_consumer import build_arg_parser
+
+    args = build_arg_parser().parse_args(["--recover-interval-seconds", "0"])
+
+    assert args.recover_interval_seconds == 0
+
+
+def test_external_result_consumer_recovery_disabled_does_not_call_repository():
+    from app.workers.external_result_consumer import maybe_recover_expired_leases
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def recover_expired_leases(self):
+            self.calls += 1
+
+    repository = FakeRepository()
+
+    result = asyncio.run(
+        maybe_recover_expired_leases(
+            repository,
+            last_recovered_at=None,
+            recover_interval_seconds=0,
+            now=100.0,
+        )
+    )
+
+    assert result is None
+    assert repository.calls == 0
+
+
+def test_external_result_consumer_recovery_runs_when_interval_elapsed():
+    from app.workers.external_result_consumer import maybe_recover_expired_leases
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def recover_expired_leases(self):
+            self.calls += 1
+            return 2
+
+    repository = FakeRepository()
+
+    unchanged = asyncio.run(
+        maybe_recover_expired_leases(
+            repository,
+            last_recovered_at=95.0,
+            recover_interval_seconds=30,
+            now=100.0,
+        )
+    )
+    updated = asyncio.run(
+        maybe_recover_expired_leases(
+            repository,
+            last_recovered_at=60.0,
+            recover_interval_seconds=30,
+            now=100.0,
+        )
+    )
+
+    assert unchanged == 95.0
+    assert updated == 100.0
+    assert repository.calls == 1
+
+
+def test_external_result_consumer_recovery_failure_is_logged_and_does_not_raise(caplog):
+    from app.workers.external_result_consumer import maybe_recover_expired_leases
+
+    class FakeRepository:
+        async def recover_expired_leases(self):
+            raise RuntimeError("recovery failed")
+
+    result = asyncio.run(
+        maybe_recover_expired_leases(
+            FakeRepository(),
+            last_recovered_at=None,
+            recover_interval_seconds=30,
+            now=100.0,
+        )
+    )
+
+    assert result == 100.0
+    assert "Failed to recover expired external_command_result leases." in caplog.text
 
 
 def test_result_consumer_case_card_generates_waiting_reply_before_processed():
