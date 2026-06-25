@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS conversation_states (
   current_thread_id VARCHAR(128) NULL,
   status VARCHAR(64) NOT NULL DEFAULT 'AI_ACTIVE',
   active_workflow VARCHAR(128) NULL,
+  workflow_stage VARCHAR(128) NULL,
   slot_memory JSON NULL,
   handoff_state JSON NULL,
   last_capability_result JSON NULL,

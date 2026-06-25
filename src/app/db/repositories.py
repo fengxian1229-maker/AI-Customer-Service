@@ -89,12 +89,52 @@ class ConversationRepository:
         ) VALUES (%s, %s, %s)
         ON DUPLICATE KEY UPDATE current_thread_id = COALESCE(VALUES(current_thread_id), current_thread_id)
         """
-        select_sql = "SELECT conversation_id, chat_id, current_thread_id FROM conversation_states WHERE chat_id = %s"
+        select_sql = """
+        SELECT conversation_id, tenant_id, channel_type, chat_id, current_thread_id,
+               status, active_workflow, workflow_stage, slot_memory
+        FROM conversation_states
+        WHERE chat_id = %s
+        """
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(insert_sql, (conversation_id, chat_id, thread_id))
             await cur.execute(select_sql, (chat_id,))
             row = await cur.fetchone()
-        return row or {"conversation_id": conversation_id, "chat_id": chat_id, "current_thread_id": thread_id}
+        if row and row.get("slot_memory") is not None:
+            row["slot_memory"] = json_loads(row["slot_memory"])
+        return row or {
+            "conversation_id": conversation_id,
+            "tenant_id": "default",
+            "channel_type": "livechat",
+            "chat_id": chat_id,
+            "current_thread_id": thread_id,
+            "status": "AI_ACTIVE",
+            "active_workflow": None,
+            "workflow_stage": None,
+            "slot_memory": {},
+        }
+
+    async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict) -> None:
+        sql = """
+        UPDATE conversation_states
+        SET status = %s,
+            active_workflow = %s,
+            workflow_stage = %s,
+            slot_memory = CAST(%s AS JSON)
+        WHERE conversation_id = %s
+        """
+        args = (
+            graph_state.get("status") or "AI_ACTIVE",
+            graph_state.get("active_workflow"),
+            graph_state.get("workflow_stage"),
+            json_dumps(graph_state.get("slot_memory") or {}),
+            conversation_id,
+        )
+        async with conn.cursor() as cur:
+            await cur.execute(sql, args)
+
+    async def update_workflow_state(self, conversation_id: str, graph_state: dict) -> None:
+        async with self.pool.acquire() as conn:
+            await self.update_workflow_state_on_connection(conn, conversation_id, graph_state)
 
 
 class OutboundMessageRepository:
@@ -220,8 +260,14 @@ class GatewayTransactionRepository:
         self,
         inbound_event_id: int,
         event: InboundEvent,
-        outbound_message: dict | None,
+        outbound_message: dict | list[dict] | None,
+        graph_state: dict | None = None,
     ) -> dict:
+        outbound_messages = []
+        if isinstance(outbound_message, list):
+            outbound_messages = outbound_message
+        elif outbound_message:
+            outbound_messages = [outbound_message]
         async with self.pool.acquire() as conn:
             await conn.begin()
             try:
@@ -230,13 +276,16 @@ class GatewayTransactionRepository:
                     chat_id=event.chat_id or "unknown",
                     thread_id=event.thread_id,
                 )
-                outbound_insert = None
-                if outbound_message:
-                    outbound_message["conversation_id"] = conversation["conversation_id"]
-                    outbound_insert = await self.outbound_repository.insert_idempotent_on_connection(
+                if graph_state is not None:
+                    await self.conversation_repository.update_workflow_state_on_connection(
                         conn,
-                        outbound_message,
+                        conversation["conversation_id"],
+                        graph_state,
                     )
+                outbound_inserts = []
+                for message in outbound_messages:
+                    message["conversation_id"] = conversation["conversation_id"]
+                    outbound_inserts.append(await self.outbound_repository.insert_idempotent_on_connection(conn, message))
                 await self.inbound_repository.mark_processed_on_connection(conn, inbound_event_id)
                 await conn.commit()
             except Exception:
@@ -244,5 +293,6 @@ class GatewayTransactionRepository:
                 raise
         return {
             "conversation": conversation,
-            "outbound_insert": outbound_insert,
+            "outbound_insert": outbound_inserts[0] if len(outbound_inserts) == 1 else None,
+            "outbound_inserts": outbound_inserts,
         }

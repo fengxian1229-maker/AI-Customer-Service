@@ -17,7 +17,7 @@ def make_inbound_event() -> InboundEvent:
         sender_role="external",
         occurred_at="2026-06-24 00:00:00.000000",
         dedup_key="key",
-        payload_json={},
+        payload_json={"event": {"type": "message", "text": "mi deposito no llegó"}},
         ignored=False,
     )
 
@@ -36,10 +36,24 @@ def test_build_fixed_reply_message():
 class FakeConversationRepository:
     def __init__(self) -> None:
         self.calls = []
+        self.updated = []
 
     async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
         self.calls.append((chat_id, thread_id))
-        return {"conversation_id": f"livechat:{chat_id}"}
+        return {
+            "conversation_id": f"livechat:{chat_id}",
+            "tenant_id": "default",
+            "channel_type": "livechat",
+            "chat_id": chat_id,
+            "current_thread_id": thread_id,
+            "status": "AI_ACTIVE",
+            "active_workflow": None,
+            "workflow_stage": None,
+            "slot_memory": {},
+        }
+
+    async def update_workflow_state(self, conversation_id: str, graph_state: dict) -> None:
+        self.updated.append((conversation_id, graph_state))
 
 
 class FakeOutboundRepository:
@@ -64,16 +78,21 @@ class FakeInboundRepository:
 
 
 def test_gateway_service_processes_message_created():
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
-        conversation_repository=FakeConversationRepository(),
-        outbound_repository=FakeOutboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
     )
 
     result = asyncio.run(service.process_event(11, make_inbound_event()))
 
     assert result["should_reply"] is True
     assert result["outbound_message"]["action_type"] == "send_event"
+    assert result["outbound_message"]["payload_json"]["text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
+    assert conversation_repository.updated[0][1]["active_workflow"] == "deposit_missing"
 
 
 class FakeTransactionalGatewayRepository:
@@ -82,16 +101,27 @@ class FakeTransactionalGatewayRepository:
         self.calls = []
         self.committed = False
         self.rolled_back = False
+        self.conversation_repository = FakeConversationRepository()
 
-    async def process_event_transactionally(self, inbound_event_id: int, event: InboundEvent, outbound_message: dict | None) -> dict:
-        self.calls.append((inbound_event_id, event, outbound_message))
+    async def process_event_transactionally(
+        self,
+        inbound_event_id: int,
+        event: InboundEvent,
+        outbound_messages: list[dict],
+        graph_state: dict | None = None,
+    ) -> dict:
+        self.calls.append((inbound_event_id, event, outbound_messages, graph_state))
         try:
             if self.fail_on_outbox:
                 raise RuntimeError("outbox insert failed")
             self.committed = True
             return {
                 "conversation": {"conversation_id": f"livechat:{event.chat_id}"},
-                "outbound_insert": {"inserted": bool(outbound_message), "duplicate": False, "id": 1 if outbound_message else None},
+                "outbound_insert": {"inserted": bool(outbound_messages), "duplicate": False, "id": 1 if outbound_messages else None},
+                "outbound_inserts": [
+                    {"inserted": True, "duplicate": False, "id": index + 1}
+                    for index, _message in enumerate(outbound_messages)
+                ],
             }
         except Exception:
             self.rolled_back = True
@@ -107,8 +137,49 @@ def test_gateway_service_uses_transactional_repository_for_state_outbox_and_proc
     assert transactional.committed is True
     assert transactional.rolled_back is False
     assert transactional.calls[0][0] == 11
-    assert transactional.calls[0][2]["inbound_event_id"] == 11
+    assert transactional.calls[0][2][0]["inbound_event_id"] == 11
+    assert transactional.calls[0][3]["intent_result"]["intent"] == "deposit_missing"
     assert result["outbound_insert"] == {"inserted": True, "duplicate": False, "id": 1}
+
+
+def test_gateway_service_file_received_updates_slot_memory():
+    conversation_repository = FakeConversationRepository()
+    conversation_repository.get_or_create = async_get_or_create_with_active_deposit
+    outbound_repository = FakeOutboundRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+    )
+    event = make_inbound_event()
+    event.standard_event_type = "FILE_RECEIVED"
+    event.event_type = "file"
+    event.payload_json = {
+        "event": {
+            "type": "file",
+            "url": "https://cdn.example/deposit.png",
+            "name": "deposit.png",
+        }
+    }
+
+    result = asyncio.run(service.process_event(12, event))
+
+    assert result["graph_state"]["slot_memory"]["deposit_screenshot"] == "https://cdn.example/deposit.png"
+    assert result["graph_state"]["active_workflow"] == "deposit_missing"
+
+
+async def async_get_or_create_with_active_deposit(chat_id: str, thread_id: str | None = None) -> dict:
+    return {
+        "conversation_id": f"livechat:{chat_id}",
+        "tenant_id": "default",
+        "channel_type": "livechat",
+        "chat_id": chat_id,
+        "current_thread_id": thread_id,
+        "status": "AI_ACTIVE",
+        "active_workflow": "deposit_missing",
+        "workflow_stage": "collecting_slots",
+        "slot_memory": {"account_or_phone": "andy123"},
+    }
 
 
 def test_gateway_service_rolls_back_when_transactional_processing_fails():
