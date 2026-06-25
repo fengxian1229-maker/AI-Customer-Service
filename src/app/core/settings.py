@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     poll_seconds: int = 5
     poll_limit: int = 20
     livechat_allowed_group_ids: str = ""
+    langgraph_checkpoint_mode: str = "off"
 
     @property
     def livechat_self_author_id_set(self) -> set[str]:

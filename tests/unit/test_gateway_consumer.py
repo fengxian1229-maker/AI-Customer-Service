@@ -47,8 +47,9 @@ def test_process_next_batch_continues_after_single_event_failure(monkeypatch):
             self.inbound_repository = inbound_repository
 
     class FakeService:
-        def __init__(self, transactional_repository=None) -> None:
+        def __init__(self, transactional_repository=None, checkpointer=None) -> None:
             self.transactional_repository = transactional_repository
+            self.checkpointer = checkpointer
 
         async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
             calls.append((inbound_event_id, event.event_id))
@@ -62,6 +63,7 @@ def test_process_next_batch_continues_after_single_event_failure(monkeypatch):
     monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
     monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
     monkeypatch.setattr(gateway_consumer, "GatewayService", FakeService)
+    monkeypatch.setattr(gateway_consumer, "build_checkpointer", lambda mode: None)
 
     results = asyncio.run(gateway_consumer.process_next_batch(pool=object(), limit=20))
 
@@ -78,3 +80,73 @@ def test_process_next_batch_continues_after_single_event_failure(monkeypatch):
             "error_message": "graph exploded",
         }
     ]
+
+
+def test_process_next_batch_passes_off_checkpointer_to_gateway_service(monkeypatch):
+    from app.workers import gateway_consumer
+
+    calls = {}
+
+    class FakeInboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def fetch_unprocessed(self, limit: int = 20) -> list[dict]:
+            return []
+
+    class FakeTransactionalRepository:
+        def __init__(self, pool, inbound_repository=None) -> None:
+            self.pool = pool
+
+    class FakeService:
+        def __init__(self, transactional_repository=None, checkpointer=None) -> None:
+            calls["checkpointer"] = checkpointer
+
+    def fake_build_checkpointer(mode: str):
+        calls["mode"] = mode
+        return None
+
+    monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
+    monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
+    monkeypatch.setattr(gateway_consumer, "GatewayService", FakeService)
+    monkeypatch.setattr(gateway_consumer, "build_checkpointer", fake_build_checkpointer)
+
+    result = asyncio.run(gateway_consumer.process_next_batch(pool=object(), limit=20, checkpoint_mode="off"))
+
+    assert calls == {"mode": "off", "checkpointer": None}
+    assert result["processed"] == 0
+
+
+def test_process_next_batch_builds_memory_checkpointer(monkeypatch):
+    from app.workers import gateway_consumer
+
+    calls = {}
+    fake_checkpointer = object()
+
+    class FakeInboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def fetch_unprocessed(self, limit: int = 20) -> list[dict]:
+            return []
+
+    class FakeTransactionalRepository:
+        def __init__(self, pool, inbound_repository=None) -> None:
+            self.pool = pool
+
+    class FakeService:
+        def __init__(self, transactional_repository=None, checkpointer=None) -> None:
+            calls["checkpointer"] = checkpointer
+
+    def fake_build_checkpointer(mode: str):
+        calls["mode"] = mode
+        return fake_checkpointer
+
+    monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
+    monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
+    monkeypatch.setattr(gateway_consumer, "GatewayService", FakeService)
+    monkeypatch.setattr(gateway_consumer, "build_checkpointer", fake_build_checkpointer)
+
+    asyncio.run(gateway_consumer.process_next_batch(pool=object(), limit=20, checkpoint_mode="memory"))
+
+    assert calls == {"mode": "memory", "checkpointer": fake_checkpointer}

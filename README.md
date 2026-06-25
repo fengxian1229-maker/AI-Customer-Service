@@ -37,6 +37,13 @@ inbound_events
 
 P3-A has introduced the LangGraph checkpointer injection boundary and per-conversation thread config. Durable checkpoint storage plus interrupt/resume are later work.
 
+Checkpoint modes:
+
+- `off`: default, no checkpointer.
+- `memory`: local/dev/test only, uses LangGraph `InMemorySaver` and is not durable.
+
+P3-B adds a checkpoint provider boundary and read-only graph debug helpers. Durable MySQL checkpoint storage, checkpoint tables, and interrupt/resume are not implemented.
+
 Current receiver boundaries:
 
 - Polling does not call LangGraph.

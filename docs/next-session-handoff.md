@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -45,7 +45,7 @@ P3-B and later:
 
 This session hardened the polling-first worker path without adding websocket or webhook ingress.
 P0 ingress contract is done, and P1-A added graph failure isolation with `graph_run_errors`.
-P2 added `conversation_messages` for conversation history, and P3-A added LangGraph `thread_id = conversation_id` config plus checkpointer injection support.
+P2 added `conversation_messages` for conversation history, P3-A added LangGraph `thread_id = conversation_id` config plus checkpointer injection support, and P3-B added the checkpoint provider boundary.
 
 Implemented:
 
@@ -63,6 +63,8 @@ Implemented:
 - `conversation_messages` for customer, assistant, and external summary history
 - LangGraph invoke config uses `configurable.thread_id = conversation_id`
 - `build_workflow_graph(checkpointer=...)` supports injecting a checkpointer without creating one internally
+- `LANGGRAPH_CHECKPOINT_MODE=off|memory` controls the gateway checkpointer provider
+- read-only graph debug helpers can fetch latest state and state history by `conversation_id`
 
 Ingress staging remains:
 
@@ -76,6 +78,7 @@ TODO for later phases only:
 - Webhook receiver and signature verification
 - webhook registration docs
 - durable LangGraph checkpoint store, checkpoint management, and interrupt/resume
+- MySQL checkpoint saver and checkpoint tables
 - LangGraph, RAG, LLM automatic replies
 - Telegram full handoff loop
 - backend API fact lookup and withdrawal workflows

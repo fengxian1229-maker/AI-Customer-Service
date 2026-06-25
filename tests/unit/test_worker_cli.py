@@ -108,6 +108,7 @@ def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
     class FakeSettings:
         def __init__(self, **kwargs) -> None:
             calls["settings_kwargs"] = kwargs
+            self.langgraph_checkpoint_mode = "memory"
 
     class FakePool:
         def close(self) -> None:
@@ -120,8 +121,9 @@ def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
         calls["settings"] = settings
         return FakePool()
 
-    async def fake_process_next_batch(pool, limit: int = 20):
+    async def fake_process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off"):
         calls["limit"] = limit
+        calls["checkpoint_mode"] = checkpoint_mode
         return {
             "results": [{"outbound_message": {"id": 1}}],
             "failures": [],
@@ -141,6 +143,7 @@ def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
         "livechat_account_id": "unused-for-gateway",
     }
     assert calls["limit"] == 20
+    assert calls["checkpoint_mode"] == "memory"
     assert calls["closed"] is True
     assert calls["wait_closed"] is True
     assert result["processed"] == 1

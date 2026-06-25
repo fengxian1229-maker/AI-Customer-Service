@@ -5,14 +5,16 @@ import json
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import GatewayTransactionRepository, InboundEventRepository
+from app.graph.checkpointing import build_checkpointer
 from app.schemas.events import InboundEvent
 from app.services.gateway import GatewayService
 
 
-async def process_next_batch(pool, limit: int = 20) -> list[dict]:
+async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off") -> dict:
     inbound_repository = InboundEventRepository(pool)
     transactional_repository = GatewayTransactionRepository(pool, inbound_repository=inbound_repository)
-    service = GatewayService(transactional_repository=transactional_repository)
+    checkpointer = build_checkpointer(checkpoint_mode)
+    service = GatewayService(transactional_repository=transactional_repository, checkpointer=checkpointer)
 
     results = []
     failures = []
@@ -54,7 +56,11 @@ async def run_once(limit: int) -> dict:
     )
     pool = await create_pool(settings)
     try:
-        results = await process_next_batch(pool, limit=limit)
+        results = await process_next_batch(
+            pool,
+            limit=limit,
+            checkpoint_mode=settings.langgraph_checkpoint_mode,
+        )
         return {
             "worker": "gateway_consumer",
             "mode": "once",
