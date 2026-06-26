@@ -28,6 +28,36 @@ P5-A.1：checkpoint metadata runtime wiring + repository boundary cleanup
 P5-B：real MySQL LangGraph checkpointer conservative integration
 ```
 
+当前 P5-B.1 已补齐测试范围：
+
+```text
+P5-B.1：real MySQL checkpoint persistence verification + gateway_consumer mysql runtime smoke tests
+```
+
+说明：
+
+```text
+新增真实 MySQL integration tests，验证：
+1. checkpointer close/reopen 后仍可读取同一 conversation/thread 的 checkpoint state/history
+2. gateway_consumer 在 checkpoint_mode=mysql 下可处理单条 inbound event，并写入 conversation_states / conversation_messages / outbound_messages / graph_checkpoint_runs
+
+这些测试只在 MYSQL_TEST_DSN / DATABASE_URL / AI_CS_TEST_MYSQL_DSN 指向名称包含 test 的隔离库时运行；
+若未配置隔离 DSN，则 pytest skip。
+```
+
+建议运行命令：
+
+```bash
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration/test_mysql_checkpoint_persistence.py -q
+
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py -q
+
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
+```
+
 当前 RAG 仍明确不做：
 
 ```text

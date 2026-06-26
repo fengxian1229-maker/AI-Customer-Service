@@ -112,6 +112,19 @@ Run Tests
 uv run --group dev pytest tests/unit -v
 ```
 
+MySQL checkpoint integration checks require a disposable database whose name contains `test`:
+
+```bash
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration/test_mysql_checkpoint_persistence.py -q
+
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py -q
+
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
+```
+
 Bootstrap Database
 ------------------
 

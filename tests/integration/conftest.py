@@ -28,7 +28,7 @@ def mysql_test_config() -> MysqlTestConfig:
     pytest.skip("MySQL integration DSN not configured")
 
 
-def settings_from_dsn(dsn: str) -> Settings:
+def settings_from_dsn(dsn: str, **overrides) -> Settings:
     parsed = urlparse(dsn)
     if parsed.scheme not in {"mysql", "mysql+pymysql", "mysql+aiomysql"}:
         pytest.skip(f"MySQL integration DSN has unsupported scheme: {parsed.scheme}")
@@ -48,6 +48,7 @@ def settings_from_dsn(dsn: str) -> Settings:
         mysql_user=unquote(parsed.username or "root"),
         mysql_password=unquote(parsed.password or ""),
         mysql_database=database,
+        **overrides,
     )
 
 
