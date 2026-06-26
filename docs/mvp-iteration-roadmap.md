@@ -16,6 +16,12 @@ P4-C：tenant/kb_scope knowledge management + deterministic ranking v1
 P5-A：durable checkpoint storage design + provider boundary + checkpoint metadata schema
 ```
 
+当前 P5-A.1 已完成：
+
+```text
+P5-A.1：checkpoint metadata runtime wiring + repository boundary cleanup
+```
+
 当前 RAG 仍明确不做：
 
 ```text

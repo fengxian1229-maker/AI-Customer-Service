@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary that still fails fast instead of enabling a real MySQL saver.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary that still fails fast instead of enabling a real MySQL saver. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -70,6 +70,7 @@ Implemented:
 - read-only graph debug helpers can fetch latest state and state history by `conversation_id`
 - `sql/011_graph_checkpoint_metadata.sql` adds project-owned `graph_checkpoint_runs` metadata
 - `GraphCheckpointRunRepository` records checkpoint-mode run metadata without replacing `graph_run_errors`
+- `gateway_consumer` now creates and injects `GraphCheckpointRunRepository(pool)` through the existing provider boundary
 - `knowledge_documents` stores tenant/kb-scope KB documents for deterministic retrieval
 - `gateway_consumer` creates `KnowledgeDocumentRepository(pool)` and `RagService(...)`
 - `GatewayService` prefetches `rag_context` before `graph.invoke(...)`

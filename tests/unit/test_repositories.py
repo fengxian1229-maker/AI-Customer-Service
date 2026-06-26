@@ -222,6 +222,32 @@ async def run_graph_checkpoint_run_insert(rowcount: int):
     return result, cursor
 
 
+async def run_graph_run_error_fetch_retryable(limit: int = 20):
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 77,
+                    "conversation_id": "livechat:chat-1",
+                    "inbound_event_id": 11,
+                    "graph_thread_id": "livechat:chat-1",
+                    "node_name": "router",
+                    "error_type": "TimeoutError",
+                    "error_message": "timed out",
+                    "retryable": 1,
+                    "state_snapshot": '{"conversation_id":"livechat:chat-1"}',
+                    "created_at": "2026-06-26 00:00:00.000000",
+                }
+            ]
+
+    cursor = FetchCursor(rowcount=1)
+    repository = GraphRunErrorRepository(FakePool(cursor))
+
+    rows = await repository.fetch_retryable(limit=limit)
+
+    return rows, cursor
+
+
 def make_conversation_message(**overrides) -> dict:
     base = {
         "conversation_id": "livechat:chat-1",
@@ -346,6 +372,17 @@ def test_graph_checkpoint_run_mark_failed_writes_error_fields():
     assert "UPDATE graph_checkpoint_runs" in cursor.sql
     assert "SET status = 'FAILED'" in cursor.sql
     assert cursor.args == ("RuntimeError", "checkpoint failed", 66)
+
+
+def test_graph_run_error_fetch_retryable_reads_graph_run_errors_and_loads_snapshot():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_graph_run_error_fetch_retryable(limit=5))
+
+    assert "FROM graph_run_errors" in cursor.sql
+    assert "WHERE retryable = 1" in cursor.sql
+    assert cursor.args == (5,)
+    assert rows[0]["state_snapshot"] == {"conversation_id": "livechat:chat-1"}
 
 
 def test_graph_checkpoint_run_fetch_recent_filters_by_conversation_and_loads_metadata():

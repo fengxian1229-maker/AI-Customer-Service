@@ -120,8 +120,15 @@ Suggested responsibilities:
 - record that a graph run had checkpoint mode `off|memory|mysql`
 - record whether checkpoint-related runtime completed or failed
 - record a later `latest_checkpoint_id` when a durable saver exists
+- record lightweight runtime metadata from `gateway_consumer -> GatewayService -> GraphCheckpointRunRepository`
 
 This intentionally avoids guessing LangGraph internal MySQL saver schema before P5-B.
+
+`graph_checkpoint_runs` remains metadata/audit only:
+
+- it does not replace `graph_run_errors`
+- it does not store full LangGraph state
+- it does not provide admin CLI or resume behavior in P5-A/P5-A.1
 
 ## 8. Phase Breakdown
 

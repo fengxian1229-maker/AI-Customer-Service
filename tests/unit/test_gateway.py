@@ -111,9 +111,15 @@ class FakeConversationMessageRepository:
 
 
 class FakeCheckpointRunRepository:
-    def __init__(self, fail_on_insert: bool = False, fail_on_mark: bool = False) -> None:
+    def __init__(
+        self,
+        fail_on_insert: bool = False,
+        fail_on_mark: bool = False,
+        fail_on_mark_failed: bool = False,
+    ) -> None:
         self.fail_on_insert = fail_on_insert
         self.fail_on_mark = fail_on_mark
+        self.fail_on_mark_failed = fail_on_mark_failed
         self.inserted = []
         self.succeeded = []
         self.failed = []
@@ -130,6 +136,8 @@ class FakeCheckpointRunRepository:
         self.succeeded.append((run_id, latest_checkpoint_id))
 
     async def mark_failed(self, run_id: int, error) -> None:
+        if self.fail_on_mark_failed:
+            raise RuntimeError("checkpoint metadata failed-mark failed")
         self.failed.append((run_id, type(error).__name__, str(error)))
 
 
@@ -360,6 +368,47 @@ def test_gateway_service_marks_checkpoint_run_failed_when_graph_invoke_fails():
         raise AssertionError("expected graph invoke to fail")
 
     assert checkpoint_repository.failed == [(91, "RuntimeError", "graph exploded")]
+
+
+def test_gateway_service_ignores_checkpoint_metadata_success_mark_failures():
+    checkpoint_repository = FakeCheckpointRunRepository(fail_on_mark=True)
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=RecordingGraph(),
+        checkpoint_run_repository=checkpoint_repository,
+        checkpoint_mode="memory",
+    )
+
+    result = asyncio.run(service.process_event(11, make_inbound_event()))
+
+    assert result["outbound_message"]["payload_json"]["text"] == "ok"
+    assert checkpoint_repository.inserted[0]["checkpoint_mode"] == "memory"
+
+
+def test_gateway_service_ignores_checkpoint_metadata_failed_mark_failures_and_preserves_graph_error():
+    checkpoint_repository = FakeCheckpointRunRepository(fail_on_mark_failed=True)
+    graph_error_repository = FakeGraphRunErrorRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        graph_run_error_repository=graph_error_repository,
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=ExplodingGraph(RuntimeError("graph exploded")),
+        checkpoint_run_repository=checkpoint_repository,
+    )
+
+    try:
+        asyncio.run(service.process_event(11, make_inbound_event()))
+    except RuntimeError as exc:
+        assert str(exc) == "graph exploded"
+    else:
+        raise AssertionError("expected graph invoke to fail")
+
+    assert graph_error_repository.inserted[0]["error_message"] == "graph exploded"
 
 
 def test_gateway_service_ignores_checkpoint_metadata_insert_failures():

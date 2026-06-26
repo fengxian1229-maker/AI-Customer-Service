@@ -913,6 +913,23 @@ class GraphRunErrorRepository:
             row["state_snapshot"] = json_loads(row["state_snapshot"])
         return rows
 
+    async def fetch_retryable(self, limit: int = 20) -> list[dict]:
+        sql = """
+        SELECT id, conversation_id, inbound_event_id, graph_thread_id, node_name,
+               error_type, error_message, retryable, state_snapshot, created_at
+        FROM graph_run_errors
+        WHERE retryable = 1
+        ORDER BY created_at ASC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (limit,))
+                rows = await cur.fetchall()
+        for row in rows:
+            row["state_snapshot"] = json_loads(row["state_snapshot"])
+        return rows
+
 
 class GraphCheckpointRunRepository:
     def __init__(self, pool) -> None:
@@ -984,23 +1001,6 @@ class GraphCheckpointRunRepository:
                 rows = await cur.fetchall()
         for row in rows:
             row["metadata_json"] = json_loads(row.get("metadata_json") or "{}")
-        return rows
-
-    async def fetch_retryable(self, limit: int = 20) -> list[dict]:
-        sql = """
-        SELECT id, conversation_id, inbound_event_id, graph_thread_id, node_name,
-               error_type, error_message, retryable, state_snapshot, created_at
-        FROM graph_run_errors
-        WHERE retryable = 1
-        ORDER BY created_at ASC
-        LIMIT %s
-        """
-        async with self.pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(sql, (limit,))
-                rows = await cur.fetchall()
-        for row in rows:
-            row["state_snapshot"] = json_loads(row["state_snapshot"])
         return rows
 
 
