@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from app.schemas.events import InboundEvent
 from app.services.gateway import GatewayService, build_fixed_reply, should_enqueue_reply
 
@@ -613,6 +615,42 @@ def test_gateway_service_backend_fact_shadow_does_not_query_knowledge_repository
     assert repository.calls == []
     assert result["graph_state"]["llm_rewrite_result"] is not None
     assert result["graph_state"]["llm_intent_result"] is not None
+
+
+def test_gateway_service_guardrail_failure_records_error_and_skips_side_effects():
+    inbound_repository = FakeInboundRepository()
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    graph_error_repository = FakeGraphRunErrorRepository()
+    message_repository = FakeConversationMessageRepository()
+
+    class FailingRewriteService:
+        async def rewrite(self, payload: dict) -> dict:
+            raise ValueError("Unsupported llm route: invalid_route")
+
+    service = GatewayService(
+        inbound_repository=inbound_repository,
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        graph_run_error_repository=graph_error_repository,
+        message_repository=message_repository,
+        llm_rewrite_service=FailingRewriteService(),
+        llm_rewrite_shadow_enabled=True,
+        workflow_graph=RecordingGraph(),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported llm route: invalid_route"):
+        asyncio.run(service.process_event(23, make_event_with_text("how to deposit")))
+
+    assert inbound_repository.processed == []
+    assert conversation_repository.updated == []
+    assert message_repository.inserted == []
+    assert outbound_repository.inserted == []
+    assert external_repository.inserted == []
+    assert graph_error_repository.inserted[0]["error_type"] == "ValueError"
+    assert graph_error_repository.inserted[0]["error_message"] == "Unsupported llm route: invalid_route"
 
 
 class RecordingGraph:

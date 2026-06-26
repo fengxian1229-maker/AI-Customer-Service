@@ -64,6 +64,12 @@ P6-A：model provider boundary + mock llm rewrite shadow + mock llm intent shado
 P6-B：Gemini Vertex AI real llm provider shadow integration
 ```
 
+当前 P6-B.1 已完成：
+
+```text
+P6-B.1：Gemini shadow guardrail + real smoke review
+```
+
 说明：
 
 ```text
@@ -149,6 +155,20 @@ P6-B 新增 Gemini Vertex AI shadow 边界：
 8. Gemini 不生成最终客服回复
 9. Gemini 不调用第三方 API
 10. 当前 full graph invoke 仍会重跑 rewrite/router，因此真实 Gemini 仍不能放入 graph node
+```
+
+P6-B.1 新增 Gemini shadow guardrail 与 smoke review：
+
+```text
+1. 新增 LLM route / intent / risk flag 白名单
+2. Gemini shadow confidence 会被收敛到 0.0 ~ 1.0
+3. rewrite shadow risk_flags 会去重并按稳定顺序输出
+4. active_workflow / backend_fact_like / attachment_present 会由代码侧强制补齐
+5. guardrail 只规范 shadow metadata，不改变 deterministic route/rewrite
+6. guardrail 失败继续保持 fail-closed：记录 graph_run_errors，不产生 outbound / external_commands / processed 副作用
+7. 新增 gemini_shadow_smoke worker，仅用于本地/ADC 环境下验证真实 Vertex AI structured output
+8. smoke worker 不连接 LiveChat，不写 outbox，不写 external_commands，不写 conversation_states，不依赖 MySQL
+9. models/ 目录只是参考代码，不属于当前 MVP 主链路，本轮不处理
 ```
 
 当前 RAG 仍明确不做：

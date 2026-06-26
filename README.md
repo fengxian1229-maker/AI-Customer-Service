@@ -45,7 +45,7 @@ Checkpoint modes:
 
 P3-B adds a checkpoint provider boundary and read-only graph debug helpers. P5-A adds durable checkpoint design, a checkpoint metadata schema, and a provider boundary that explicitly recognizes `off`, `memory`, and planned `mysql` modes. P5-A.1 wires checkpoint run metadata through `gateway_consumer -> GatewayService` using `GraphCheckpointRunRepository`. P5-B adds `langgraph-checkpoint-mysql[pymysql]`, a real `PyMySQLSaver` provider path for `LANGGRAPH_CHECKPOINT_MODE=mysql`, and an explicit setup worker for saver-managed internal tables.
 
-P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts. P5-C adds a read-only checkpoint admin CLI for `graph_checkpoint_runs` and `graph_run_errors`; it is for debugging only and does not modify LangGraph saver tables. P5-D now tightens RAG retrieval so only FAQ traffic prefetches DB-backed `rag_context` before the full graph invoke. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow, both default-off and non-authoritative. P6-B adds a real Gemini Vertex AI shadow provider through `langchain-google-genai` `ChatGoogleGenerativeAI`.
+P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts. P5-C adds a read-only checkpoint admin CLI for `graph_checkpoint_runs` and `graph_run_errors`; it is for debugging only and does not modify LangGraph saver tables. P5-D now tightens RAG retrieval so only FAQ traffic prefetches DB-backed `rag_context` before the full graph invoke. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow, both default-off and non-authoritative. P6-B adds a real Gemini Vertex AI shadow provider through `langchain-google-genai` `ChatGoogleGenerativeAI`. P6-B.1 adds Gemini shadow output guardrails and a standalone smoke review worker.
 
 Current RAG limits:
 
@@ -73,9 +73,11 @@ Current LLM boundary:
 - Mock intent shadow records `llm_intent_result` but never overrides deterministic `intent_result` or `route`.
 - Gemini rewrite shadow records only `llm_rewrite_result` and never overrides deterministic `rewritten_question` or `rewrite_result`.
 - Gemini intent shadow records only `llm_intent_result` and never overrides deterministic `intent_result` or `route`.
+- Gemini shadow output is normalized by code-side guardrails for route, intent, confidence, and risk flags.
 - Gemini is not used for final customer reply generation.
 - Gemini does not call third-party APIs or generate `external_commands`.
 - The full graph still re-runs rewrite/router on invoke, so the real Gemini call is kept outside graph nodes.
+- `models/` reference code is not part of the current MVP runtime boundary and is not used by the active provider path.
 - Third-party actions still must go through deterministic `external_commands` plus workers; the LLM boundary does not call external APIs directly.
 
 Seed default knowledge documents:
@@ -139,6 +141,16 @@ GEMINI_TEMPERATURE=1.0
 GEMINI_MAX_RETRIES=2
 GEMINI_VERTEXAI=true
 # GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+```
+
+To run the standalone Gemini shadow smoke review without LiveChat, outbox writes, or gateway processing:
+
+```bash
+PYTHONPATH=src \
+LLM_PROVIDER=gemini \
+LLM_REWRITE_SHADOW_ENABLED=true \
+LLM_INTENT_SHADOW_ENABLED=true \
+python -m app.workers.gemini_shadow_smoke --cases default --json
 ```
 
 Run Tests

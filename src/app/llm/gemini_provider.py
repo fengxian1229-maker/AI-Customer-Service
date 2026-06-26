@@ -1,3 +1,5 @@
+import json
+
 from app.llm.contracts import (
     LLMIntentShadowInput,
     LLMIntentShadowOutput,
@@ -6,6 +8,7 @@ from app.llm.contracts import (
     LLMRewriteShadowOutput,
     LLMRewriteShadowSchema,
 )
+from app.llm.guardrails import validate_intent_output, validate_rewrite_output
 from app.llm.gemini_model import build_gemini_chat_model
 
 REWRITE_SYSTEM_PROMPT = """You are a rewrite shadow model for an AI customer service routing system.
@@ -44,13 +47,8 @@ class GeminiLLMProvider:
             schema=LLMRewriteShadowSchema,
             method="json_schema",
         )
-        response = await structured_model.ainvoke(
-            {
-                "system_instruction": REWRITE_SYSTEM_PROMPT,
-                "input": payload,
-            }
-        )
-        result = _model_dump(response)
+        response = await structured_model.ainvoke(_build_chat_messages(REWRITE_SYSTEM_PROMPT, payload))
+        result = validate_rewrite_output(payload, _model_dump(response))
         return {
             "rewritten_question": result["rewritten_question"],
             "normalized_query": result["normalized_query"],
@@ -69,13 +67,8 @@ class GeminiLLMProvider:
             schema=LLMIntentShadowSchema,
             method="json_schema",
         )
-        response = await structured_model.ainvoke(
-            {
-                "system_instruction": INTENT_SYSTEM_PROMPT,
-                "input": payload,
-            }
-        )
-        result = _model_dump(response)
+        response = await structured_model.ainvoke(_build_chat_messages(INTENT_SYSTEM_PROMPT, payload))
+        result = validate_intent_output(payload, _model_dump(response))
         return {
             "intent": result["intent"],
             "route": result["route"],
@@ -95,3 +88,10 @@ def _model_dump(response) -> dict:
     if isinstance(response, dict):
         return response
     raise TypeError("Gemini structured output must be a dict-like schema result.")
+
+
+def _build_chat_messages(system_prompt: str, payload: dict) -> list[tuple[str, str]]:
+    return [
+        ("system", system_prompt),
+        ("human", json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+    ]

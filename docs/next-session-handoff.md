@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only. P6-B.1 adds shadow output guardrails and a standalone smoke review tool.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -43,13 +43,15 @@ Recommended next task:
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
 
-## Latest P6-B Status
+## Latest P6-B.1 Status
 
 - Added `tests/integration/test_mysql_checkpoint_persistence.py`
 - Added `tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py`
 - Added `tests/integration/test_checkpoint_admin_mysql_smoke.py`
 - Added `src/app/llm/contracts.py`, `src/app/llm/provider.py`, `src/app/llm/mock_provider.py`, and `src/app/llm/__init__.py`
 - Added `src/app/llm/gemini_model.py` and `src/app/llm/gemini_provider.py`
+- Added `src/app/llm/guardrails.py`
+- Added `src/app/workers/gemini_shadow_smoke.py`
 - Added `llm_provider`, `llm_rewrite_shadow_enabled`, `llm_rewrite_fallback_enabled`, `llm_intent_shadow_enabled`, `llm_intent_fallback_enabled`, and `llm_intent_min_confidence` settings with default-off behavior
 - Added Gemini settings with Vertex AI defaults:
   - `gemini_model=gemini-3.1-flash-lite`
@@ -76,6 +78,12 @@ Recommended next task:
 - `GatewayService` can now accept `llm_rewrite_service` / `llm_intent_service`, but shadow results are metadata only and never override deterministic rewrite/route
 - `gateway_consumer` now wires the provider boundary conservatively through settings, with `llm_provider=off` as the default
 - `gateway_consumer.process_next_batch(...)` now reports an `llm` summary without exposing prompts, raw model output, credentials, tokens, or secrets
+- Gemini shadow output is now validated against code-side guardrails:
+  - route whitelist
+  - intent whitelist
+  - confidence clamp to `0.0 .. 1.0`
+  - stable, deduplicated risk flags
+  - forced `active_workflow`, `backend_fact_like`, and `attachment_present` rewrite flags when applicable
 - Added repository query methods instead of letting the CLI assemble SQL directly:
   - `GraphCheckpointRunRepository.list_runs(...)`
   - `GraphCheckpointRunRepository.get_run(...)`
@@ -92,6 +100,8 @@ Recommended next task:
   - Gemini never generates the final customer reply
   - Gemini never generates `external_commands`
   - fallback takeover is still not enabled
+- Added a standalone `python -m app.workers.gemini_shadow_smoke --cases default --json` worker for real Vertex AI smoke review without LiveChat, outbox writes, external commands, conversation state writes, or MySQL
+- `models/` reference code remains out of the MVP runtime path and was intentionally not changed
 - All mysql checkpoint tests still require `MYSQL_TEST_DSN` / `DATABASE_URL` / `AI_CS_TEST_MYSQL_DSN` pointing to a disposable database whose name contains `test`
 - New checkpoint persistence test bootstraps project SQL, calls real `PyMySQLSaver.setup()`, invokes a real graph, closes the provider, reopens a new provider, and verifies the same `thread_id` checkpoint can still be read
 - New gateway smoke test inserts one deterministic inbound event, runs `gateway_consumer.process_next_batch(... checkpoint_mode="mysql" ...)`, verifies `conversation_states` / `conversation_messages` / `outbound_messages` / `graph_checkpoint_runs`, then reopens a provider and verifies checkpoint readability again
@@ -103,7 +113,9 @@ Recommended next task:
 ## Latest Verification Status
 
 - Ran `uv run --group dev pytest tests/unit -q`
-- Result: `257 passed`
+- Result: `268 passed`
+- Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`
+- Result: `6 passed`
 - Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`
 - Result: `6 passed`
 - Created local base database: `ai_customer_service_test`
