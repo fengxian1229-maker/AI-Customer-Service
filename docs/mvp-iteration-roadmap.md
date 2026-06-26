@@ -52,6 +52,12 @@ P5-C：checkpoint debug/admin tooling
 P5-D：FAQ-only lazy RAG retrieve
 ```
 
+当前 P6-A 已完成：
+
+```text
+P6-A：model provider boundary + mock llm rewrite shadow + mock llm intent shadow
+```
+
 说明：
 
 ```text
@@ -111,6 +117,17 @@ P5-D 收敛 RAG 预取边界：
 3. faq_then_sop 当前仍不预取 RAG，继续走安全 SOP 路径
 4. rag_node 仍保持同步纯节点，不直接打开 DB
 5. GatewayService 仍是 DB-backed RAG retrieve 的边界
+```
+
+P6-A 新增 mock LLM 边界：
+
+```text
+1. 新增 app.llm 模块，provider 仅支持 off / mock
+2. 默认 llm_provider=off
+3. mock rewrite shadow 只写 llm_rewrite_result，不覆盖 deterministic rewritten_question
+4. mock intent shadow 只写 llm_intent_result，不改变 deterministic route / intent_result
+5. 当前 full graph invoke 仍会重跑 rewrite/router，因此真实 LLM 不允许直接放进 rewrite_question_node 或 intent_router_node
+6. 第三方 API 仍必须通过 external_commands / worker / schema validation 执行，不能由 LLM 直接调用
 ```
 
 当前 RAG 仍明确不做：

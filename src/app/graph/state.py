@@ -11,6 +11,7 @@ class GraphState(TypedDict, total=False):
     raw_user_input: str
     rewritten_question: str | None
     rewrite_result: dict[str, Any] | None
+    llm_rewrite_result: dict[str, Any] | None
     event_type: str
     attachments: list[dict[str, Any]]
 
@@ -20,7 +21,10 @@ class GraphState(TypedDict, total=False):
     slot_memory: dict[str, Any]
 
     intent_result: dict[str, Any] | None
+    llm_intent_result: dict[str, Any] | None
     route: str | None
+    route_source: str | None
+    rewrite_source: str | None
     rag_context: dict[str, Any] | None
     rag_result: dict[str, Any] | None
 

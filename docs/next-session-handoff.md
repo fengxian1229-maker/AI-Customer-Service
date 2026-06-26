@@ -18,14 +18,14 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
 - Do not use broad all-group polling.
 - Do not send direct replies outside the outbox/sender worker except for explicit smoke tests.
 - Do not let LLM/RAG decide payment, withdrawal, account, turnover, or backend facts.
-- Backend-fact questions must return a safe fallback and must not query `knowledge_documents`.
+- Backend-fact questions must return a safe fallback and must not query `knowledge_documents`, even if they pass through RagService guardrail logic.
 - Keep all facts from deterministic code, LiveChat, Telegram staff, backend API, or stored state.
 - Keep `.env` out of Git.
 - Normal FAQ/RAG path must only emit `livechat.send_text`; do not emit `RAG_PLACEHOLDER` or write `external_commands`.
@@ -38,16 +38,18 @@ Before coding:
 
 Recommended next task:
 - build checkpoint Web admin or richer debug UX on top of the new read-only CLI / repository boundary
-- or extend the FAQ-only lazy RAG boundary into a cleaner graph-level optimization without mixing it with ingress changes
+- or extend the mock LLM boundary toward a real provider integration plan without placing real LLM calls inside graph nodes
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
 
-## Latest P5-D Status
+## Latest P6-A Status
 
 - Added `tests/integration/test_mysql_checkpoint_persistence.py`
 - Added `tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py`
 - Added `tests/integration/test_checkpoint_admin_mysql_smoke.py`
+- Added `src/app/llm/contracts.py`, `src/app/llm/provider.py`, `src/app/llm/mock_provider.py`, and `src/app/llm/__init__.py`
+- Added `llm_provider`, `llm_rewrite_shadow_enabled`, `llm_rewrite_fallback_enabled`, `llm_intent_shadow_enabled`, `llm_intent_fallback_enabled`, and `llm_intent_min_confidence` settings with default-off behavior
 - `tests/integration/conftest.py` now allows `settings_from_dsn(..., **overrides)` so mysql integration tests can force:
   - `langgraph_checkpoint_mode="mysql"`
   - `langgraph_checkpoint_setup_on_start=False`
@@ -60,6 +62,9 @@ Recommended next task:
 - `GatewayService` now calls `RagService.retrieve(...)` only when that pre-route result is `route == "faq"`
 - SOP / human handoff / emotion care / clarification / `faq_then_sop` traffic no longer prefetches `knowledge_documents`
 - `rag_node` remains a synchronous pure graph node and still falls back to static knowledge if no `rag_context` is injected
+- `GraphState` now includes `llm_rewrite_result`, `llm_intent_result`, `route_source`, and `rewrite_source`
+- `GatewayService` can now accept `llm_rewrite_service` / `llm_intent_service`, but shadow results are metadata only and never override deterministic rewrite/route
+- `gateway_consumer` now wires the new provider boundary conservatively through settings, with `llm_provider=off` as the default
 - Added repository query methods instead of letting the CLI assemble SQL directly:
   - `GraphCheckpointRunRepository.list_runs(...)`
   - `GraphCheckpointRunRepository.get_run(...)`
@@ -70,6 +75,7 @@ Recommended next task:
 - `waiting_backend_classifier` no longer reads `state.signal_result`; it derives supplement/human-handoff signals from text and attachments directly
 - `src/app/prompts/intent_router.md` now matches the post-routing-cleanup boundary and no longer mentions `signal_result`
 - The FAQ-only lazy RAG transition is intentionally conservative: the full graph still re-runs rewrite/router during `graph.invoke(...)`
+- The mock LLM boundary is also intentionally conservative: real LLM providers are not connected, and fallback takeover is not enabled
 - All mysql checkpoint tests still require `MYSQL_TEST_DSN` / `DATABASE_URL` / `AI_CS_TEST_MYSQL_DSN` pointing to a disposable database whose name contains `test`
 - New checkpoint persistence test bootstraps project SQL, calls real `PyMySQLSaver.setup()`, invokes a real graph, closes the provider, reopens a new provider, and verifies the same `thread_id` checkpoint can still be read
 - New gateway smoke test inserts one deterministic inbound event, runs `gateway_consumer.process_next_batch(... checkpoint_mode="mysql" ...)`, verifies `conversation_states` / `conversation_messages` / `outbound_messages` / `graph_checkpoint_runs`, then reopens a provider and verifies checkpoint readability again
@@ -81,7 +87,7 @@ Recommended next task:
 ## Latest Verification Status
 
 - Ran `uv run --group dev pytest tests/unit -q`
-- Result: `237 passed`
+- Result: `243 passed`
 - Created local base database: `ai_customer_service_test`
 - DSN env used for verification: `MYSQL_TEST_DSN`
 - Ran `PYTHONPATH=src uv run --group dev pytest tests/integration/test_mysql_checkpoint_persistence.py -q`
@@ -149,6 +155,9 @@ Implemented:
 - `knowledge_documents` stores tenant/kb-scope KB documents for deterministic retrieval
 - `gateway_consumer` creates `KnowledgeDocumentRepository(pool)` and `RagService(...)`
 - `GatewayService` pre-runs deterministic rewrite/router logic and only prefetches `rag_context` for `route=faq`
+- `gateway_consumer` now also creates a model-provider boundary; current supported modes are only `off` and `mock`
+- mock rewrite shadow records `llm_rewrite_result` without changing `rewritten_question`
+- mock intent shadow records `llm_intent_result` without changing `intent_result` or `route`
 - `rag_node` reads `rag_context` synchronously and never opens DB connections
 - normal FAQ/RAG path produces only customer-facing `livechat.send_text`
 - normal FAQ/RAG path no longer emits `rag.placeholder` external commands
@@ -169,6 +178,8 @@ TODO for later phases only:
 - webhook registration docs
 - interrupt/resume
 - checkpoint debug/admin Web UI
+- real LLM provider integration
+- LLM tool calling
 - vector RAG, embeddings, and LLM answer generation
 - knowledge-base web management UI
 - Telegram full handoff loop

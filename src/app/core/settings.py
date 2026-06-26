@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     livechat_allowed_group_ids: str = ""
     langgraph_checkpoint_mode: str = "off"
     langgraph_checkpoint_setup_on_start: bool = False
+    llm_provider: str = "off"
+    llm_rewrite_shadow_enabled: bool = False
+    llm_rewrite_fallback_enabled: bool = False
+    llm_intent_shadow_enabled: bool = False
+    llm_intent_fallback_enabled: bool = False
+    llm_intent_min_confidence: float = 0.75
 
     @property
     def livechat_self_author_id_set(self) -> set[str]:

@@ -11,6 +11,7 @@ from app.db.repositories import (
     KnowledgeDocumentRepository,
 )
 from app.graph.checkpointing import build_checkpointer
+from app.llm.provider import build_llm_provider
 from app.schemas.events import InboundEvent
 from app.services.gateway import GatewayService
 from app.services.rag import RagService
@@ -22,14 +23,38 @@ async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off"
     knowledge_repository = KnowledgeDocumentRepository(pool)
     checkpoint_run_repository = GraphCheckpointRunRepository(pool)
     rag_service = RagService(knowledge_repository=knowledge_repository)
+    llm_provider = build_llm_provider(getattr(settings, "llm_provider", "off")) if settings else None
     managed_checkpointer = build_checkpointer(checkpoint_mode, settings=settings)
     try:
+        service_kwargs = {
+            "transactional_repository": transactional_repository,
+            "checkpointer": managed_checkpointer.checkpointer,
+            "checkpoint_mode": checkpoint_mode,
+            "checkpoint_run_repository": checkpoint_run_repository,
+            "rag_service": rag_service,
+        }
+        if any(
+            [
+                llm_provider is not None,
+                getattr(settings, "llm_rewrite_shadow_enabled", False),
+                getattr(settings, "llm_rewrite_fallback_enabled", False),
+                getattr(settings, "llm_intent_shadow_enabled", False),
+                getattr(settings, "llm_intent_fallback_enabled", False),
+            ]
+        ):
+            service_kwargs.update(
+                {
+                    "llm_rewrite_service": llm_provider,
+                    "llm_intent_service": llm_provider,
+                    "llm_rewrite_shadow_enabled": getattr(settings, "llm_rewrite_shadow_enabled", False),
+                    "llm_rewrite_fallback_enabled": getattr(settings, "llm_rewrite_fallback_enabled", False),
+                    "llm_intent_shadow_enabled": getattr(settings, "llm_intent_shadow_enabled", False),
+                    "llm_intent_fallback_enabled": getattr(settings, "llm_intent_fallback_enabled", False),
+                    "llm_intent_min_confidence": getattr(settings, "llm_intent_min_confidence", 0.75),
+                }
+            )
         service = GatewayService(
-            transactional_repository=transactional_repository,
-            checkpointer=managed_checkpointer.checkpointer,
-            checkpoint_mode=checkpoint_mode,
-            checkpoint_run_repository=checkpoint_run_repository,
-            rag_service=rag_service,
+            **service_kwargs,
         )
 
         results = []

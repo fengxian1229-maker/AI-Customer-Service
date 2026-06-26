@@ -171,6 +171,47 @@ class FakeRagService:
         return self.context
 
 
+class FakeLLMRewriteService:
+    def __init__(self, result: dict | None = None) -> None:
+        self.result = result or {
+            "rewritten_question": "shadow rewrite",
+            "normalized_query": "shadow rewrite",
+            "language": "es",
+            "preserved_entities": ["andy123"],
+            "missing_or_ambiguous": [],
+            "risk_flags": [],
+            "confidence": 0.9,
+            "reason": "shadow-only",
+            "provider": "mock",
+            "mode": "shadow",
+        }
+        self.calls = []
+
+    async def rewrite(self, payload: dict) -> dict:
+        self.calls.append(payload)
+        return self.result
+
+
+class FakeLLMIntentService:
+    def __init__(self, result: dict | None = None) -> None:
+        self.result = result or {
+            "intent": "deposit_howto",
+            "route": "faq",
+            "confidence": 0.88,
+            "reason": "shadow-only",
+            "sop_name": None,
+            "faq_query": "how to deposit",
+            "risk_level": None,
+            "provider": "mock",
+            "mode": "shadow",
+        }
+        self.calls = []
+
+    async def classify_intent(self, payload: dict) -> dict:
+        self.calls.append(payload)
+        return self.result
+
+
 def test_gateway_service_processes_message_created():
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
@@ -196,6 +237,10 @@ def test_gateway_service_processes_message_created():
     assert message_repository.inserted[0]["sender_role"] == "customer"
     assert message_repository.inserted[0]["message_type"] == "text"
     assert message_repository.inserted[0]["inbound_event_id"] == 11
+    assert result["graph_state"]["llm_rewrite_result"] is None
+    assert result["graph_state"]["llm_intent_result"] is None
+    assert result["graph_state"]["rewrite_source"] == "deterministic"
+    assert result["graph_state"]["route_source"] == "deterministic"
 
 
 def test_gateway_splits_livechat_outbox_and_external_commands():
@@ -410,6 +455,166 @@ def test_gateway_service_without_rag_service_keeps_static_fallback_for_faq():
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
 
 
+def test_gateway_service_rewrite_shadow_records_result_without_overriding_deterministic_fields():
+    rewrite_service = FakeLLMRewriteService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_rewrite_service=rewrite_service,
+        llm_rewrite_shadow_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(17, make_event_with_text("how to deposit")))
+
+    assert len(rewrite_service.calls) == 1
+    assert result["graph_state"]["llm_rewrite_result"]["provider"] == "mock"
+    assert result["graph_state"]["rewritten_question"] == "how to deposit"
+    assert result["graph_state"]["rewrite_source"] == "deterministic"
+    assert result["graph_state"]["route"] == "faq"
+    assert result["external_commands"] == []
+    assert result["outbound_messages"][0]["action_type"] == "send_event"
+
+
+def test_gateway_service_intent_shadow_records_result_without_overriding_deterministic_route():
+    intent_service = FakeLLMIntentService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=intent_service,
+        llm_intent_shadow_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(18, make_event_with_text("how to deposit")))
+
+    assert len(intent_service.calls) == 1
+    assert result["graph_state"]["llm_intent_result"]["provider"] == "mock"
+    assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
+    assert result["graph_state"]["route_source"] == "deterministic"
+
+
+def test_gateway_service_sop_route_is_not_overridden_by_shadow_results():
+    rewrite_service = FakeLLMRewriteService(
+        {
+            "rewritten_question": "how to deposit",
+            "normalized_query": "how to deposit",
+            "language": "en",
+            "preserved_entities": [],
+            "missing_or_ambiguous": [],
+            "risk_flags": [],
+            "confidence": 0.95,
+            "reason": "force faq rewrite",
+            "provider": "mock",
+            "mode": "shadow",
+        }
+    )
+    intent_service = FakeLLMIntentService(
+        {
+            "intent": "deposit_howto",
+            "route": "faq",
+            "confidence": 0.95,
+            "reason": "force faq route",
+            "provider": "mock",
+            "mode": "shadow",
+        }
+    )
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_rewrite_service=rewrite_service,
+        llm_intent_service=intent_service,
+        llm_rewrite_shadow_enabled=True,
+        llm_intent_shadow_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(19, make_event_with_text("mi deposito no llegó")))
+
+    assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
+    assert result["graph_state"]["rewritten_question"] == "mi deposito no llegó"
+    assert result["graph_state"]["rewrite_source"] == "deterministic"
+    assert result["graph_state"]["route_source"] == "deterministic"
+
+
+def test_gateway_service_human_handoff_route_is_not_overridden_by_shadow_results():
+    intent_service = FakeLLMIntentService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=intent_service,
+        llm_intent_shadow_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(20, make_event_with_text("I want human agent")))
+
+    assert result["graph_state"]["route"] == "human_handoff"
+    assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
+
+
+def test_gateway_service_active_workflow_supplement_is_not_misrouted_by_shadow_rewrite():
+    class ActiveWorkflowConversationRepository(FakeConversationRepository):
+        async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
+            conversation = await super().get_or_create(chat_id, thread_id)
+            conversation["active_workflow"] = "deposit_missing"
+            conversation["workflow_stage"] = "collecting_slots"
+            return conversation
+
+    rewrite_service = FakeLLMRewriteService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=ActiveWorkflowConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_rewrite_service=rewrite_service,
+        llm_rewrite_shadow_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(21, make_event_with_text("ya lo mandé")))
+
+    assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
+
+
+def test_gateway_service_backend_fact_shadow_does_not_query_knowledge_repository():
+    from app.services.rag import RagService
+
+    class FakeKnowledgeRepository:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def search(self, tenant_id: str, query: str, kb_scope: str = "default", limit: int = 3):
+            self.calls.append((tenant_id, query, kb_scope, limit))
+            return []
+
+    repository = FakeKnowledgeRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=RagService(repository),
+        llm_rewrite_service=FakeLLMRewriteService(),
+        llm_intent_service=FakeLLMIntentService(),
+        llm_rewrite_shadow_enabled=True,
+        llm_intent_shadow_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(22, make_event_with_text("withdrawal status and balance")))
+
+    assert repository.calls == []
+    assert result["graph_state"]["llm_rewrite_result"] is not None
+    assert result["graph_state"]["llm_intent_result"] is not None
+
+
 class RecordingGraph:
     def __init__(self) -> None:
         self.calls = []
@@ -552,6 +757,8 @@ def test_gateway_snapshot_sanitizes_rag_context_to_metadata_and_hides_secrets():
             "raw_user_input": "bonus rules",
             "event_type": "MESSAGE_CREATED",
             "slot_memory": {"password": "secret-password", "safe": "ok"},
+            "llm_rewrite_result": {"provider": "mock", "rewritten_question": "shadow", "api_key": "skip-me"},
+            "llm_intent_result": {"provider": "mock", "route": "faq", "secret": "skip-me-too"},
             "rag_context": {
                 "matched": True,
                 "answer": "x" * 2500,
@@ -568,6 +775,8 @@ def test_gateway_snapshot_sanitizes_rag_context_to_metadata_and_hides_secrets():
     )
 
     assert snapshot["slot_memory"] == {"safe": "ok"}
+    assert snapshot["llm_rewrite_result"] == {"provider": "mock", "rewritten_question": "shadow"}
+    assert snapshot["llm_intent_result"] == {"provider": "mock", "route": "faq"}
     assert snapshot["rag_context"]["matched"] is True
     assert snapshot["rag_context"]["documents"][0]["title"] == "Bonus rules"
     assert "content" not in snapshot["rag_context"]["documents"][0]

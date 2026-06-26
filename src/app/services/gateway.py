@@ -1,6 +1,7 @@
 from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
 from app.graph.builder import build_workflow_graph
 from app.graph.nodes import build_graph_state_from_event, prepare_route_state
+from app.llm.contracts import LLMIntentShadowInput, LLMRewriteShadowInput
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.message_history import build_customer_message_from_inbound
@@ -46,6 +47,13 @@ class GatewayService:
         checkpointer=None,
         checkpoint_mode: str = "off",
         rag_service=None,
+        llm_rewrite_service=None,
+        llm_intent_service=None,
+        llm_rewrite_shadow_enabled: bool = False,
+        llm_rewrite_fallback_enabled: bool = False,
+        llm_intent_shadow_enabled: bool = False,
+        llm_intent_fallback_enabled: bool = False,
+        llm_intent_min_confidence: float = 0.75,
         recent_message_limit: int = 10,
     ) -> None:
         self.inbound_repository = inbound_repository
@@ -64,6 +72,13 @@ class GatewayService:
         self.checkpoint_run_repository = checkpoint_run_repository
         self.checkpoint_mode = checkpoint_mode
         self.rag_service = rag_service
+        self.llm_rewrite_service = llm_rewrite_service
+        self.llm_intent_service = llm_intent_service
+        self.llm_rewrite_shadow_enabled = llm_rewrite_shadow_enabled
+        self.llm_rewrite_fallback_enabled = llm_rewrite_fallback_enabled
+        self.llm_intent_shadow_enabled = llm_intent_shadow_enabled
+        self.llm_intent_fallback_enabled = llm_intent_fallback_enabled
+        self.llm_intent_min_confidence = llm_intent_min_confidence
         self.recent_message_limit = recent_message_limit
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
@@ -156,6 +171,14 @@ class GatewayService:
         try:
             routed_state = prepare_route_state(graph_state)
             active_state = routed_state
+            if self.llm_rewrite_shadow_enabled and self.llm_rewrite_service:
+                routed_state["llm_rewrite_result"] = await self.llm_rewrite_service.rewrite(
+                    self._build_llm_rewrite_shadow_input(routed_state)
+                )
+            if self.llm_intent_shadow_enabled and self.llm_intent_service:
+                routed_state["llm_intent_result"] = await self.llm_intent_service.classify_intent(
+                    self._build_llm_intent_shadow_input(routed_state)
+                )
             if self.rag_service and routed_state.get("route") == "faq":
                 # Conservative lazy-retrieve transition: pre-route with pure deterministic nodes,
                 # then only prefetch DB-backed RAG for FAQ traffic before invoking the full graph.
@@ -265,7 +288,11 @@ class GatewayService:
             "workflow_stage": graph_state.get("workflow_stage"),
             "slot_memory": graph_state.get("slot_memory"),
             "route": graph_state.get("route"),
+            "route_source": graph_state.get("route_source"),
+            "rewrite_source": graph_state.get("rewrite_source"),
             "intent_result": graph_state.get("intent_result"),
+            "llm_rewrite_result": graph_state.get("llm_rewrite_result"),
+            "llm_intent_result": graph_state.get("llm_intent_result"),
             "rewrite_result": graph_state.get("rewrite_result"),
         }
         if graph_state.get("rag_context"):
@@ -311,6 +338,46 @@ class GatewayService:
         if isinstance(value, str):
             return value[:2000]
         return value
+
+    def _build_llm_rewrite_shadow_input(self, graph_state: dict) -> LLMRewriteShadowInput:
+        return {
+            "tenant_id": graph_state.get("tenant_id"),
+            "conversation_id": graph_state.get("conversation_id"),
+            "raw_user_input": graph_state.get("raw_user_input"),
+            "current_rewritten_question": graph_state.get("rewritten_question"),
+            "deterministic_rewrite_result": graph_state.get("rewrite_result"),
+            "recent_messages": list(graph_state.get("recent_messages") or []),
+            "active_workflow": graph_state.get("active_workflow"),
+            "workflow_stage": graph_state.get("workflow_stage"),
+            "slot_memory": dict(graph_state.get("slot_memory") or {}),
+            "attachments_summary": self._attachments_summary(graph_state),
+        }
+
+    def _build_llm_intent_shadow_input(self, graph_state: dict) -> LLMIntentShadowInput:
+        return {
+            "tenant_id": graph_state.get("tenant_id"),
+            "conversation_id": graph_state.get("conversation_id"),
+            "raw_user_input": graph_state.get("raw_user_input"),
+            "rewritten_question": graph_state.get("rewritten_question"),
+            "llm_rewritten_question": (graph_state.get("llm_rewrite_result") or {}).get("rewritten_question"),
+            "recent_messages": list(graph_state.get("recent_messages") or []),
+            "deterministic_intent_result": graph_state.get("intent_result"),
+            "deterministic_route": graph_state.get("route"),
+            "active_workflow": graph_state.get("active_workflow"),
+            "workflow_stage": graph_state.get("workflow_stage"),
+            "attachments_summary": self._attachments_summary(graph_state),
+        }
+
+    def _attachments_summary(self, graph_state: dict) -> list[dict]:
+        attachments = []
+        for attachment in graph_state.get("attachments") or []:
+            attachments.append(
+                {
+                    "url": attachment.get("url"),
+                    "name": attachment.get("name"),
+                }
+            )
+        return attachments
 
     async def _load_transactional_conversation(self, event: InboundEvent) -> dict:
         conversation_repository = getattr(self.transactional_repository, "conversation_repository", None)

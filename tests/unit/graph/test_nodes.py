@@ -52,6 +52,10 @@ def test_build_graph_state_from_event_extracts_text_context_and_attachments():
     assert state["active_workflow"] == "deposit_missing"
     assert state["event_type"] == "FILE_RECEIVED"
     assert state["attachments"] == [{"url": "https://cdn.example/screenshot.png", "name": "screenshot.png"}]
+    assert state["llm_rewrite_result"] is None
+    assert state["llm_intent_result"] is None
+    assert state["route_source"] == "deterministic"
+    assert state["rewrite_source"] == "deterministic"
 
 
 def test_rewrite_question_node_keeps_user_facts():
