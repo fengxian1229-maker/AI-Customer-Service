@@ -1,5 +1,4 @@
 import json
-import os
 import uuid
 
 import aiomysql
@@ -14,9 +13,10 @@ from app.workers.gateway_consumer import process_next_batch
 from conftest import (
     assert_mysql_test_database,
     create_bootstrapped_mysql_pool,
+    drop_mysql_test_database,
     mysql_test_config,
+    provision_mysql_test_settings,
     run,
-    settings_from_dsn,
 )
 
 
@@ -24,24 +24,23 @@ pytestmark = [pytest.mark.integration, pytest.mark.mysql]
 
 
 def test_gateway_consumer_mysql_checkpoint_mode_runtime_smoke():
-    config = mysql_test_config()
-    run(_test_gateway_consumer_mysql_checkpoint_mode_runtime_smoke(config.dsn_env_name))
+    mysql_test_config()
+    run(_test_gateway_consumer_mysql_checkpoint_mode_runtime_smoke())
 
 
-async def _test_gateway_consumer_mysql_checkpoint_mode_runtime_smoke(dsn_env_name: str) -> None:
+async def _test_gateway_consumer_mysql_checkpoint_mode_runtime_smoke() -> None:
     test_id = f"p5b1-gateway-{uuid.uuid4().hex}"
     chat_id = f"{test_id}:chat"
     conversation_id = f"livechat:{chat_id}"
-    pool = await create_bootstrapped_mysql_pool()
+    settings = await provision_mysql_test_settings(
+        langgraph_checkpoint_mode="mysql",
+        langgraph_checkpoint_setup_on_start=False,
+    )
+    pool = await create_bootstrapped_mysql_pool(settings=settings)
     setup_managed = None
     reopened = None
     try:
         await assert_mysql_test_database(pool)
-        settings = settings_from_dsn(
-            os.environ[dsn_env_name],
-            langgraph_checkpoint_mode="mysql",
-            langgraph_checkpoint_setup_on_start=False,
-        )
 
         setup_managed = build_checkpointer("mysql", settings=settings)
         setup_managed.checkpointer.setup()
@@ -114,7 +113,7 @@ async def _test_gateway_consumer_mysql_checkpoint_mode_runtime_smoke(dsn_env_nam
         assert message_rows[0]["inbound_event_id"] == inbound_event_id
         assert message_rows[0]["sender_role"] == "customer"
         assert message_rows[0]["message_type"] == "text"
-        assert message_rows[0]["text_content"] == ""
+        assert message_rows[0]["text_content"] is None
 
         outbound_rows = await fetch_all(
             pool,
@@ -184,6 +183,7 @@ async def _test_gateway_consumer_mysql_checkpoint_mode_runtime_smoke(dsn_env_nam
         await cleanup_gateway_mysql_smoke(pool, test_id)
         pool.close()
         await pool.wait_closed()
+        await drop_mysql_test_database(settings)
 
 
 async def fetch_one(pool, sql: str, args: tuple) -> dict:

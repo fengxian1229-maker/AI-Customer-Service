@@ -112,6 +112,15 @@ Run Tests
 uv run --group dev pytest tests/unit -v
 ```
 
+Create the safe local base database for MySQL integration tests:
+
+```bash
+chmod +x scripts/setup_mysql_test_db.sh
+./scripts/setup_mysql_test_db.sh
+```
+
+The script only creates `ai_customer_service_test`. It does not drop databases or truncate tables.
+
 MySQL checkpoint integration checks require a disposable database whose name contains `test`:
 
 ```bash
@@ -124,6 +133,16 @@ PYTHONPATH=src uv run --group dev pytest tests/integration/test_gateway_consumer
 MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
 PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
 ```
+
+Notes for local MySQL integration:
+
+- If the password contains special characters, URL-encode it in `MYSQL_TEST_DSN`.
+- The checked-in integration helpers provision a fresh per-test schema whose name still contains `test`, then drop that schema after the test run.
+- A real pass result looks like `1 passed` / `5 passed`; `skipped` means the DSN was not picked up or failed the safety checks.
+- Verified on this machine on `2026-06-26`:
+  - `tests/integration/test_mysql_checkpoint_persistence.py -q` -> `1 passed`
+  - `tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py -q` -> `1 passed`
+  - `tests/integration -m mysql -q` -> `5 passed`
 
 Bootstrap Database
 ------------------

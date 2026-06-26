@@ -5,7 +5,14 @@ from app.db.repositories import ExternalCommandRepository
 
 import pytest
 
-from conftest import assert_mysql_test_database, create_bootstrapped_mysql_pool, mysql_test_config, run
+from conftest import (
+    assert_mysql_test_database,
+    create_bootstrapped_mysql_pool,
+    drop_mysql_test_database,
+    mysql_test_config,
+    provision_mysql_test_settings,
+    run,
+)
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.mysql]
@@ -18,7 +25,8 @@ def test_external_command_concurrent_lease_mysql():
 
 async def _test_external_command_concurrent_lease_mysql():
     test_id = f"lease-cmd-{uuid.uuid4().hex}"
-    pool = await create_bootstrapped_mysql_pool()
+    settings = await provision_mysql_test_settings()
+    pool = await create_bootstrapped_mysql_pool(settings=settings)
     try:
         repository = ExternalCommandRepository(pool)
         inserted_ids = []
@@ -38,7 +46,10 @@ async def _test_external_command_concurrent_lease_mysql():
 
         worker_ids = [f"{test_id}:worker:{index}" for index in range(4)]
         leased_batches = await asyncio.gather(
-            *[_lease_commands_in_independent_pool(worker_id, limit=3, lease_seconds=120) for worker_id in worker_ids]
+            *[
+                _lease_commands_in_independent_pool(settings, worker_id, limit=3, lease_seconds=120)
+                for worker_id in worker_ids
+            ]
         )
         leased = [row for batch in leased_batches for row in batch]
         leased_ids = [row["id"] for row in leased]
@@ -73,10 +84,11 @@ async def _test_external_command_concurrent_lease_mysql():
         await cleanup_external_commands(pool, test_id)
         pool.close()
         await pool.wait_closed()
+        await drop_mysql_test_database(settings)
 
 
-async def _lease_commands_in_independent_pool(worker_id: str, limit: int, lease_seconds: int):
-    pool = await create_bootstrapped_mysql_pool()
+async def _lease_commands_in_independent_pool(settings, worker_id: str, limit: int, lease_seconds: int):
+    pool = await create_bootstrapped_mysql_pool(settings=settings)
     try:
         return await ExternalCommandRepository(pool).lease_pending(
             limit=limit,

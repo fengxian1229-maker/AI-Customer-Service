@@ -18,7 +18,14 @@ from app.services.gateway import GatewayService
 from app.workers.external_command_worker import process_pending_commands
 from app.workers.external_result_consumer import process_pending_results
 
-from conftest import assert_mysql_test_database, create_bootstrapped_mysql_pool, mysql_test_config, run
+from conftest import (
+    assert_mysql_test_database,
+    create_bootstrapped_mysql_pool,
+    drop_mysql_test_database,
+    mysql_test_config,
+    provision_mysql_test_settings,
+    run,
+)
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.mysql, pytest.mark.replay]
@@ -31,7 +38,8 @@ def test_db_replay_runner_mysql_mock_closed_loop():
 
 async def _test_db_replay_runner_mysql_mock_closed_loop():
     test_id = f"db-replay-{uuid.uuid4().hex}"
-    pool = await create_bootstrapped_mysql_pool()
+    settings = await provision_mysql_test_settings()
+    pool = await create_bootstrapped_mysql_pool(settings=settings)
     try:
         cases = [
             {
@@ -75,12 +83,11 @@ async def _test_db_replay_runner_mysql_mock_closed_loop():
                 "expected_result_stage": "case_created",
             },
             {
-                "name": "rag_placeholder",
+                "name": "rag_direct_reply",
                 "text": "que promociones tienen hoy",
                 "expected_workflow_stage": None,
-                "expected_external_command_types": ["rag.placeholder"],
-                "run_mock_result": True,
-                "expected_result_stage": "rag_placeholder_dry_run",
+                "expected_external_command_types": [],
+                "run_mock_result": False,
             },
             {
                 "name": "human_handoff",
@@ -98,6 +105,7 @@ async def _test_db_replay_runner_mysql_mock_closed_loop():
         await cleanup_db_replay(pool, test_id)
         pool.close()
         await pool.wait_closed()
+        await drop_mysql_test_database(settings)
 
 
 async def run_db_replay_case(pool, test_id: str, case: dict) -> None:

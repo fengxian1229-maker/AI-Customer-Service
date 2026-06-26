@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from app.db.repositories import (
     ConversationMessageRepository,
     ExternalCommandRepository,
@@ -102,6 +104,36 @@ async def run_insert(rowcount: int):
     return result, cursor
 
 
+async def run_fetch_unprocessed_with_datetime():
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 11,
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "event_id": "event-1",
+                    "event_type": "message",
+                    "standard_event_type": "MESSAGE_CREATED",
+                    "author_id": "user-1",
+                    "sender_role": "external",
+                    "occurred_at": datetime(2026, 6, 24, 0, 0, 0),
+                    "dedup_key": "dedup:event-1",
+                    "payload_json": '{"event":{"text":"hello"}}',
+                    "raw_action": "polling.event",
+                    "source": "polling_fallback",
+                    "organization_id": None,
+                    "ignored": 0,
+                    "ignore_reason": None,
+                }
+            ]
+
+    cursor = FetchCursor(rowcount=1)
+    repository = InboundEventRepository(FakePool(cursor))
+    rows = await repository.fetch_unprocessed(limit=1)
+    return rows, cursor
+
+
 def make_outbound_message() -> dict:
     return {
         "chat_id": "chat-1",
@@ -140,6 +172,16 @@ def test_inbound_insert_reports_duplicate_without_failure():
     result, _cursor = asyncio.run(run_insert(rowcount=0))
 
     assert result == {"inserted": False, "duplicate": True}
+
+
+def test_inbound_fetch_unprocessed_normalizes_datetime_occurred_at_to_string():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_fetch_unprocessed_with_datetime())
+
+    assert "SELECT id, chat_id, thread_id" in cursor.sql
+    assert rows[0]["occurred_at"] == "2026-06-24 00:00:00.000000"
+    assert rows[0]["payload_json"] == {"event": {"text": "hello"}}
 
 
 def test_outbound_insert_idempotent_uses_inbound_action_duplicate_key():

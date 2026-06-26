@@ -6,27 +6,26 @@ import pytest
 from app.graph.builder import build_workflow_graph
 from app.graph.checkpointing import build_checkpointer
 
-from conftest import create_bootstrapped_mysql_pool, mysql_test_config, run, settings_from_dsn
+from conftest import create_bootstrapped_mysql_pool, drop_mysql_test_database, mysql_test_config, provision_mysql_test_settings, run
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.mysql]
 
 
 def test_mysql_checkpointer_persists_state_across_provider_reopen():
-    config = mysql_test_config()
-    run(_test_mysql_checkpointer_persists_state_across_provider_reopen(config.dsn_env_name))
+    mysql_test_config()
+    run(_test_mysql_checkpointer_persists_state_across_provider_reopen())
 
 
-async def _test_mysql_checkpointer_persists_state_across_provider_reopen(dsn_env_name: str) -> None:
-    pool = await create_bootstrapped_mysql_pool()
+async def _test_mysql_checkpointer_persists_state_across_provider_reopen() -> None:
+    settings = await provision_mysql_test_settings(
+        langgraph_checkpoint_mode="mysql",
+        langgraph_checkpoint_setup_on_start=False,
+    )
+    pool = await create_bootstrapped_mysql_pool(settings=settings)
     managed = None
     reopened = None
     try:
-        settings = settings_from_dsn(
-            os.environ[dsn_env_name],
-            langgraph_checkpoint_mode="mysql",
-            langgraph_checkpoint_setup_on_start=False,
-        )
         conversation_id = f"livechat:p5b1-checkpoint-{uuid.uuid4().hex}"
         config = {"configurable": {"thread_id": conversation_id}}
         initial_state = {
@@ -90,3 +89,4 @@ async def _test_mysql_checkpointer_persists_state_across_provider_reopen(dsn_env
             reopened.close()
         pool.close()
         await pool.wait_closed()
+        await drop_mysql_test_database(settings)

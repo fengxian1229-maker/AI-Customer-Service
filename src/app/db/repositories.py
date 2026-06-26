@@ -1,5 +1,6 @@
 import json
 import hashlib
+from datetime import datetime
 
 import aiomysql
 
@@ -64,6 +65,8 @@ class InboundEventRepository:
                 rows = await cur.fetchall()
         for row in rows:
             row["payload_json"] = json_loads(row["payload_json"])
+            if isinstance(row.get("occurred_at"), datetime):
+                row["occurred_at"] = row["occurred_at"].strftime("%Y-%m-%d %H:%M:%S.%f")
         return rows
 
     async def mark_processed(self, inbound_event_id: int) -> None:

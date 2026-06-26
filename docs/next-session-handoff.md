@@ -43,7 +43,7 @@ Recommended next task:
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
 
-## Latest P5-B.1 Status
+## Latest P5-B.2 Status
 
 - Added `tests/integration/test_mysql_checkpoint_persistence.py`
 - Added `tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py`
@@ -53,19 +53,30 @@ Recommended next task:
 - Both new tests require `MYSQL_TEST_DSN` / `DATABASE_URL` / `AI_CS_TEST_MYSQL_DSN` pointing to a disposable database whose name contains `test`
 - New checkpoint persistence test bootstraps project SQL, calls real `PyMySQLSaver.setup()`, invokes a real graph, closes the provider, reopens a new provider, and verifies the same `thread_id` checkpoint can still be read
 - New gateway smoke test inserts one deterministic inbound event, runs `gateway_consumer.process_next_batch(... checkpoint_mode="mysql" ...)`, verifies `conversation_states` / `conversation_messages` / `outbound_messages` / `graph_checkpoint_runs`, then reopens a provider and verifies checkpoint readability again
+- `tests/integration/conftest.py` now provisions a fresh per-test MySQL schema whose name still contains `test`, bootstraps it, and drops it after the run
+- The provisioned integration schema uses `utf8mb4_0900_ai_ci` on this MySQL 8.4 machine to avoid saver collation mismatches during real checkpoint reads
+- Added `scripts/setup_mysql_test_db.sh` to create the safe local base database `ai_customer_service_test` without writing credentials to Git
 
 ## Latest Verification Status
 
 - Ran `uv run --group dev pytest tests/unit -q`
-- Result: `233 passed`
+- Result: `234 passed`
+- Created local base database: `ai_customer_service_test`
+- DSN env used for verification: `MYSQL_TEST_DSN`
+- Ran `PYTHONPATH=src uv run --group dev pytest tests/integration/test_mysql_checkpoint_persistence.py -q`
+- Result: `1 passed`
+- Ran `PYTHONPATH=src uv run --group dev pytest tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py -q`
+- Result: `1 passed`
 - Ran `PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`
-- Result on this machine: `5 skipped`
-- Skip reason: no usable `MYSQL_TEST_DSN`/`DATABASE_URL`/`AI_CS_TEST_MYSQL_DSN` was configured, and local MySQL credentials were not available to create a safe `*test*` database
-- No integration test was run against `livechat_ai`; mysql integration remains locked to databases whose names contain `test`
+- Result: `5 passed`
+- No mysql integration test was run against `livechat_ai`; test provisioning remains locked to database names containing `test`
 
 ## Recommended Commands For A Prepared MySQL Test DB
 
 ```bash
+chmod +x scripts/setup_mysql_test_db.sh
+./scripts/setup_mysql_test_db.sh
+
 MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
 PYTHONPATH=src uv run --group dev pytest tests/integration/test_mysql_checkpoint_persistence.py -q
 
@@ -75,6 +86,8 @@ PYTHONPATH=src uv run --group dev pytest tests/integration/test_gateway_consumer
 MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
 PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
 ```
+
+If the password contains special characters, URL-encode it in the DSN. A true local verification result must print `passed`; `skipped` means the DSN was not loaded or failed the safety checks.
 
 ## Current Polling-First Worker Status
 

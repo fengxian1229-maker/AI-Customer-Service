@@ -34,6 +34,12 @@ P5-B：real MySQL LangGraph checkpointer conservative integration
 P5-B.1：real MySQL checkpoint persistence verification + gateway_consumer mysql runtime smoke tests
 ```
 
+当前 P5-B.2 已完成：
+
+```text
+P5-B.2：real local MySQL integration verification + checkpoint test DB setup hardening
+```
+
 说明：
 
 ```text
@@ -56,6 +62,14 @@ PYTHONPATH=src uv run --group dev pytest tests/integration/test_gateway_consumer
 
 MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
 PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
+```
+
+当前本机验证结果（2026-06-26）：
+
+```text
+tests/integration/test_mysql_checkpoint_persistence.py     1 passed
+tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py 1 passed
+tests/integration -m mysql                                5 passed
 ```
 
 当前 RAG 仍明确不做：

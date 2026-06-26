@@ -2,8 +2,10 @@ import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote_plus, urlparse
+from uuid import uuid4
 
+import pymysql
 import pytest
 
 from app.core.settings import Settings
@@ -45,16 +47,73 @@ def settings_from_dsn(dsn: str, **overrides) -> Settings:
         livechat_account_id="unused-for-integration",
         mysql_host=parsed.hostname or "127.0.0.1",
         mysql_port=parsed.port or 3306,
-        mysql_user=unquote(parsed.username or "root"),
-        mysql_password=unquote(parsed.password or ""),
+        mysql_user=unquote_plus(parsed.username or "root"),
+        mysql_password=unquote_plus(parsed.password or ""),
         mysql_database=database,
         **overrides,
     )
 
 
-async def create_bootstrapped_mysql_pool():
+def _build_isolated_test_database_name(base_database: str) -> str:
+    prefix = f"{base_database}_run"
+    suffix = uuid4().hex[:10]
+    candidate = f"{prefix}_{suffix}"
+    if "test" not in candidate.lower():
+        candidate = f"{base_database}_test_{suffix}"
+    return candidate[:64]
+
+
+async def provision_mysql_test_settings(**overrides) -> Settings:
     config = mysql_test_config()
-    pool = await create_pool(config.settings)
+    settings = config.settings
+    database_name = _build_isolated_test_database_name(settings.mysql_database)
+
+    def create_database() -> None:
+        conn = pymysql.connect(
+            host=settings.mysql_host,
+            port=settings.mysql_port,
+            user=settings.mysql_user,
+            password=settings.mysql_password,
+            autocommit=True,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"CREATE DATABASE IF NOT EXISTS `{database_name}` "
+                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+                )
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(create_database)
+    return settings.model_copy(update={"mysql_database": database_name, **overrides})
+
+
+async def drop_mysql_test_database(settings: Settings) -> None:
+    database = settings.mysql_database
+    if "test" not in database.lower():
+        pytest.fail(f"Refusing to drop non-test database: {database!r}")
+
+    def drop_database() -> None:
+        conn = pymysql.connect(
+            host=settings.mysql_host,
+            port=settings.mysql_port,
+            user=settings.mysql_user,
+            password=settings.mysql_password,
+            autocommit=True,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP DATABASE IF EXISTS `{database}`")
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(drop_database)
+
+
+async def create_bootstrapped_mysql_pool(settings: Settings | None = None):
+    active_settings = settings or mysql_test_config().settings
+    pool = await create_pool(active_settings)
     try:
         await bootstrap_database(pool, sql_dir=Path("sql"))
         await ensure_skip_locked_supported(pool)
