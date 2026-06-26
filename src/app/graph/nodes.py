@@ -3,7 +3,7 @@ from typing import Any
 from app.graph.state import GraphState
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
-from app.services.rag import answer_from_static_knowledge
+from app.services.rag import answer_from_rag_context, answer_from_static_knowledge
 from app.workflows.slot_extractors import (
     extract_amount,
     extract_identity,
@@ -39,6 +39,7 @@ def build_graph_state_from_event(
         "signal_result": None,
         "intent_result": None,
         "route": None,
+        "rag_context": None,
         "rag_result": None,
         "recent_messages": recent_messages or [],
         "response_text": None,
@@ -156,7 +157,7 @@ def sop_node(state: GraphState) -> GraphState:
 
 
 def rag_node(state: GraphState) -> GraphState:
-    rag_result = answer_from_static_knowledge(state)
+    rag_result = answer_from_rag_context(state) if state.get("rag_context") is not None else answer_from_static_knowledge(state)
     return {
         **state,
         "rag_result": rag_result,

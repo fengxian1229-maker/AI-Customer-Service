@@ -110,6 +110,30 @@ class FakeConversationMessageRepository:
         return {"inserted": True, "duplicate": False, "id": len(self.inserted)}
 
 
+class FakeRagService:
+    def __init__(self, context=None, error: Exception | None = None) -> None:
+        self.context = context or {
+            "documents": [
+                {
+                    "id": 1,
+                    "title": "Bonus rules",
+                    "content": "奖金规则以活动页面说明为准。",
+                    "score": 5,
+                }
+            ],
+            "source": "knowledge_documents",
+            "fallback_reason": None,
+        }
+        self.error = error
+        self.calls = []
+
+    async def retrieve(self, state: dict) -> dict:
+        self.calls.append(state)
+        if self.error:
+            raise self.error
+        return self.context
+
+
 def test_gateway_service_processes_message_created():
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
@@ -171,6 +195,7 @@ def test_gateway_service_rag_faq_writes_outbound_without_external_command():
         outbound_repository=outbound_repository,
         external_command_repository=external_repository,
         message_repository=FakeConversationMessageRepository(),
+        rag_service=FakeRagService(),
     )
     event = make_inbound_event()
     event.payload_json = {"event": {"type": "message", "text": "bonus rules"}}
@@ -179,9 +204,65 @@ def test_gateway_service_rag_faq_writes_outbound_without_external_command():
 
     assert result["graph_state"]["route"] == "rag"
     assert result["graph_state"]["rag_result"]["matched"] is True
+    assert result["graph_state"]["rag_context"]["source"] == "knowledge_documents"
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
     assert result["external_commands"] == []
     assert external_repository.inserted == []
+
+
+def test_gateway_service_prefetches_rag_context_before_graph_invoke():
+    graph = RecordingGraph()
+    rag_service = FakeRagService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=graph,
+        rag_service=rag_service,
+    )
+
+    asyncio.run(service.process_event(14, make_inbound_event()))
+
+    state, _config = graph.calls[0]
+    assert rag_service.calls[0]["conversation_id"] == "livechat:chat-1"
+    assert state["rag_context"]["documents"][0]["title"] == "Bonus rules"
+
+
+def test_gateway_service_records_error_and_skips_side_effects_when_rag_retrieve_fails():
+    inbound_repository = FakeInboundRepository()
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    graph_error_repository = FakeGraphRunErrorRepository()
+    message_repository = FakeConversationMessageRepository()
+    graph = RecordingGraph()
+    service = GatewayService(
+        inbound_repository=inbound_repository,
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        graph_run_error_repository=graph_error_repository,
+        message_repository=message_repository,
+        workflow_graph=graph,
+        rag_service=FakeRagService(error=RuntimeError("rag retrieve failed")),
+    )
+
+    try:
+        asyncio.run(service.process_event(15, make_inbound_event()))
+    except RuntimeError as exc:
+        assert str(exc) == "rag retrieve failed"
+    else:
+        raise AssertionError("expected rag retrieve to fail")
+
+    assert graph.calls == []
+    assert inbound_repository.processed == []
+    assert conversation_repository.updated == []
+    assert message_repository.inserted == []
+    assert outbound_repository.inserted == []
+    assert external_repository.inserted == []
+    assert graph_error_repository.inserted[0]["error_type"] == "RuntimeError"
+    assert graph_error_repository.inserted[0]["error_message"] == "rag retrieve failed"
 
 
 class RecordingGraph:

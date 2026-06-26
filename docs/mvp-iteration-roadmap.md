@@ -420,11 +420,16 @@ created_at
 
 ## 6. 第五阶段：RAG 从 placeholder 变成真实知识库问答
 
-P4-A 已将普通 FAQ/RAG 从 placeholder 改为最小 deterministic KB-backed 链路：
+P4-A 已将普通 FAQ/RAG 从 placeholder 改为最小 deterministic KB-backed 链路。
+P4-B 已把 `KnowledgeDocumentRepository.search(...)` 通过 GatewayService/RagService 注入接入主链路：
 
 ```text
-route = rag
-  -> rag_node 根据 tenant_id / kb_scope 检索知识
+gateway_consumer
+  -> KnowledgeDocumentRepository(pool)
+  -> RagService(knowledge_repository)
+  -> GatewayService 预取 rag_context
+  -> graph.invoke(...)
+  -> rag_node 根据 rag_context 生成回答
   -> response_text
   -> outbound_messages
 ```
@@ -435,7 +440,7 @@ route = rag
 普通 RAG 问答不应走 external_commands。
 ```
 
-P4-A 仍不包含：
+P4-B 仍不包含：
 
 ```text
 vector database
@@ -443,6 +448,8 @@ embedding
 LLM answer generation
 real backend facts
 real Telegram
+durable checkpoint storage
+interrupt / resume
 ```
 
 external_commands 只用于：

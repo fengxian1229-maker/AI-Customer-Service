@@ -44,7 +44,7 @@ Checkpoint modes:
 
 P3-B adds a checkpoint provider boundary and read-only graph debug helpers. Durable MySQL checkpoint storage, checkpoint tables, and interrupt/resume are not implemented.
 
-P4-A adds minimal deterministic knowledge-base-backed RAG. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts.
+P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts.
 
 Current RAG limits:
 
@@ -52,6 +52,18 @@ Current RAG limits:
 - No embeddings.
 - No LLM answer generation.
 - No real backend or Telegram calls.
+
+Seed default knowledge documents:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.seed_knowledge --tenant-id default --kb-scope default
+```
+
+Preview seed documents without writing:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.seed_knowledge --tenant-id default --kb-scope default --dry-run
+```
 
 Current receiver boundaries:
 

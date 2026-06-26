@@ -34,13 +34,12 @@ class RagService:
         self.knowledge_repository = knowledge_repository
         self.max_docs = max_docs
 
-    async def answer(self, state: dict) -> dict:
+    async def retrieve(self, state: dict) -> dict:
         query = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
         if _is_backend_fact_question(query):
             return {
-                "matched": False,
-                "answer": BACKEND_FACT_FALLBACK_ANSWER,
                 "documents": [],
+                "source": "guardrail",
                 "fallback_reason": "backend_fact",
             }
 
@@ -51,31 +50,24 @@ class RagService:
                 kb_scope=state.get("kb_scope") or "default",
                 limit=self.max_docs,
             )
+            source = "knowledge_documents"
         else:
             documents = search_static_knowledge(
                 tenant_id=state.get("tenant_id") or "default",
                 query=query,
                 limit=self.max_docs,
             )
+            source = "static_knowledge"
 
-        if not documents:
-            return {
-                "matched": False,
-                "answer": RAG_FALLBACK_ANSWER,
-                "documents": [],
-                "fallback_reason": "no_match",
-            }
-
-        best = documents[0]
         return {
-            "matched": True,
-            "answer": best["content"],
-            "documents": [
-                {"id": doc["id"], "title": doc["title"], "score": doc["score"]}
-                for doc in documents
-            ],
-            "fallback_reason": None,
+            "documents": documents,
+            "source": source,
+            "fallback_reason": None if documents else "no_match",
         }
+
+    async def answer(self, state: dict) -> dict:
+        context = await self.retrieve(state)
+        return answer_from_rag_context({**state, "rag_context": context})
 
 
 def answer_from_static_knowledge(state: dict) -> dict:
@@ -99,6 +91,35 @@ def answer_from_static_knowledge(state: dict) -> dict:
             "documents": [],
             "fallback_reason": "no_match",
         }
+    best = documents[0]
+    return {
+        "matched": True,
+        "answer": best["content"],
+        "documents": [{"id": doc["id"], "title": doc["title"], "score": doc["score"]} for doc in documents],
+        "fallback_reason": None,
+    }
+
+
+def answer_from_rag_context(state: dict) -> dict:
+    context = state.get("rag_context") or {}
+    fallback_reason = context.get("fallback_reason")
+    if fallback_reason == "backend_fact":
+        return {
+            "matched": False,
+            "answer": BACKEND_FACT_FALLBACK_ANSWER,
+            "documents": [],
+            "fallback_reason": "backend_fact",
+        }
+
+    documents = context.get("documents") or []
+    if not documents:
+        return {
+            "matched": False,
+            "answer": RAG_FALLBACK_ANSWER,
+            "documents": [],
+            "fallback_reason": "no_match",
+        }
+
     best = documents[0]
     return {
         "matched": True,

@@ -381,6 +381,35 @@ def test_conversation_message_fetch_recent_returns_oldest_first_after_limit():
     assert rows[1]["attachment_refs"] == [{"url": "https://cdn.example/file.png"}]
 
 
+def test_knowledge_document_insert_idempotent_uses_unique_key_upsert():
+    import asyncio
+
+    cursor = FakeCursor(rowcount=2)
+    cursor.lastrowid = 42
+    repository = KnowledgeDocumentRepository(FakePool(cursor))
+
+    result = asyncio.run(
+        repository.insert_idempotent(
+            {
+                "tenant_id": "default",
+                "kb_scope": "default",
+                "title": "Bonus rules",
+                "content": "奖金规则以活动页面说明为准。",
+                "keywords": ["bonus"],
+                "language": "multi",
+                "priority": 10,
+                "enabled": True,
+            }
+        )
+    )
+
+    assert "ON DUPLICATE KEY UPDATE" in cursor.sql
+    assert "content = VALUES(content)" in cursor.sql
+    assert "keywords = VALUES(keywords)" in cursor.sql
+    assert cursor.args[0:4] == ("default", "default", "Bonus rules", "奖金规则以活动页面说明为准。")
+    assert result == {"inserted": False, "duplicate": True, "id": None}
+
+
 def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores_matches():
     import asyncio
 

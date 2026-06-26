@@ -747,6 +747,12 @@ class KnowledgeDocumentRepository:
         INSERT INTO knowledge_documents (
           tenant_id, kb_scope, title, content, keywords, language, priority, enabled
         ) VALUES (%s, %s, %s, %s, CAST(%s AS JSON), %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+          content = VALUES(content),
+          keywords = VALUES(keywords),
+          language = VALUES(language),
+          priority = VALUES(priority),
+          enabled = VALUES(enabled)
         """
         args = (
             document.get("tenant_id") or "default",
@@ -761,7 +767,8 @@ class KnowledgeDocumentRepository:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, args)
-                return {"inserted": cur.rowcount == 1, "id": cur.lastrowid}
+                inserted = cur.rowcount == 1
+                return {"inserted": inserted, "duplicate": not inserted, "id": cur.lastrowid if inserted else None}
 
     async def search(
         self,

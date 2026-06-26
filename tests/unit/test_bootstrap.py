@@ -126,6 +126,7 @@ def test_knowledge_documents_schema_has_required_indexes():
     assert "keywords JSON NULL" in sql
     assert "enabled TINYINT(1) NOT NULL DEFAULT 1" in sql
     assert "priority INT NOT NULL DEFAULT 100" in sql
+    assert "UNIQUE KEY uk_knowledge_documents_tenant_scope_title" in sql
     assert "KEY idx_knowledge_documents_tenant_enabled_priority" in sql
     assert "KEY idx_knowledge_documents_scope" in sql
 
@@ -476,6 +477,7 @@ def test_knowledge_documents_bootstrap_adds_missing_mysql_columns_and_indexes():
 
     assert any("ADD COLUMN kb_scope" in sql for sql in cursor.executed)
     assert any("ADD COLUMN keywords" in sql for sql in cursor.executed)
+    assert any("uk_knowledge_documents_tenant_scope_title" in sql for sql in cursor.executed)
     assert any("idx_knowledge_documents_tenant_enabled_priority" in sql for sql in cursor.executed)
     assert any("idx_knowledge_documents_scope" in sql for sql in cursor.executed)
 
@@ -500,6 +502,7 @@ def test_knowledge_documents_bootstrap_keeps_existing_sqlite_columns_and_indexes
         async def fetchall(self):
             if self.phase == "indexes":
                 return [
+                    (0, "uk_knowledge_documents_tenant_scope_title"),
                     (0, "idx_knowledge_documents_tenant_enabled_priority"),
                     (1, "idx_knowledge_documents_scope"),
                 ]
@@ -522,3 +525,4 @@ def test_knowledge_documents_bootstrap_keeps_existing_sqlite_columns_and_indexes
 
     assert not any(sql.startswith("ALTER TABLE knowledge_documents ADD COLUMN") for sql in cursor.executed)
     assert not any(sql.startswith("CREATE INDEX") for sql in cursor.executed)
+    assert not any("CREATE UNIQUE INDEX" in sql for sql in cursor.executed)

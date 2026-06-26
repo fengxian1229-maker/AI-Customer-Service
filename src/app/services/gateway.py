@@ -43,6 +43,7 @@ class GatewayService:
         transactional_repository=None,
         workflow_graph=None,
         checkpointer=None,
+        rag_service=None,
         recent_message_limit: int = 10,
     ) -> None:
         self.inbound_repository = inbound_repository
@@ -58,6 +59,7 @@ class GatewayService:
             or (ConversationMessageRepository(pool) if pool else None)
         )
         self.graph_run_error_repository = graph_run_error_repository or (GraphRunErrorRepository(pool) if pool else None)
+        self.rag_service = rag_service
         self.recent_message_limit = recent_message_limit
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
@@ -142,6 +144,8 @@ class GatewayService:
         graph_state = build_graph_state_from_event(event, conversation, recent_messages=recent_messages)
         graph_thread_id = conversation["conversation_id"]
         try:
+            if self.rag_service:
+                graph_state["rag_context"] = await self.rag_service.retrieve(graph_state)
             return self.workflow_graph.invoke(
                 graph_state,
                 config={"configurable": {"thread_id": graph_thread_id}},

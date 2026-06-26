@@ -10,6 +10,11 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
   enabled TINYINT(1) NOT NULL DEFAULT 1,
   created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_knowledge_documents_tenant_scope_title (
+    tenant_id,
+    kb_scope,
+    title
+  ),
   KEY idx_knowledge_documents_tenant_enabled_priority (
     tenant_id,
     enabled,

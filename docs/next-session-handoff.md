@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG; normal FAQ/RAG answers no longer emit `external_commands`.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection; normal FAQ/RAG answers no longer emit `external_commands`.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -35,8 +35,8 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-- P4-B and later:
-- decide how to inject tenant knowledge repository into graph without coupling graph nodes to DB pools
+- P4-C / later:
+- improve knowledge ranking and tenant-scoped KB management without adding vector DB or LLM generation yet
 - design durable checkpoint storage separately before adding a MySQL checkpoint store
 - keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change
 ```
@@ -45,7 +45,7 @@ Recommended next task:
 
 This session hardened the polling-first worker path without adding websocket or webhook ingress.
 P0 ingress contract is done, and P1-A added graph failure isolation with `graph_run_errors`.
-P2 added `conversation_messages` for conversation history, P3-A added LangGraph `thread_id = conversation_id` config plus checkpointer injection support, P3-B added the checkpoint provider boundary, and P4-A replaced normal RAG placeholder behavior with deterministic KB-backed replies.
+P2 added `conversation_messages` for conversation history, P3-A added LangGraph `thread_id = conversation_id` config plus checkpointer injection support, P3-B added the checkpoint provider boundary, P4-A replaced normal RAG placeholder behavior with deterministic KB-backed replies, and P4-B wired DB-backed `knowledge_documents` retrieval into GatewayService via RagService.
 
 Implemented:
 
@@ -66,8 +66,12 @@ Implemented:
 - `LANGGRAPH_CHECKPOINT_MODE=off|memory` controls the gateway checkpointer provider
 - read-only graph debug helpers can fetch latest state and state history by `conversation_id`
 - `knowledge_documents` stores minimal tenant KB documents for deterministic keyword retrieval
+- `gateway_consumer` creates `KnowledgeDocumentRepository(pool)` and `RagService(...)`
+- `GatewayService` prefetches `rag_context` before `graph.invoke(...)`
+- `rag_node` reads `rag_context` synchronously and never opens DB connections
 - normal FAQ/RAG path produces only customer-facing `livechat.send_text`
 - normal FAQ/RAG path no longer emits `rag.placeholder` external commands
+- `python -m app.workers.seed_knowledge --tenant-id default --kb-scope default` seeds default static FAQ documents idempotently
 
 Ingress staging remains:
 

@@ -221,6 +221,10 @@ async def ensure_knowledge_documents_compat(cur) -> None:
         cur,
         "knowledge_documents",
         {
+            "uk_knowledge_documents_tenant_scope_title": (
+                "CREATE UNIQUE INDEX uk_knowledge_documents_tenant_scope_title "
+                "ON knowledge_documents (tenant_id, kb_scope, title)"
+            ),
             "idx_knowledge_documents_tenant_enabled_priority": (
                 "CREATE INDEX idx_knowledge_documents_tenant_enabled_priority "
                 "ON knowledge_documents (tenant_id, enabled, priority, id)"

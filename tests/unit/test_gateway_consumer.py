@@ -46,10 +46,19 @@ def test_process_next_batch_continues_after_single_event_failure(monkeypatch):
             self.pool = pool
             self.inbound_repository = inbound_repository
 
+    class FakeKnowledgeRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+    class FakeRagService:
+        def __init__(self, knowledge_repository=None) -> None:
+            self.knowledge_repository = knowledge_repository
+
     class FakeService:
-        def __init__(self, transactional_repository=None, checkpointer=None) -> None:
+        def __init__(self, transactional_repository=None, checkpointer=None, rag_service=None) -> None:
             self.transactional_repository = transactional_repository
             self.checkpointer = checkpointer
+            self.rag_service = rag_service
 
         async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
             calls.append((inbound_event_id, event.event_id))
@@ -62,6 +71,8 @@ def test_process_next_batch_continues_after_single_event_failure(monkeypatch):
 
     monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
     monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
+    monkeypatch.setattr(gateway_consumer, "KnowledgeDocumentRepository", FakeKnowledgeRepository)
+    monkeypatch.setattr(gateway_consumer, "RagService", FakeRagService)
     monkeypatch.setattr(gateway_consumer, "GatewayService", FakeService)
     monkeypatch.setattr(gateway_consumer, "build_checkpointer", lambda mode: None)
 
@@ -98,9 +109,18 @@ def test_process_next_batch_passes_off_checkpointer_to_gateway_service(monkeypat
         def __init__(self, pool, inbound_repository=None) -> None:
             self.pool = pool
 
+    class FakeKnowledgeRepository:
+        def __init__(self, pool) -> None:
+            calls["knowledge_pool"] = pool
+
+    class FakeRagService:
+        def __init__(self, knowledge_repository=None) -> None:
+            calls["knowledge_repository"] = knowledge_repository
+
     class FakeService:
-        def __init__(self, transactional_repository=None, checkpointer=None) -> None:
+        def __init__(self, transactional_repository=None, checkpointer=None, rag_service=None) -> None:
             calls["checkpointer"] = checkpointer
+            calls["rag_service"] = rag_service
 
     def fake_build_checkpointer(mode: str):
         calls["mode"] = mode
@@ -108,12 +128,18 @@ def test_process_next_batch_passes_off_checkpointer_to_gateway_service(monkeypat
 
     monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
     monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
+    monkeypatch.setattr(gateway_consumer, "KnowledgeDocumentRepository", FakeKnowledgeRepository)
+    monkeypatch.setattr(gateway_consumer, "RagService", FakeRagService)
     monkeypatch.setattr(gateway_consumer, "GatewayService", FakeService)
     monkeypatch.setattr(gateway_consumer, "build_checkpointer", fake_build_checkpointer)
 
     result = asyncio.run(gateway_consumer.process_next_batch(pool=object(), limit=20, checkpoint_mode="off"))
 
-    assert calls == {"mode": "off", "checkpointer": None}
+    assert calls["mode"] == "off"
+    assert calls["checkpointer"] is None
+    assert calls["knowledge_pool"] is not None
+    assert isinstance(calls["rag_service"], FakeRagService)
+    assert isinstance(calls["knowledge_repository"], FakeKnowledgeRepository)
     assert result["processed"] == 0
 
 
@@ -134,8 +160,16 @@ def test_process_next_batch_builds_memory_checkpointer(monkeypatch):
         def __init__(self, pool, inbound_repository=None) -> None:
             self.pool = pool
 
+    class FakeKnowledgeRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+    class FakeRagService:
+        def __init__(self, knowledge_repository=None) -> None:
+            self.knowledge_repository = knowledge_repository
+
     class FakeService:
-        def __init__(self, transactional_repository=None, checkpointer=None) -> None:
+        def __init__(self, transactional_repository=None, checkpointer=None, rag_service=None) -> None:
             calls["checkpointer"] = checkpointer
 
     def fake_build_checkpointer(mode: str):
@@ -144,6 +178,8 @@ def test_process_next_batch_builds_memory_checkpointer(monkeypatch):
 
     monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
     monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
+    monkeypatch.setattr(gateway_consumer, "KnowledgeDocumentRepository", FakeKnowledgeRepository)
+    monkeypatch.setattr(gateway_consumer, "RagService", FakeRagService)
     monkeypatch.setattr(gateway_consumer, "GatewayService", FakeService)
     monkeypatch.setattr(gateway_consumer, "build_checkpointer", fake_build_checkpointer)
 

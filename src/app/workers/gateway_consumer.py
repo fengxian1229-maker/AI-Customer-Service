@@ -4,17 +4,24 @@ import json
 
 from app.core.settings import Settings
 from app.db.mysql import create_pool
-from app.db.repositories import GatewayTransactionRepository, InboundEventRepository
+from app.db.repositories import GatewayTransactionRepository, InboundEventRepository, KnowledgeDocumentRepository
 from app.graph.checkpointing import build_checkpointer
 from app.schemas.events import InboundEvent
 from app.services.gateway import GatewayService
+from app.services.rag import RagService
 
 
 async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off") -> dict:
     inbound_repository = InboundEventRepository(pool)
     transactional_repository = GatewayTransactionRepository(pool, inbound_repository=inbound_repository)
+    knowledge_repository = KnowledgeDocumentRepository(pool)
+    rag_service = RagService(knowledge_repository=knowledge_repository)
     checkpointer = build_checkpointer(checkpoint_mode)
-    service = GatewayService(transactional_repository=transactional_repository, checkpointer=checkpointer)
+    service = GatewayService(
+        transactional_repository=transactional_repository,
+        checkpointer=checkpointer,
+        rag_service=rag_service,
+    )
 
     results = []
     failures = []
