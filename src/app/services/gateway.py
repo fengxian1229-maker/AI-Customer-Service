@@ -154,6 +154,7 @@ class GatewayService:
         )
         try:
             if self.rag_service:
+                # TODO: Move retrieval behind a FAQ-only lazy path so SOP traffic does not prefetch RAG context.
                 graph_state["rag_context"] = await self.rag_service.retrieve(graph_state)
             result = self.workflow_graph.invoke(
                 graph_state,

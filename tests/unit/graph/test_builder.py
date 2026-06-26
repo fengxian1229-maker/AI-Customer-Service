@@ -35,6 +35,41 @@ def test_workflow_graph_passes_checkpointer_to_compile(monkeypatch):
     assert calls["compile_kwargs"] == {"checkpointer": checkpointer}
 
 
+def test_workflow_graph_omits_legacy_signal_and_continue_nodes(monkeypatch):
+    from app.graph import builder
+
+    calls: dict[str, list] = {"nodes": [], "edges": []}
+
+    class FakeStateGraph:
+        def __init__(self, state_type):
+            return None
+
+        def add_node(self, name, fn):
+            calls["nodes"].append(name)
+            return None
+
+        def set_entry_point(self, *args):
+            return None
+
+        def add_edge(self, left, right):
+            calls["edges"].append((left, right))
+            return None
+
+        def add_conditional_edges(self, *args):
+            return None
+
+        def compile(self, **kwargs):
+            return {"compiled": True}
+
+    monkeypatch.setattr(builder, "StateGraph", FakeStateGraph)
+
+    build_workflow_graph()
+
+    assert "signal_judgement_node" not in calls["nodes"]
+    assert "continue_workflow_node" not in calls["nodes"]
+    assert ("rewrite_question_node", "intent_router_node") in calls["edges"]
+
+
 def test_workflow_graph_invokes_minimal_sop_path():
     graph = build_workflow_graph()
 

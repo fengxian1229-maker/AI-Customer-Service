@@ -1,7 +1,7 @@
 from typing import Any
 
 from app.workflows.command_contracts import CommandType
-from app.workflows.slot_extractors import attachment_urls, extract_identity, extract_transaction_signal
+from app.workflows.slot_extractors import attachment_urls, extract_identity, extract_order_id, extract_transaction_signal, is_explicit_human_request
 
 
 def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
@@ -11,6 +11,7 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")
     identity = extract_identity(text)
     transaction = extract_transaction_signal(text)
+    order_id = extract_order_id(text)
 
     if urls:
         forwarded = list(slot_memory.get("forwarded_attachment_urls", []))
@@ -33,7 +34,7 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
                 ],
             }
 
-    if transaction or identity:
+    if transaction or identity or order_id:
         return {
             **state,
             "slot_memory": slot_memory,
@@ -45,14 +46,14 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
                         "active_workflow": state.get("active_workflow"),
                         "signal_result": {
                             "has_contact_hint": bool(identity),
-                            "has_transaction_signal": bool(transaction),
+                            "has_transaction_signal": bool(transaction or order_id),
                         },
                     },
                 }
             ],
         }
 
-    if signal.get("has_explicit_human_request"):
+    if signal.get("has_explicit_human_request") or is_explicit_human_request(text):
         return {
             **state,
             "slot_memory": slot_memory,

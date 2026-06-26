@@ -46,11 +46,10 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
 
     has_identity = bool(slot_memory.get("account_or_phone"))
     has_screenshot = bool(slot_memory.get(screenshot_key))
-    has_structured_case = bool(slot_memory.get(order_key) and slot_memory.get("amount") and slot_memory.get("channel"))
     commands: list[dict[str, Any]] = []
 
     if intent == "deposit_missing":
-        if has_structured_case or (has_identity and has_screenshot):
+        if has_identity and has_screenshot:
             response = "已收到你的存款案件资料，我们会继续确认，有更新会在这里通知你。"
             commands.append(_case_card_command(intent, slot_memory))
         elif not has_identity and not has_screenshot:
@@ -60,7 +59,7 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
         elif has_identity and not has_screenshot:
             response = "收到，请上传付款成功截图。"
     else:
-        if has_structured_case or (has_identity and has_screenshot):
+        if has_identity and has_screenshot:
             response = "已收到你的提款案件资料，我们会继续确认，有更新会在这里通知你。"
             commands.append(_case_card_command(intent, slot_memory))
         elif not has_identity and not has_screenshot:

@@ -45,3 +45,17 @@ def test_waiting_backend_followup_only_reassures():
 
     assert state["response_text"] == "案件仍在确认中，有更新会在这里通知你。"
     assert state["commands"] == []
+
+
+def test_waiting_backend_text_supplement_generates_append_command():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {},
+            "attachments": [],
+            "raw_user_input": "补一下截图，交易号 TX123456",
+        }
+    )
+
+    assert state["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE

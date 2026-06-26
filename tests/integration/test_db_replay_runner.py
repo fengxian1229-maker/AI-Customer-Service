@@ -50,17 +50,16 @@ async def _test_db_replay_runner_mysql_mock_closed_loop():
                 "run_mock_result": False,
             },
             {
-                "name": "deposit_missing_complete",
+                "name": "deposit_missing_structured_but_missing_identity_and_screenshot",
                 "text": "我的存款订单 D123456 没到账，金额 1000，渠道 GCASH",
-                "expected_workflow_stage": "waiting_backend",
-                "expected_external_command_types": ["telegram.send_case_card"],
-                "expected_command_slots": {
+                "expected_workflow_stage": "collecting_slots",
+                "expected_external_command_types": [],
+                "expected_slot_memory": {
                     "deposit_order_id": "D123456",
                     "amount": "1000",
                     "channel": "GCASH",
                 },
-                "run_mock_result": True,
-                "expected_result_stage": "case_created",
+                "run_mock_result": False,
             },
             {
                 "name": "withdrawal_missing_incomplete",
@@ -70,17 +69,16 @@ async def _test_db_replay_runner_mysql_mock_closed_loop():
                 "run_mock_result": False,
             },
             {
-                "name": "withdrawal_missing_complete",
+                "name": "withdrawal_missing_structured_but_missing_identity_and_screenshot",
                 "text": "我的提款订单 W987654 没到账，金额 500，渠道 银行卡",
-                "expected_workflow_stage": "waiting_backend",
-                "expected_external_command_types": ["telegram.send_case_card"],
-                "expected_command_slots": {
+                "expected_workflow_stage": "collecting_slots",
+                "expected_external_command_types": [],
+                "expected_slot_memory": {
                     "withdrawal_order_id": "W987654",
                     "amount": "500",
                     "channel": "银行卡",
                 },
-                "run_mock_result": True,
-                "expected_result_stage": "case_created",
+                "run_mock_result": False,
             },
             {
                 "name": "rag_direct_reply",
@@ -138,6 +136,10 @@ async def run_db_replay_case(pool, test_id: str, case: dict) -> None:
         payload = command_rows[0]["payload_json"]
         slot_memory = payload["slot_memory"]
         for key, expected in case["expected_command_slots"].items():
+            assert slot_memory[key] == expected
+    if case.get("expected_slot_memory"):
+        slot_memory = first_result["graph_state"]["slot_memory"]
+        for key, expected in case["expected_slot_memory"].items():
             assert slot_memory[key] == expected
 
     duplicate_insert = await inbound_repository.insert(event)

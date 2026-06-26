@@ -5,12 +5,14 @@ from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
 from app.services.rag import answer_from_rag_context, answer_from_static_knowledge
 from app.workflows.slot_extractors import (
+    attachment_urls,
+    extract_amount,
+    extract_identity,
     is_explicit_human_request,
     normalize_text,
 )
 from app.workflows.sop_handlers import run_sop
 from app.workflows.waiting_backend_classifier import handle_waiting_backend
-from app.workflows.slot_extractors import extract_amount, extract_identity
 
 
 def build_graph_state_from_event(
@@ -34,7 +36,6 @@ def build_graph_state_from_event(
         "active_workflow": conversation.get("active_workflow"),
         "workflow_stage": conversation.get("workflow_stage"),
         "slot_memory": dict(conversation.get("slot_memory") or {}),
-        "signal_result": None,
         "intent_result": None,
         "route": None,
         "rag_context": None,
@@ -66,52 +67,12 @@ def rewrite_question_node(state: GraphState) -> GraphState:
     }
 
 
-def signal_judgement_node(state: GraphState) -> GraphState:
-    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
-    has_attachment = bool(state.get("attachments"))
-    lower = text.lower()
-    has_deposit = any(token in lower for token in ("deposit", "depósito", "deposito", "recarga", "充值", "存款"))
-    has_withdrawal = any(token in lower for token in ("withdrawal", "retiro", "retirar", "提款", "提现"))
-    has_missing = any(
-        token in lower
-        for token in ("no llegó", "no llego", "no recibido", "no acreditado", "未到账", "没到账", "nunca me pagaron")
-    )
-    has_blocked = any(token in lower for token in ("no puedo retirar", "无法提款", "流水", "rollover", "限制"))
-    has_contact_hint = extract_identity(text) is not None
-    emotional = any(token in lower for token in ("basura", "mierda", "estafa", "scam", "骗子", "垃圾"))
-    frustration = any(
-        token in lower for token in ("todo el tiempo lo mismo", "siempre lo mismo", "otra vez lo mismo", "same thing")
-    )
-
-    signal = {
-        "has_attachment": has_attachment,
-        "attachment_count": len(state.get("attachments", [])),
-        "has_contact_hint": has_contact_hint,
-        "has_explicit_human_request": is_explicit_human_request(text),
-        "has_deposit_signal": has_deposit,
-        "has_withdrawal_signal": has_withdrawal,
-        "has_withdrawal_missing_signal": has_withdrawal and has_missing,
-        "has_withdrawal_blocked_signal": has_withdrawal and has_blocked,
-        "has_deposit_missing_signal": has_deposit and has_missing,
-        "has_password_signal": any(token in lower for token in ("contraseña", "password", "忘记密码")),
-        "has_pending_reply_signal": any(token in lower for token in ("caso anterior", "previous case", "上一笔案件")),
-        "has_menu_signal": any(token in lower for token in ("menu", "menú")),
-        "has_screenshot_signal": any(token in lower for token in ("screenshot", "captura", "截图")),
-        "has_rollover_signal": any(token in lower for token in ("rollover", "流水")),
-        "has_emotional_signal": emotional or frustration,
-        "has_service_frustration_signal": frustration,
-        "risk_level": "high" if emotional else "elevated" if frustration else "normal",
-        "confidence": 0.85 if any([has_contact_hint, has_attachment, has_deposit, has_withdrawal]) else 0.3,
-    }
-    return {**state, "signal_result": signal}
-
-
 def intent_router_node(state: GraphState) -> GraphState:
-    signal = state.get("signal_result") or {}
     active = state.get("active_workflow")
     stage = state.get("workflow_stage")
     text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
     lower = text.lower()
+    hints = extract_route_hints(state)
 
     if active and stage in {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}:
         return {
@@ -126,7 +87,7 @@ def intent_router_node(state: GraphState) -> GraphState:
             "route": "sop",
         }
 
-    if signal.get("has_explicit_human_request"):
+    if hints["has_explicit_human_request"]:
         return _with_route(state, "explicit_human_request", "human_handoff", "Customer explicitly requested a human agent.")
     if _is_service_frustration(lower):
         return _with_route(
@@ -193,23 +154,17 @@ def intent_router_node(state: GraphState) -> GraphState:
         return _with_route(state, "withdrawal_howto", "faq", "Withdrawal how-to is a FAQ/manual question.", faq_query=text)
     if _is_forgot_password_howto(lower):
         return _with_route(state, "forgot_password_howto", "faq", "Forgot-password instructions are FAQ/manual content.", faq_query=text)
-    if _is_screenshot_upload_howto(lower, signal):
+    if _is_screenshot_upload_howto(lower, hints):
         return _with_route(state, "screenshot_upload_howto", "faq", "Screenshot upload instructions are FAQ/manual content.", faq_query=text)
     if _is_rollover_explanation(lower):
         return _with_route(state, "rollover_explanation", "faq", "Rollover explanation is FAQ/manual content.", faq_query=text)
-    if _is_menu_help(lower, signal):
+    if _is_menu_help(lower, hints):
         return _with_route(state, "menu_help", "faq", "Menu/navigation help is FAQ/manual content.", faq_query=text)
     if state.get("event_type") == "FILE_RECEIVED":
         return _with_route(state, "clarification_needed", "clarification", "File upload without a clear issue needs clarification.")
     if text:
         return _with_route(state, "faq_general", "faq", "General explanatory question routed to FAQ/RAG.", faq_query=text, confidence=0.55)
     return _with_route(state, "clarification_needed", "clarification", "No clear question content provided.", confidence=0.2)
-
-
-def continue_workflow_node(state: GraphState) -> GraphState:
-    if state.get("workflow_stage") in {"waiting_backend", "backend_querying"}:
-        return handle_waiting_backend(state)
-    return run_sop(state)
 
 
 def sop_node(state: GraphState) -> GraphState:
@@ -328,6 +283,18 @@ def _has_waiting_supplement(signal: dict[str, Any], state: GraphState) -> bool:
     return bool(state.get("attachments") or signal.get("has_contact_hint"))
 
 
+def extract_route_hints(state: GraphState) -> dict[str, Any]:
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
+    lower = text.lower()
+    return {
+        "has_explicit_human_request": is_explicit_human_request(text),
+        "has_menu_signal": any(token in lower for token in ("menu", "menú")),
+        "has_screenshot_signal": any(token in lower for token in ("screenshot", "captura", "截图")),
+        "has_attachment": bool(attachment_urls(state.get("attachments", []))),
+        "has_contact_hint": extract_identity(text) is not None,
+    }
+
+
 def _extract_text(payload: dict[str, Any]) -> str:
     event = payload.get("event") or {}
     return normalize_text(event.get("text") or payload.get("text") or payload.get("message"))
@@ -386,16 +353,16 @@ def _is_forgot_password_howto(text: str) -> bool:
     return _contains_any(text, ("forgot password", "olvidé mi contraseña", "olvide mi contraseña", "忘记密码"))
 
 
-def _is_screenshot_upload_howto(text: str, signal: dict[str, Any]) -> bool:
-    return signal.get("has_screenshot_signal") and _contains_any(text, ("subir", "upload", "enviar", "上传"))
+def _is_screenshot_upload_howto(text: str, hints: dict[str, Any]) -> bool:
+    return hints.get("has_screenshot_signal") and _contains_any(text, ("subir", "upload", "enviar", "上传"))
 
 
 def _is_rollover_explanation(text: str) -> bool:
     return _contains_any(text, ("qué es rollover", "que es rollover", "what is rollover", "流水是什么", "rollover explanation"))
 
 
-def _is_menu_help(text: str, signal: dict[str, Any]) -> bool:
-    return signal.get("has_menu_signal") and _contains_any(text, ("no veo", "dónde", "donde", "where", "找不到"))
+def _is_menu_help(text: str, hints: dict[str, Any]) -> bool:
+    return hints.get("has_menu_signal") and _contains_any(text, ("no veo", "ningun", "ningún", "dónde", "donde", "where", "找不到"))
 
 
 def _is_service_frustration(text: str) -> bool:
