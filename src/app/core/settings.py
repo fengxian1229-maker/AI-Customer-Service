@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     llm_intent_shadow_enabled: bool = False
     llm_intent_fallback_enabled: bool = False
     llm_intent_min_confidence: float = 0.75
+    gemini_model: str = "gemini-3.1-flash-lite"
+    gemini_project: str = "project-gemini-0306"
+    gemini_location: str = "global"
+    gemini_temperature: float = 1.0
+    gemini_max_tokens: int | None = None
+    gemini_timeout_seconds: float | None = None
+    gemini_max_retries: int = 2
+    gemini_vertexai: bool = True
 
     @property
     def livechat_self_author_id_set(self) -> set[str]:

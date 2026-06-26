@@ -301,3 +301,95 @@ def test_process_next_batch_mysql_provider_failure_does_not_fetch_inbound(monkey
 
     with pytest.raises(RuntimeError, match="mysql init failed"):
         asyncio.run(gateway_consumer.process_next_batch(pool=object(), limit=20, checkpoint_mode="mysql", settings=object()))
+
+
+def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monkeypatch):
+    from app.workers import gateway_consumer
+
+    calls = {}
+    fake_provider = object()
+
+    class FakeInboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def fetch_unprocessed(self, limit: int = 20) -> list[dict]:
+            return []
+
+    class FakeTransactionalRepository:
+        def __init__(self, pool, inbound_repository=None) -> None:
+            self.pool = pool
+
+    class FakeKnowledgeRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+    class FakeCheckpointRunRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+    class FakeRagService:
+        def __init__(self, knowledge_repository=None) -> None:
+            self.knowledge_repository = knowledge_repository
+
+    class FakeService:
+        def __init__(self, **kwargs) -> None:
+            calls["service_kwargs"] = kwargs
+
+    class FakeManagedCheckpointer:
+        def __init__(self) -> None:
+            self.checkpointer = None
+
+        def close(self) -> None:
+            return None
+
+    class FakeSettings:
+        llm_provider = "gemini"
+        gemini_model = "gemini-3.1-flash-lite"
+        gemini_project = "project-gemini-0306"
+        gemini_location = "global"
+        gemini_vertexai = True
+        llm_rewrite_shadow_enabled = True
+        llm_rewrite_fallback_enabled = False
+        llm_intent_shadow_enabled = True
+        llm_intent_fallback_enabled = False
+        llm_intent_min_confidence = 0.75
+
+    monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
+    monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
+    monkeypatch.setattr(gateway_consumer, "KnowledgeDocumentRepository", FakeKnowledgeRepository)
+    monkeypatch.setattr(gateway_consumer, "GraphCheckpointRunRepository", FakeCheckpointRunRepository)
+    monkeypatch.setattr(gateway_consumer, "RagService", FakeRagService)
+    monkeypatch.setattr(gateway_consumer, "GatewayService", FakeService)
+    monkeypatch.setattr(gateway_consumer, "build_checkpointer", lambda mode, settings=None: FakeManagedCheckpointer())
+
+    def fake_build_llm_provider(mode: str, settings=None):
+        calls["provider_mode"] = mode
+        calls["provider_settings"] = settings
+        return fake_provider
+
+    monkeypatch.setattr(gateway_consumer, "build_llm_provider", fake_build_llm_provider)
+
+    result = asyncio.run(
+        gateway_consumer.process_next_batch(
+            pool=object(),
+            limit=20,
+            checkpoint_mode="off",
+            settings=FakeSettings(),
+        )
+    )
+
+    assert calls["provider_mode"] == "gemini"
+    assert calls["provider_settings"].gemini_project == "project-gemini-0306"
+    assert calls["service_kwargs"]["llm_rewrite_service"] is fake_provider
+    assert calls["service_kwargs"]["llm_intent_service"] is fake_provider
+    assert result["llm"] == {
+        "provider": "gemini",
+        "model": "gemini-3.1-flash-lite",
+        "vertexai": True,
+        "project": "project-gemini-0306",
+        "location": "global",
+        "rewrite_shadow_enabled": True,
+        "intent_shadow_enabled": True,
+        "shadow_active": True,
+    }

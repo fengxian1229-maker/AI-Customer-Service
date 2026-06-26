@@ -58,6 +58,12 @@ P5-D：FAQ-only lazy RAG retrieve
 P6-A：model provider boundary + mock llm rewrite shadow + mock llm intent shadow
 ```
 
+当前 P6-B 已完成：
+
+```text
+P6-B：Gemini Vertex AI real llm provider shadow integration
+```
+
 说明：
 
 ```text
@@ -130,12 +136,28 @@ P6-A 新增 mock LLM 边界：
 6. 第三方 API 仍必须通过 external_commands / worker / schema validation 执行，不能由 LLM 直接调用
 ```
 
+P6-B 新增 Gemini Vertex AI shadow 边界：
+
+```text
+1. provider 扩展为 off / mock / gemini，默认 llm_provider=off
+2. Gemini 通过 langchain-google-genai 的 ChatGoogleGenerativeAI 接入，且必须 vertexai=True
+3. 模型统一使用 gemini-3.1-flash-lite
+4. project 默认 project-gemini-0306
+5. location 默认 global
+6. Gemini 只用于 rewrite shadow / intent shadow
+7. Gemini 只写 llm_rewrite_result / llm_intent_result，不覆盖 deterministic rewritten_question / rewrite_result / intent_result / route
+8. Gemini 不生成最终客服回复
+9. Gemini 不调用第三方 API
+10. 当前 full graph invoke 仍会重跑 rewrite/router，因此真实 Gemini 仍不能放入 graph node
+```
+
 当前 RAG 仍明确不做：
 
 ```text
 vector DB
 embedding
 LLM answer generation
+LLM tool calling
 知识库 Web 管理后台
 ```
 

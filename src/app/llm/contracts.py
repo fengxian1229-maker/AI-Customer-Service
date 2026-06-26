@@ -1,5 +1,7 @@
 from typing import Any, TypedDict
 
+from pydantic import BaseModel, ConfigDict, Field
+
 
 class LLMRewriteShadowInput(TypedDict, total=False):
     tenant_id: str
@@ -51,3 +53,28 @@ class LLMIntentShadowOutput(TypedDict, total=False):
     risk_level: str | None
     provider: str
     mode: str
+
+
+class LLMRewriteShadowSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rewritten_question: str
+    normalized_query: str
+    language: str = "unknown"
+    preserved_entities: list[str] = Field(default_factory=list)
+    missing_or_ambiguous: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    reason: str
+
+
+class LLMIntentShadowSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent: str
+    route: str
+    confidence: float = 0.0
+    reason: str
+    sop_name: str | None = None
+    faq_query: str | None = None
+    risk_level: str | None = None

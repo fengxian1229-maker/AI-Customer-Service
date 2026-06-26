@@ -172,13 +172,13 @@ class GatewayService:
             routed_state = prepare_route_state(graph_state)
             active_state = routed_state
             if self.llm_rewrite_shadow_enabled and self.llm_rewrite_service:
-                routed_state["llm_rewrite_result"] = await self.llm_rewrite_service.rewrite(
+                routed_state["llm_rewrite_result"] = self._sanitize_value(await self.llm_rewrite_service.rewrite(
                     self._build_llm_rewrite_shadow_input(routed_state)
-                )
+                ))
             if self.llm_intent_shadow_enabled and self.llm_intent_service:
-                routed_state["llm_intent_result"] = await self.llm_intent_service.classify_intent(
+                routed_state["llm_intent_result"] = self._sanitize_value(await self.llm_intent_service.classify_intent(
                     self._build_llm_intent_shadow_input(routed_state)
-                )
+                ))
             if self.rag_service and routed_state.get("route") == "faq":
                 # Conservative lazy-retrieve transition: pre-route with pure deterministic nodes,
                 # then only prefetch DB-backed RAG for FAQ traffic before invoking the full graph.

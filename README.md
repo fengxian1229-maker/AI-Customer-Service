@@ -45,14 +45,13 @@ Checkpoint modes:
 
 P3-B adds a checkpoint provider boundary and read-only graph debug helpers. P5-A adds durable checkpoint design, a checkpoint metadata schema, and a provider boundary that explicitly recognizes `off`, `memory`, and planned `mysql` modes. P5-A.1 wires checkpoint run metadata through `gateway_consumer -> GatewayService` using `GraphCheckpointRunRepository`. P5-B adds `langgraph-checkpoint-mysql[pymysql]`, a real `PyMySQLSaver` provider path for `LANGGRAPH_CHECKPOINT_MODE=mysql`, and an explicit setup worker for saver-managed internal tables.
 
-P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts. P5-C adds a read-only checkpoint admin CLI for `graph_checkpoint_runs` and `graph_run_errors`; it is for debugging only and does not modify LangGraph saver tables. P5-D now tightens RAG retrieval so only FAQ traffic prefetches DB-backed `rag_context` before the full graph invoke. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow, both default-off and non-authoritative.
+P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts. P5-C adds a read-only checkpoint admin CLI for `graph_checkpoint_runs` and `graph_run_errors`; it is for debugging only and does not modify LangGraph saver tables. P5-D now tightens RAG retrieval so only FAQ traffic prefetches DB-backed `rag_context` before the full graph invoke. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow, both default-off and non-authoritative. P6-B adds a real Gemini Vertex AI shadow provider through `langchain-google-genai` `ChatGoogleGenerativeAI`.
 
 Current RAG limits:
 
 - No vector database.
 - No embeddings.
 - No LLM answer generation.
-- No real LLM provider integration.
 - No LLM tool calling.
 - No knowledge-base web admin UI.
 - No real backend or Telegram calls.
@@ -61,12 +60,22 @@ Current RAG limits:
 - Backend-fact questions may still enter RagService guardrail handling, but they do not query `knowledge_documents` and still return a safe fallback.
 - Normal RAG path never emits `RAG_PLACEHOLDER` and never writes `external_commands`.
 
-Current mock LLM boundary:
+Current LLM boundary:
 
-- `llm_provider` supports only `off` and `mock`.
+- `llm_provider` supports `off`, `mock`, and `gemini`.
 - Default runtime is `llm_provider=off`.
+- Gemini uses Vertex AI through `ChatGoogleGenerativeAI` with:
+  - `model=gemini-3.1-flash-lite`
+  - `project=project-gemini-0306`
+  - `location=global`
+  - `vertexai=True`
 - Mock rewrite shadow records `llm_rewrite_result` but never overrides deterministic `rewritten_question`.
 - Mock intent shadow records `llm_intent_result` but never overrides deterministic `intent_result` or `route`.
+- Gemini rewrite shadow records only `llm_rewrite_result` and never overrides deterministic `rewritten_question` or `rewrite_result`.
+- Gemini intent shadow records only `llm_intent_result` and never overrides deterministic `intent_result` or `route`.
+- Gemini is not used for final customer reply generation.
+- Gemini does not call third-party APIs or generate `external_commands`.
+- The full graph still re-runs rewrite/router on invoke, so the real Gemini call is kept outside graph nodes.
 - Third-party actions still must go through deterministic `external_commands` plus workers; the LLM boundary does not call external APIs directly.
 
 Seed default knowledge documents:
@@ -115,6 +124,21 @@ Fill `.env` with LiveChat and MySQL credentials. For the current test scope, kee
 
 ```env
 LIVECHAT_ALLOWED_GROUP_IDS=23
+```
+
+To enable Gemini Vertex AI shadow mode:
+
+```env
+LLM_PROVIDER=gemini
+LLM_REWRITE_SHADOW_ENABLED=true
+LLM_INTENT_SHADOW_ENABLED=true
+GEMINI_MODEL=gemini-3.1-flash-lite
+GEMINI_PROJECT=project-gemini-0306
+GEMINI_LOCATION=global
+GEMINI_TEMPERATURE=1.0
+GEMINI_MAX_RETRIES=2
+GEMINI_VERTEXAI=true
+# GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
 Run Tests
@@ -265,4 +289,4 @@ Notes
 - `LANGGRAPH_CHECKPOINT_MODE=mysql` requires `langgraph-checkpoint-mysql[pymysql]`, successful saver setup, and a MySQL server version supported by the upstream saver.
 - `mysql_checkpoint_dsn` uses `mysql://user:password@host:port/database?charset=utf8mb4` with the password URL-encoded.
 - This project uses `PyMySQLSaver` for sync `graph.invoke(...)`; it does not switch GatewayService to async graph invocation in P5-B.
-- Interrupt/resume, WebSocket/Webhook, vector/embedding/LLM, and real Telegram/backend integration remain out of scope.
+- Interrupt/resume, WebSocket/Webhook, vector DB, embedding, LLM final answer generation, LLM tool calling, and real Telegram/backend integration remain out of scope.

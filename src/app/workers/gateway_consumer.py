@@ -23,7 +23,7 @@ async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off"
     knowledge_repository = KnowledgeDocumentRepository(pool)
     checkpoint_run_repository = GraphCheckpointRunRepository(pool)
     rag_service = RagService(knowledge_repository=knowledge_repository)
-    llm_provider = build_llm_provider(getattr(settings, "llm_provider", "off")) if settings else None
+    llm_provider = build_llm_provider(getattr(settings, "llm_provider", "off"), settings=settings) if settings else None
     managed_checkpointer = build_checkpointer(checkpoint_mode, settings=settings)
     try:
         service_kwargs = {
@@ -80,9 +80,40 @@ async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off"
             "processed": len(results),
             "failed": len(failures),
             "enqueued": sum(1 for result in results if result.get("outbound_message")),
+            "llm": _build_llm_summary(settings),
         }
     finally:
         managed_checkpointer.close()
+
+
+def _build_llm_summary(settings) -> dict:
+    if not settings:
+        return {
+            "provider": "off",
+            "rewrite_shadow_enabled": False,
+            "intent_shadow_enabled": False,
+            "shadow_active": False,
+        }
+    provider = (getattr(settings, "llm_provider", "off") or "off").lower()
+    summary = {
+        "provider": provider,
+        "rewrite_shadow_enabled": bool(getattr(settings, "llm_rewrite_shadow_enabled", False)),
+        "intent_shadow_enabled": bool(getattr(settings, "llm_intent_shadow_enabled", False)),
+    }
+    summary["shadow_active"] = bool(
+        provider != "off"
+        and (summary["rewrite_shadow_enabled"] or summary["intent_shadow_enabled"])
+    )
+    if provider == "gemini":
+        summary.update(
+            {
+                "model": getattr(settings, "gemini_model", None),
+                "vertexai": bool(getattr(settings, "gemini_vertexai", False)),
+                "project": getattr(settings, "gemini_project", None),
+                "location": getattr(settings, "gemini_location", None),
+            }
+        )
+    return summary
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -112,6 +143,7 @@ async def run_once(limit: int) -> dict:
             "failed": results["failed"],
             "enqueued": results["enqueued"],
             "failures": results["failures"],
+            "llm": results.get("llm", _build_llm_summary(settings)),
         }
     finally:
         pool.close()
