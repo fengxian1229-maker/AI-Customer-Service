@@ -4,6 +4,7 @@ from app.graph.nodes import (
     clarification_node,
     command_planner_node,
     continue_workflow_node,
+    emotion_care_node,
     human_handoff_node,
     intent_router_node,
     persist_state_node,
@@ -24,6 +25,7 @@ def build_workflow_graph(checkpointer=None):
     graph.add_node("continue_workflow_node", continue_workflow_node)
     graph.add_node("sop_node", sop_node)
     graph.add_node("rag_node", rag_node)
+    graph.add_node("emotion_care_node", emotion_care_node)
     graph.add_node("human_handoff_node", human_handoff_node)
     graph.add_node("clarification_node", clarification_node)
     graph.add_node("command_planner_node", command_planner_node)
@@ -36,14 +38,14 @@ def build_workflow_graph(checkpointer=None):
         "intent_router_node",
         route_condition,
         {
-            "continue_workflow": "continue_workflow_node",
             "sop": "sop_node",
             "rag": "rag_node",
+            "emotion_care": "emotion_care_node",
             "human_handoff": "human_handoff_node",
             "clarification": "clarification_node",
         },
     )
-    for node in ("continue_workflow_node", "sop_node", "rag_node", "human_handoff_node", "clarification_node"):
+    for node in ("continue_workflow_node", "sop_node", "rag_node", "emotion_care_node", "human_handoff_node", "clarification_node"):
         graph.add_edge(node, "command_planner_node")
     graph.add_edge("command_planner_node", "persist_state_node")
     graph.add_edge("persist_state_node", END)

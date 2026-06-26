@@ -5,14 +5,12 @@ from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
 from app.services.rag import answer_from_rag_context, answer_from_static_knowledge
 from app.workflows.slot_extractors import (
-    extract_amount,
-    extract_identity,
-    extract_transaction_signal,
     is_explicit_human_request,
     normalize_text,
 )
 from app.workflows.sop_handlers import run_sop
 from app.workflows.waiting_backend_classifier import handle_waiting_backend
+from app.workflows.slot_extractors import extract_amount, extract_identity
 
 
 def build_graph_state_from_event(
@@ -70,24 +68,25 @@ def rewrite_question_node(state: GraphState) -> GraphState:
 
 def signal_judgement_node(state: GraphState) -> GraphState:
     text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
-    identity = extract_identity(text)
-    transaction = extract_transaction_signal(text)
     has_attachment = bool(state.get("attachments"))
     lower = text.lower()
     has_deposit = any(token in lower for token in ("deposit", "depósito", "deposito", "recarga", "充值", "存款"))
     has_withdrawal = any(token in lower for token in ("withdrawal", "retiro", "retirar", "提款", "提现"))
-    has_missing = any(token in lower for token in ("no llegó", "no llego", "no recibido", "no acreditado", "未到账", "没到账"))
+    has_missing = any(
+        token in lower
+        for token in ("no llegó", "no llego", "no recibido", "no acreditado", "未到账", "没到账", "nunca me pagaron")
+    )
     has_blocked = any(token in lower for token in ("no puedo retirar", "无法提款", "流水", "rollover", "限制"))
+    has_contact_hint = extract_identity(text) is not None
+    emotional = any(token in lower for token in ("basura", "mierda", "estafa", "scam", "骗子", "垃圾"))
+    frustration = any(
+        token in lower for token in ("todo el tiempo lo mismo", "siempre lo mismo", "otra vez lo mismo", "same thing")
+    )
 
     signal = {
-        "has_identity": bool(identity),
-        "identity_type": identity["type"] if identity else None,
-        "identity_value": identity["value"] if identity else None,
         "has_attachment": has_attachment,
         "attachment_count": len(state.get("attachments", [])),
-        "has_transaction_signal": bool(transaction),
-        "transaction_signal_type": transaction["type"] if transaction else None,
-        "transaction_signal_value": transaction["value"] if transaction else None,
+        "has_contact_hint": has_contact_hint,
         "has_explicit_human_request": is_explicit_human_request(text),
         "has_deposit_signal": has_deposit,
         "has_withdrawal_signal": has_withdrawal,
@@ -96,8 +95,13 @@ def signal_judgement_node(state: GraphState) -> GraphState:
         "has_deposit_missing_signal": has_deposit and has_missing,
         "has_password_signal": any(token in lower for token in ("contraseña", "password", "忘记密码")),
         "has_pending_reply_signal": any(token in lower for token in ("caso anterior", "previous case", "上一笔案件")),
-        "risk_level": "normal",
-        "confidence": 0.85 if any([identity, transaction, has_attachment, has_deposit, has_withdrawal]) else 0.3,
+        "has_menu_signal": any(token in lower for token in ("menu", "menú")),
+        "has_screenshot_signal": any(token in lower for token in ("screenshot", "captura", "截图")),
+        "has_rollover_signal": any(token in lower for token in ("rollover", "流水")),
+        "has_emotional_signal": emotional or frustration,
+        "has_service_frustration_signal": frustration,
+        "risk_level": "high" if emotional else "elevated" if frustration else "normal",
+        "confidence": 0.85 if any([has_contact_hint, has_attachment, has_deposit, has_withdrawal]) else 0.3,
     }
     return {**state, "signal_result": signal}
 
@@ -106,44 +110,100 @@ def intent_router_node(state: GraphState) -> GraphState:
     signal = state.get("signal_result") or {}
     active = state.get("active_workflow")
     stage = state.get("workflow_stage")
-    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
+    lower = text.lower()
 
-    if active and stage in {"waiting_backend", "backend_querying"}:
-        intent = "waiting_backend_supplement" if _has_waiting_supplement(signal, state) else "waiting_backend_followup"
-        if signal.get("has_explicit_human_request") and not _has_waiting_supplement(signal, state):
-            intent = "human_handoff"
-        result = _intent_result(intent, reason="Continue active waiting backend workflow.", continue_workflow=True)
-        return {**state, "intent_result": result, "route": "continue_workflow" if intent != "human_handoff" else "human_handoff"}
-
-    if active and stage == "collecting_slots":
-        result = _intent_result(active, reason="Continue active slot collection workflow.", continue_workflow=True)
-        return {**state, "intent_result": result, "route": "sop"}
+    if active and stage in {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}:
+        return {
+            **state,
+            "intent_result": _intent_result(
+                intent=active,
+                route="sop",
+                reason="Continue active workflow through SOP handler.",
+                confidence=0.95,
+                sop_name=active,
+            ),
+            "route": "sop",
+        }
 
     if signal.get("has_explicit_human_request"):
-        intent = "human_handoff"
-    elif signal.get("has_withdrawal_blocked_signal"):
-        intent = "withdrawal_blocked_or_rollover"
-    elif signal.get("has_withdrawal_missing_signal"):
-        intent = "withdrawal_missing"
-    elif signal.get("has_deposit_missing_signal"):
-        intent = "deposit_missing"
-    elif signal.get("has_password_signal"):
-        intent = "forgot_password"
-    elif signal.get("has_pending_reply_signal"):
-        intent = "pending_reply_lookup"
-    elif any(token in text for token in ("cómo recargar", "como recargar", "如何充值", "how to deposit")):
-        intent = "deposit_howto"
-    elif any(token in text for token in ("cómo retirar", "como retirar", "如何提款", "how to withdraw")):
-        intent = "withdrawal_howto"
-    elif state.get("event_type") == "FILE_RECEIVED":
-        intent = "unknown"
-    elif text:
-        intent = "faq_general"
-    else:
-        intent = "unknown"
-
-    route = "human_handoff" if intent == "human_handoff" else "rag" if intent == "faq_general" else "sop" if intent not in {"unknown"} else "clarification"
-    return {**state, "intent_result": _intent_result(intent), "route": route}
+        return _with_route(state, "explicit_human_request", "human_handoff", "Customer explicitly requested a human agent.")
+    if _is_service_frustration(lower):
+        return _with_route(
+            state,
+            "service_frustration",
+            "human_handoff",
+            "Repeated service frustration should be handed to a human.",
+            risk_level="elevated",
+        )
+    if _is_unsupported_concrete_issue(lower):
+        return _with_route(
+            state,
+            "unsupported_concrete_issue",
+            "human_handoff",
+            "Technical/game-specific issues are out of FAQ/SOP scope.",
+        )
+    if _is_account_access_issue(lower):
+        return _with_route(
+            state,
+            "account_access_issue",
+            "human_handoff",
+            "Account access problems require manual support.",
+        )
+    if _is_account_profile_or_wallet_change(lower):
+        return _with_route(
+            state,
+            "account_profile_or_wallet_change",
+            "human_handoff",
+            "Profile or wallet changes require manual support.",
+        )
+    if _is_abusive_or_emotional(lower):
+        return _with_route(
+            state,
+            "abusive_or_emotional",
+            "emotion_care",
+            "High-emotion language should receive a calming response first.",
+            emotion="distressed",
+            risk_level="high",
+        )
+    if _is_pending_reply_lookup(lower):
+        return _with_route(state, "pending_reply_lookup", "sop", "Previous case lookup requires SOP handling.", sop_name="pending_reply_lookup")
+    if _is_deposit_missing(lower):
+        return _with_route(state, "deposit_missing", "sop", "Deposit-not-arrived issues require SOP handling.", sop_name="deposit_missing")
+    if _is_withdrawal_missing(lower):
+        return _with_route(
+            state,
+            "withdrawal_missing",
+            "sop",
+            "Withdrawal-not-arrived issues require SOP handling.",
+            sop_name="withdrawal_missing",
+        )
+    if _is_withdrawal_blocked_or_rollover(lower):
+        return _with_route(
+            state,
+            "withdrawal_blocked_or_rollover",
+            "faq_then_sop",
+            "Withdrawal restriction or rollover questions need explanation first, then SOP.",
+            sop_name="withdrawal_blocked_or_rollover",
+            faq_query=text,
+        )
+    if _is_deposit_howto(lower):
+        return _with_route(state, "deposit_howto", "faq", "Deposit how-to is a FAQ/manual question.", faq_query=text)
+    if _is_withdrawal_howto(lower):
+        return _with_route(state, "withdrawal_howto", "faq", "Withdrawal how-to is a FAQ/manual question.", faq_query=text)
+    if _is_forgot_password_howto(lower):
+        return _with_route(state, "forgot_password_howto", "faq", "Forgot-password instructions are FAQ/manual content.", faq_query=text)
+    if _is_screenshot_upload_howto(lower, signal):
+        return _with_route(state, "screenshot_upload_howto", "faq", "Screenshot upload instructions are FAQ/manual content.", faq_query=text)
+    if _is_rollover_explanation(lower):
+        return _with_route(state, "rollover_explanation", "faq", "Rollover explanation is FAQ/manual content.", faq_query=text)
+    if _is_menu_help(lower, signal):
+        return _with_route(state, "menu_help", "faq", "Menu/navigation help is FAQ/manual content.", faq_query=text)
+    if state.get("event_type") == "FILE_RECEIVED":
+        return _with_route(state, "clarification_needed", "clarification", "File upload without a clear issue needs clarification.")
+    if text:
+        return _with_route(state, "faq_general", "faq", "General explanatory question routed to FAQ/RAG.", faq_query=text, confidence=0.55)
+    return _with_route(state, "clarification_needed", "clarification", "No clear question content provided.", confidence=0.2)
 
 
 def continue_workflow_node(state: GraphState) -> GraphState:
@@ -153,6 +213,8 @@ def continue_workflow_node(state: GraphState) -> GraphState:
 
 
 def sop_node(state: GraphState) -> GraphState:
+    if state.get("workflow_stage") in {"waiting_backend", "backend_querying"}:
+        return handle_waiting_backend(state)
     return run_sop(state)
 
 
@@ -167,13 +229,23 @@ def rag_node(state: GraphState) -> GraphState:
 
 
 def human_handoff_node(state: GraphState) -> GraphState:
+    intent = (state.get("intent_result") or {}).get("intent")
+    reason = intent or "explicit_human_request"
     return {
         **state,
         "status": "HANDOFF_REQUESTED",
         "active_workflow": "human_handoff",
         "workflow_stage": "handoff_requested",
         "response_text": "我会为你转接真人客服继续协助。",
-        "commands": [{"type": CommandType.HUMAN_HANDOFF_REQUESTED, "payload": {"reason": "explicit_human_request"}}],
+        "commands": [{"type": CommandType.HUMAN_HANDOFF_REQUESTED, "payload": {"reason": reason}}],
+    }
+
+
+def emotion_care_node(state: GraphState) -> GraphState:
+    return {
+        **state,
+        "response_text": "我理解你现在很着急。我会先尽力说明处理方式；如果你愿意，也可以直接告诉我需要转接真人客服。",
+        "commands": [],
     }
 
 
@@ -198,31 +270,62 @@ def persist_state_node(state: GraphState) -> GraphState:
     return state
 
 
-def _intent_result(intent: str, reason: str | None = None, continue_workflow: bool = False) -> dict[str, Any]:
-    return {
+def _intent_result(
+    intent: str,
+    route: str,
+    reason: str,
+    confidence: float = 0.9,
+    sop_name: str | None = None,
+    faq_query: str | None = None,
+    emotion: str | None = None,
+    risk_level: str | None = None,
+) -> dict[str, Any]:
+    result = {
         "intent": intent,
-        "confidence": 0.9 if intent != "unknown" else 0.2,
-        "reason": reason or "Deterministic first-pass routing.",
-        "should_continue_active_workflow": continue_workflow,
-        "requires_sop": intent
-        in {
-            "deposit_missing",
-            "withdrawal_missing",
-            "withdrawal_blocked_or_rollover",
-            "deposit_howto",
-            "withdrawal_howto",
-            "forgot_password",
-            "pending_reply_lookup",
-        },
-        "requires_rag": intent == "faq_general",
-        "requires_human": intent == "human_handoff",
-        "requires_backend": intent == "withdrawal_blocked_or_rollover",
-        "requires_tg": intent in {"deposit_missing", "withdrawal_missing"},
+        "route": route,
+        "confidence": confidence,
+        "reason": reason,
+    }
+    if sop_name:
+        result["sop_name"] = sop_name
+    if faq_query:
+        result["faq_query"] = faq_query
+    if emotion:
+        result["emotion"] = emotion
+    if risk_level:
+        result["risk_level"] = risk_level
+    return result
+
+
+def _with_route(
+    state: GraphState,
+    intent: str,
+    route: str,
+    reason: str,
+    confidence: float = 0.9,
+    sop_name: str | None = None,
+    faq_query: str | None = None,
+    emotion: str | None = None,
+    risk_level: str | None = None,
+) -> GraphState:
+    return {
+        **state,
+        "intent_result": _intent_result(
+            intent=intent,
+            route=route,
+            reason=reason,
+            confidence=confidence,
+            sop_name=sop_name,
+            faq_query=faq_query,
+            emotion=emotion,
+            risk_level=risk_level,
+        ),
+        "route": route,
     }
 
 
 def _has_waiting_supplement(signal: dict[str, Any], state: GraphState) -> bool:
-    return bool(state.get("attachments") or signal.get("has_transaction_signal") or signal.get("has_identity"))
+    return bool(state.get("attachments") or signal.get("has_contact_hint"))
 
 
 def _extract_text(payload: dict[str, Any]) -> str:
@@ -249,3 +352,71 @@ def _detect_language(text: str) -> str:
     if text:
         return "unknown"
     return "unknown"
+
+
+def _is_deposit_missing(text: str) -> bool:
+    return _contains_any(text, ("deposit", "depósito", "deposito", "存款", "充值")) and _contains_any(
+        text, ("no llegó", "no llego", "未到账", "没到账", "no acreditado", "nunca me pagaron")
+    )
+
+
+def _is_withdrawal_missing(text: str) -> bool:
+    return _contains_any(text, ("retiro", "withdrawal", "提款", "提现")) and _contains_any(
+        text, ("no llegó", "no llego", "未到账", "没到账", "no acreditado", "nunca me pagaron")
+    )
+
+
+def _is_withdrawal_blocked_or_rollover(text: str) -> bool:
+    return _contains_any(text, ("no puedo retirar", "无法提款", "withdrawal blocked", "rollover", "流水"))
+
+
+def _is_pending_reply_lookup(text: str) -> bool:
+    return _contains_any(text, ("caso anterior", "previous case", "上一笔案件"))
+
+
+def _is_deposit_howto(text: str) -> bool:
+    return _contains_any(text, ("cómo recargar", "como recargar", "how to deposit", "如何充值", "充值方式"))
+
+
+def _is_withdrawal_howto(text: str) -> bool:
+    return _contains_any(text, ("cómo puedo retirar", "como puedo retirar", "cómo retirar", "como retirar", "how to withdraw", "如何提款"))
+
+
+def _is_forgot_password_howto(text: str) -> bool:
+    return _contains_any(text, ("forgot password", "olvidé mi contraseña", "olvide mi contraseña", "忘记密码"))
+
+
+def _is_screenshot_upload_howto(text: str, signal: dict[str, Any]) -> bool:
+    return signal.get("has_screenshot_signal") and _contains_any(text, ("subir", "upload", "enviar", "上传"))
+
+
+def _is_rollover_explanation(text: str) -> bool:
+    return _contains_any(text, ("qué es rollover", "que es rollover", "what is rollover", "流水是什么", "rollover explanation"))
+
+
+def _is_menu_help(text: str, signal: dict[str, Any]) -> bool:
+    return signal.get("has_menu_signal") and _contains_any(text, ("no veo", "dónde", "donde", "where", "找不到"))
+
+
+def _is_service_frustration(text: str) -> bool:
+    return _contains_any(text, ("todo el tiempo lo mismo", "siempre lo mismo", "otra vez lo mismo", "same thing every time"))
+
+
+def _is_unsupported_concrete_issue(text: str) -> bool:
+    return _contains_any(text, ("problemas técnicos", "problemas tecnicos", "technical issue", "del juego", "game issue"))
+
+
+def _is_account_access_issue(text: str) -> bool:
+    return _contains_any(text, ("no puedo entrar", "no puedo iniciar sesión", "no puedo iniciar sesion", "can't log in", "无法登录"))
+
+
+def _is_account_profile_or_wallet_change(text: str) -> bool:
+    return _contains_any(text, ("cambiar wallet", "change wallet", "cambiar perfil", "change profile", "cambiar correo", "cambiar telefono"))
+
+
+def _is_abusive_or_emotional(text: str) -> bool:
+    return _contains_any(text, ("basura", "mierda", "estafa", "scam", "骗子", "垃圾"))
+
+
+def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(token in text for token in tokens)

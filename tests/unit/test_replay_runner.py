@@ -126,7 +126,7 @@ def required_slots(state: dict) -> list[str]:
             "pending_reply_lookup": ["pending_reply_identity"],
         }
         return [slot for slot in required_by_intent.get(intent, []) if not slot_memory.get(slot)]
-    if intent == "waiting_backend_supplement":
+    if state.get("workflow_stage") == "waiting_backend":
         return [slot for slot in ["forwarded_attachment_urls"] if slot_memory.get(slot)]
     return []
 

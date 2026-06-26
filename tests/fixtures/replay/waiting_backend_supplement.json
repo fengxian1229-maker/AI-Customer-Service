@@ -1,6 +1,6 @@
 {
   "input_messages": ["adjunto otro comprobante"],
-  "expected_intent": "waiting_backend_supplement",
+  "expected_intent": "deposit_missing",
   "expected_active_workflow": "deposit_missing",
   "expected_workflow_stage": "waiting_backend",
   "expected_required_slots": ["forwarded_attachment_urls"],

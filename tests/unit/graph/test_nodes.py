@@ -63,14 +63,13 @@ def test_rewrite_question_node_keeps_user_facts():
 
 def test_signal_judgement_node_recognizes_identity_values():
     result = signal_judgement_node({"rewritten_question": "mi correo es test@example.com"})
-    assert result["signal_result"]["has_identity"] is True
-    assert result["signal_result"]["identity_type"] == "email"
+    assert result["signal_result"]["has_contact_hint"] is True
 
     result = signal_judgement_node({"rewritten_question": "mi telefono es +57 300 123 4567"})
-    assert result["signal_result"]["identity_type"] == "phone"
+    assert result["signal_result"]["has_contact_hint"] is True
 
     result = signal_judgement_node({"rewritten_question": "mi usuario es andy123"})
-    assert result["signal_result"]["identity_type"] == "username"
+    assert result["signal_result"]["has_contact_hint"] is True
 
 
 def test_signal_judgement_node_recognizes_explicit_human_request():
@@ -79,25 +78,48 @@ def test_signal_judgement_node_recognizes_explicit_human_request():
     assert result["signal_result"]["has_explicit_human_request"] is True
 
 
-def test_intent_router_node_routes_withdrawal_missing():
-    state = signal_judgement_node({"rewritten_question": "mi retiro no llegó"})
-    result = intent_router_node({**state, "rewritten_question": "mi retiro no llegó"})
+def test_intent_router_node_routes_bot66tornado_samples():
+    cases = [
+        ("mi deposito no llegó", "deposit_missing", "sop"),
+        ("Cómo puedo retirar", "withdrawal_howto", "faq"),
+        ("Nunca me pagaron el retiro", "withdrawal_missing", "sop"),
+        ("No puedo retirar", "withdrawal_blocked_or_rollover", "faq_then_sop"),
+        ("Tengo un caso anterior", "pending_reply_lookup", "sop"),
+        ("no veo ningun menu", "menu_help", "faq"),
+        ("Todo el tiempo lo mismo", "service_frustration", "human_handoff"),
+        ("Problemas técnicos del juego", "unsupported_concrete_issue", "human_handoff"),
+    ]
 
-    assert result["intent_result"]["intent"] == "withdrawal_missing"
-    assert result["route"] == "sop"
+    for text, expected_intent, expected_route in cases:
+        state = signal_judgement_node({"rewritten_question": text})
+        result = intent_router_node({**state, "rewritten_question": text, "raw_user_input": text})
+
+        assert result["intent_result"]["intent"] == expected_intent
+        assert result["route"] == expected_route
 
 
-def test_intent_router_node_routes_withdrawal_blocked_or_rollover():
-    state = signal_judgement_node({"rewritten_question": "no puedo retirar por流水"})
-    result = intent_router_node({**state, "rewritten_question": "no puedo retirar por流水"})
+def test_intent_router_node_does_not_emit_sop_slots():
+    text = "mi deposito no llegó, mi usuario es andy123"
+    state = signal_judgement_node({"rewritten_question": text})
+    result = intent_router_node({**state, "rewritten_question": text, "raw_user_input": text})
 
-    assert result["intent_result"]["intent"] == "withdrawal_blocked_or_rollover"
-    assert result["intent_result"]["requires_backend"] is True
+    assert result["intent_result"]["intent"] == "deposit_missing"
+    assert "account_or_phone" not in result["intent_result"]
+    assert "deposit_screenshot" not in result["intent_result"]
+    assert result.get("slot_memory") is None or result.get("slot_memory") == {}
 
 
-def test_intent_router_node_routes_human_handoff():
-    state = signal_judgement_node({"rewritten_question": "quiero un agente"})
-    result = intent_router_node({**state, "rewritten_question": "quiero un agente"})
+def test_transaction_issue_must_not_route_to_faq():
+    text = "Nunca me pagaron el retiro"
+    state = signal_judgement_node({"rewritten_question": text})
+    result = intent_router_node({**state, "rewritten_question": text, "raw_user_input": text})
 
-    assert result["intent_result"]["intent"] == "human_handoff"
-    assert result["route"] == "human_handoff"
+    assert result["route"] != "faq"
+
+
+def test_howto_issue_must_not_route_to_sop():
+    text = "Cómo puedo retirar"
+    state = signal_judgement_node({"rewritten_question": text})
+    result = intent_router_node({**state, "rewritten_question": text, "raw_user_input": text})
+
+    assert result["route"] != "sop"

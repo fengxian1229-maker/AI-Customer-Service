@@ -1,13 +1,16 @@
 from typing import Any
 
 from app.workflows.command_contracts import CommandType
-from app.workflows.slot_extractors import attachment_urls
+from app.workflows.slot_extractors import attachment_urls, extract_identity, extract_transaction_signal
 
 
 def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     signal = state.get("signal_result") or {}
     slot_memory = dict(state.get("slot_memory") or {})
     urls = attachment_urls(state.get("attachments", []))
+    text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")
+    identity = extract_identity(text)
+    transaction = extract_transaction_signal(text)
 
     if urls:
         forwarded = list(slot_memory.get("forwarded_attachment_urls", []))
@@ -30,7 +33,7 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
                 ],
             }
 
-    if signal.get("has_transaction_signal") or signal.get("has_identity"):
+    if transaction or identity:
         return {
             **state,
             "slot_memory": slot_memory,
@@ -40,7 +43,10 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
                     "type": CommandType.TELEGRAM_APPEND_TO_CASE,
                     "payload": {
                         "active_workflow": state.get("active_workflow"),
-                        "signal_result": signal,
+                        "signal_result": {
+                            "has_contact_hint": bool(identity),
+                            "has_transaction_signal": bool(transaction),
+                        },
                     },
                 }
             ],

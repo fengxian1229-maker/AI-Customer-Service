@@ -1,6 +1,6 @@
 {
   "input_messages": ["quiero hablar con un agente humano"],
-  "expected_intent": "human_handoff",
+  "expected_intent": "explicit_human_request",
   "expected_active_workflow": "human_handoff",
   "expected_workflow_stage": "handoff_requested",
   "expected_required_slots": [],

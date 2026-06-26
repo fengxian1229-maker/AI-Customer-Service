@@ -233,7 +233,7 @@ def test_gateway_service_rag_faq_writes_outbound_without_external_command():
 
     result = asyncio.run(service.process_event(13, event))
 
-    assert result["graph_state"]["route"] == "rag"
+    assert result["graph_state"]["route"] == "faq"
     assert result["graph_state"]["rag_result"]["matched"] is True
     assert result["graph_state"]["rag_context"]["source"] == "knowledge_documents"
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
