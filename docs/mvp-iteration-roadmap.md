@@ -46,6 +46,12 @@ P5-B.2：real local MySQL integration verification + checkpoint test DB setup ha
 P5-C：checkpoint debug/admin tooling
 ```
 
+当前 P5-D 已完成：
+
+```text
+P5-D：FAQ-only lazy RAG retrieve
+```
+
 说明：
 
 ```text
@@ -95,6 +101,16 @@ python -m app.workers.checkpoint_admin errors --conversation-id ...
 2. 输出 JSON
 3. 不修改 LangGraph saver 内部表
 4. 支持 conversation_id / graph_thread_id / inbound_event_id / status / created_at 范围过滤
+```
+
+P5-D 收敛 RAG 预取边界：
+
+```text
+1. 只有 deterministic pre-route 结果为 route=faq 时，GatewayService 才会调用 RagService.retrieve(...)
+2. deposit_missing / withdrawal_missing / pending_reply_lookup / human_handoff / emotion_care / clarification 不预取 RAG
+3. faq_then_sop 当前仍不预取 RAG，继续走安全 SOP 路径
+4. rag_node 仍保持同步纯节点，不直接打开 DB
+5. GatewayService 仍是 DB-backed RAG retrieve 的边界
 ```
 
 当前 RAG 仍明确不做：

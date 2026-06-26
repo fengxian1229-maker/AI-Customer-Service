@@ -1,6 +1,7 @@
 from app.graph.nodes import (
     build_graph_state_from_event,
     intent_router_node,
+    prepare_route_state,
     rewrite_question_node,
 )
 from app.schemas.events import InboundEvent
@@ -58,6 +59,14 @@ def test_rewrite_question_node_keeps_user_facts():
 
     assert "andy123" in result["rewritten_question"]
     assert result["rewrite_result"]["mentioned_entities"]["amount"] == "50000"
+
+
+def test_prepare_route_state_runs_rewrite_then_route():
+    result = prepare_route_state({"raw_user_input": "Cómo puedo retirar"})
+
+    assert result["rewritten_question"] == "Cómo puedo retirar"
+    assert result["intent_result"]["intent"] == "withdrawal_howto"
+    assert result["route"] == "faq"
 
 
 def test_intent_router_node_routes_bot66tornado_samples():

@@ -67,6 +67,11 @@ def rewrite_question_node(state: GraphState) -> GraphState:
     }
 
 
+def prepare_route_state(state: GraphState) -> GraphState:
+    routed = rewrite_question_node(state)
+    return intent_router_node(routed)
+
+
 def intent_router_node(state: GraphState) -> GraphState:
     active = state.get("active_workflow")
     stage = state.get("workflow_stage")

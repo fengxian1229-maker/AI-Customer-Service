@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -38,12 +38,12 @@ Before coding:
 
 Recommended next task:
 - build checkpoint Web admin or richer debug UX on top of the new read-only CLI / repository boundary
-- or continue tightening FAQ-only lazy RAG retrieval without mixing it with ingress changes
+- or extend the FAQ-only lazy RAG boundary into a cleaner graph-level optimization without mixing it with ingress changes
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
 
-## Latest P5-C Status
+## Latest P5-D Status
 
 - Added `tests/integration/test_mysql_checkpoint_persistence.py`
 - Added `tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py`
@@ -56,6 +56,10 @@ Recommended next task:
   - `show-run`
   - `latest`
   - `errors`
+- Added `prepare_route_state(...)` in `src/app/graph/nodes.py` so GatewayService can conservatively pre-run deterministic rewrite/router logic outside the graph
+- `GatewayService` now calls `RagService.retrieve(...)` only when that pre-route result is `route == "faq"`
+- SOP / human handoff / emotion care / clarification / `faq_then_sop` traffic no longer prefetches `knowledge_documents`
+- `rag_node` remains a synchronous pure graph node and still falls back to static knowledge if no `rag_context` is injected
 - Added repository query methods instead of letting the CLI assemble SQL directly:
   - `GraphCheckpointRunRepository.list_runs(...)`
   - `GraphCheckpointRunRepository.get_run(...)`
@@ -65,6 +69,7 @@ Recommended next task:
 - `GraphState.signal_result` has been removed
 - `waiting_backend_classifier` no longer reads `state.signal_result`; it derives supplement/human-handoff signals from text and attachments directly
 - `src/app/prompts/intent_router.md` now matches the post-routing-cleanup boundary and no longer mentions `signal_result`
+- The FAQ-only lazy RAG transition is intentionally conservative: the full graph still re-runs rewrite/router during `graph.invoke(...)`
 - All mysql checkpoint tests still require `MYSQL_TEST_DSN` / `DATABASE_URL` / `AI_CS_TEST_MYSQL_DSN` pointing to a disposable database whose name contains `test`
 - New checkpoint persistence test bootstraps project SQL, calls real `PyMySQLSaver.setup()`, invokes a real graph, closes the provider, reopens a new provider, and verifies the same `thread_id` checkpoint can still be read
 - New gateway smoke test inserts one deterministic inbound event, runs `gateway_consumer.process_next_batch(... checkpoint_mode="mysql" ...)`, verifies `conversation_states` / `conversation_messages` / `outbound_messages` / `graph_checkpoint_runs`, then reopens a provider and verifies checkpoint readability again
@@ -143,7 +148,7 @@ Implemented:
 - `python -m app.workers.checkpoint_admin list-runs|show-run|latest|errors ...` provides a read-only JSON admin surface for checkpoint metadata and graph errors
 - `knowledge_documents` stores tenant/kb-scope KB documents for deterministic retrieval
 - `gateway_consumer` creates `KnowledgeDocumentRepository(pool)` and `RagService(...)`
-- `GatewayService` prefetches `rag_context` before `graph.invoke(...)`
+- `GatewayService` pre-runs deterministic rewrite/router logic and only prefetches `rag_context` for `route=faq`
 - `rag_node` reads `rag_context` synchronously and never opens DB connections
 - normal FAQ/RAG path produces only customer-facing `livechat.send_text`
 - normal FAQ/RAG path no longer emits `rag.placeholder` external commands

@@ -22,6 +22,12 @@ def make_inbound_event() -> InboundEvent:
     )
 
 
+def make_event_with_text(text: str) -> InboundEvent:
+    event = make_inbound_event()
+    event.payload_json = {"event": {"type": "message", "text": text}}
+    return event
+
+
 def test_should_enqueue_reply_for_message_created():
     assert should_enqueue_reply(make_inbound_event()) is True
 
@@ -241,7 +247,28 @@ def test_gateway_service_rag_faq_writes_outbound_without_external_command():
     assert external_repository.inserted == []
 
 
-def test_gateway_service_prefetches_rag_context_before_graph_invoke():
+def test_gateway_service_human_handoff_keeps_existing_external_command_semantics_without_rag_prefetch():
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    rag_service = FakeRagService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=rag_service,
+    )
+
+    result = asyncio.run(service.process_event(13, make_event_with_text("I want human agent")))
+
+    assert rag_service.calls == []
+    assert result["graph_state"]["route"] == "human_handoff"
+    assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
+
+
+def test_gateway_service_prefetches_rag_context_only_for_faq_route():
     graph = RecordingGraph()
     rag_service = FakeRagService()
     service = GatewayService(
@@ -253,11 +280,81 @@ def test_gateway_service_prefetches_rag_context_before_graph_invoke():
         rag_service=rag_service,
     )
 
-    asyncio.run(service.process_event(14, make_inbound_event()))
+    asyncio.run(service.process_event(14, make_event_with_text("how to deposit")))
 
     state, _config = graph.calls[0]
     assert rag_service.calls[0]["conversation_id"] == "livechat:chat-1"
     assert state["rag_context"]["documents"][0]["title"] == "Bonus rules"
+
+
+def test_gateway_service_does_not_prefetch_rag_context_for_sop_route():
+    graph = RecordingGraph()
+    rag_service = FakeRagService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=graph,
+        rag_service=rag_service,
+    )
+
+    asyncio.run(service.process_event(14, make_event_with_text("mi deposito no llegó")))
+
+    state, _config = graph.calls[0]
+    assert rag_service.calls == []
+    assert state.get("rag_context") is None
+
+
+def test_gateway_service_does_not_prefetch_rag_context_for_human_handoff_route():
+    graph = RecordingGraph()
+    rag_service = FakeRagService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=graph,
+        rag_service=rag_service,
+    )
+
+    asyncio.run(service.process_event(14, make_event_with_text("I want human agent")))
+
+    state, _config = graph.calls[0]
+    assert rag_service.calls == []
+    assert state.get("rag_context") is None
+
+
+def test_gateway_service_does_not_prefetch_rag_context_for_backend_fact_guard():
+    graph = RecordingGraph()
+    from app.services.rag import BACKEND_FACT_FALLBACK_ANSWER, RagService
+
+    class FakeKnowledgeRepository:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def search(self, tenant_id: str, query: str, kb_scope: str = "default", limit: int = 3):
+            self.calls.append((tenant_id, query, kb_scope, limit))
+            return []
+
+    repository = FakeKnowledgeRepository()
+    rag_service = RagService(repository)
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=graph,
+        rag_service=rag_service,
+    )
+
+    result = asyncio.run(service.process_event(14, make_event_with_text("my withdrawal status and balance")))
+
+    state, _config = graph.calls[0]
+    assert repository.calls == []
+    assert state["rag_context"]["fallback_reason"] == "backend_fact"
+    assert state["rag_context"]["answer"] == BACKEND_FACT_FALLBACK_ANSWER
+    assert result["graph_state"]["response_text"] == "ok"
 
 
 def test_gateway_service_records_error_and_skips_side_effects_when_rag_retrieve_fails():
@@ -280,7 +377,7 @@ def test_gateway_service_records_error_and_skips_side_effects_when_rag_retrieve_
     )
 
     try:
-        asyncio.run(service.process_event(15, make_inbound_event()))
+        asyncio.run(service.process_event(15, make_event_with_text("how to deposit")))
     except RuntimeError as exc:
         assert str(exc) == "rag retrieve failed"
     else:
@@ -295,6 +392,22 @@ def test_gateway_service_records_error_and_skips_side_effects_when_rag_retrieve_
     assert graph_error_repository.inserted[0]["error_type"] == "RuntimeError"
     assert graph_error_repository.inserted[0]["error_message"] == "rag retrieve failed"
     assert "rag_context" not in graph_error_repository.inserted[0]["state_snapshot"]
+
+
+def test_gateway_service_without_rag_service_keeps_static_fallback_for_faq():
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+    )
+
+    result = asyncio.run(service.process_event(16, make_event_with_text("how to deposit")))
+
+    assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["rag_result"]["matched"] is True
+    assert result["external_commands"] == []
+    assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
 
 
 class RecordingGraph:

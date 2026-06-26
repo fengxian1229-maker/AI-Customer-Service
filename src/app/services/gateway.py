@@ -1,6 +1,6 @@
 from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
 from app.graph.builder import build_workflow_graph
-from app.graph.nodes import build_graph_state_from_event
+from app.graph.nodes import build_graph_state_from_event, prepare_route_state
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.message_history import build_customer_message_from_inbound
@@ -152,12 +152,18 @@ class GatewayService:
             conversation=conversation,
             graph_thread_id=graph_thread_id,
         )
+        active_state = graph_state
         try:
-            if self.rag_service:
-                # TODO: Move retrieval behind a FAQ-only lazy path so SOP traffic does not prefetch RAG context.
-                graph_state["rag_context"] = await self.rag_service.retrieve(graph_state)
+            routed_state = prepare_route_state(graph_state)
+            active_state = routed_state
+            if self.rag_service and routed_state.get("route") == "faq":
+                # Conservative lazy-retrieve transition: pre-route with pure deterministic nodes,
+                # then only prefetch DB-backed RAG for FAQ traffic before invoking the full graph.
+                # The full graph still re-runs rewrite/router from the entry point on invoke.
+                # This prevents SOP / backend-fact / handoff / clarification traffic from querying knowledge_documents.
+                routed_state["rag_context"] = await self.rag_service.retrieve(routed_state)
             result = self.workflow_graph.invoke(
-                graph_state,
+                routed_state,
                 config={"configurable": {"thread_id": graph_thread_id}},
             )
             await self._mark_checkpoint_run_succeeded(checkpoint_run_id)
@@ -167,7 +173,7 @@ class GatewayService:
             await self._record_graph_run_error(
                 inbound_event_id=inbound_event_id,
                 conversation=conversation,
-                graph_state=graph_state,
+                graph_state=active_state,
                 graph_thread_id=graph_thread_id,
                 error=exc,
             )
