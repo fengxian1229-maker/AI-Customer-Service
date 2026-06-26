@@ -6,7 +6,6 @@ def test_deposit_missing_asks_for_identity_and_screenshot_when_empty():
     state = run_sop(
         {
             "intent_result": {"intent": "deposit_missing"},
-            "signal_result": {},
             "slot_memory": {},
             "attachments": [],
         }
@@ -68,7 +67,6 @@ def test_withdrawal_missing_with_screenshot_only_asks_for_identity():
     state = run_sop(
         {
             "intent_result": {"intent": "withdrawal_missing"},
-            "signal_result": {},
             "slot_memory": {},
             "attachments": [{"url": "https://cdn.example/withdrawal.png"}],
         }
@@ -131,7 +129,6 @@ def test_pending_reply_lookup_asks_identity_when_missing():
     state = run_sop(
         {
             "intent_result": {"intent": "pending_reply_lookup"},
-            "signal_result": {},
             "slot_memory": {},
             "commands": [],
         }

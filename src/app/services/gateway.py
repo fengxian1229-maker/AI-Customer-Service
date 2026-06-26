@@ -260,7 +260,6 @@ class GatewayService:
             "slot_memory": graph_state.get("slot_memory"),
             "route": graph_state.get("route"),
             "intent_result": graph_state.get("intent_result"),
-            "signal_result": graph_state.get("signal_result"),
             "rewrite_result": graph_state.get("rewrite_result"),
         }
         if graph_state.get("rag_context"):

@@ -41,7 +41,6 @@ async def _test_mysql_checkpointer_persists_state_across_provider_reopen() -> No
             "active_workflow": None,
             "workflow_stage": None,
             "slot_memory": {},
-            "signal_result": None,
             "intent_result": None,
             "route": None,
             "rag_context": None,

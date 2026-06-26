@@ -40,6 +40,12 @@ P5-B.1：real MySQL checkpoint persistence verification + gateway_consumer mysql
 P5-B.2：real local MySQL integration verification + checkpoint test DB setup hardening
 ```
 
+当前 P5-C 已完成：
+
+```text
+P5-C：checkpoint debug/admin tooling
+```
+
 说明：
 
 ```text
@@ -69,7 +75,26 @@ PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
 ```text
 tests/integration/test_mysql_checkpoint_persistence.py     1 passed
 tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py 1 passed
-tests/integration -m mysql                                5 passed
+tests/integration/test_checkpoint_admin_mysql_smoke.py    1 passed
+tests/integration -m mysql                                6 passed
+```
+
+P5-C 新增只读调试工具：
+
+```text
+python -m app.workers.checkpoint_admin list-runs --conversation-id ...
+python -m app.workers.checkpoint_admin show-run --run-id ...
+python -m app.workers.checkpoint_admin latest --conversation-id ...
+python -m app.workers.checkpoint_admin errors --conversation-id ...
+```
+
+工具边界：
+
+```text
+1. 只读查询 graph_checkpoint_runs / graph_run_errors
+2. 输出 JSON
+3. 不修改 LangGraph saver 内部表
+4. 支持 conversation_id / graph_thread_id / inbound_event_id / status / created_at 范围过滤
 ```
 
 当前 RAG 仍明确不做：
@@ -110,7 +135,7 @@ LANGGRAPH_CHECKPOINT_MODE=mysql  显式配置后可使用真实 PyMySQLSaver
 
 ```text
 interrupt/resume
-checkpoint admin CLI / Web 管理工具
+checkpoint Web 管理工具
 ```
 
 本文档重点说明：哪些能力当前应该做，哪些能力后续再做，避免在 MVP 阶段过早开发复杂抽象，也避免把后续必须抽象的设计写死在代码中。

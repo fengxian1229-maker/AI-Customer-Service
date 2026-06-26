@@ -933,6 +933,52 @@ class GraphRunErrorRepository:
             row["state_snapshot"] = json_loads(row["state_snapshot"])
         return rows
 
+    async def list_errors(
+        self,
+        conversation_id: str | None = None,
+        graph_thread_id: str | None = None,
+        inbound_event_id: int | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        limit: int = 20,
+        status: str | None = None,
+    ) -> list[dict]:
+        del status
+        where_clauses = []
+        args: list[object] = []
+        if conversation_id:
+            where_clauses.append("conversation_id = %s")
+            args.append(conversation_id)
+        if graph_thread_id:
+            where_clauses.append("graph_thread_id = %s")
+            args.append(graph_thread_id)
+        if inbound_event_id is not None:
+            where_clauses.append("inbound_event_id = %s")
+            args.append(inbound_event_id)
+        if created_after:
+            where_clauses.append("created_at >= %s")
+            args.append(created_after)
+        if created_before:
+            where_clauses.append("created_at <= %s")
+            args.append(created_before)
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        sql = f"""
+        SELECT id, conversation_id, inbound_event_id, graph_thread_id, node_name,
+               error_type, error_message, retryable, state_snapshot, created_at
+        FROM graph_run_errors
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT %s
+        """
+        args.append(limit)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, tuple(args))
+                rows = await cur.fetchall()
+        for row in rows:
+            row["state_snapshot"] = json_loads(row["state_snapshot"])
+        return rows
+
 
 class GraphCheckpointRunRepository:
     def __init__(self, pool) -> None:
@@ -1005,6 +1051,91 @@ class GraphCheckpointRunRepository:
         for row in rows:
             row["metadata_json"] = json_loads(row.get("metadata_json") or "{}")
         return rows
+
+    async def list_runs(
+        self,
+        conversation_id: str | None = None,
+        graph_thread_id: str | None = None,
+        inbound_event_id: int | None = None,
+        status: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        where_clauses = []
+        args: list[object] = []
+        if conversation_id:
+            where_clauses.append("conversation_id = %s")
+            args.append(conversation_id)
+        if graph_thread_id:
+            where_clauses.append("graph_thread_id = %s")
+            args.append(graph_thread_id)
+        if inbound_event_id is not None:
+            where_clauses.append("inbound_event_id = %s")
+            args.append(inbound_event_id)
+        if status:
+            where_clauses.append("status = %s")
+            args.append(status)
+        if created_after:
+            where_clauses.append("created_at >= %s")
+            args.append(created_after)
+        if created_before:
+            where_clauses.append("created_at <= %s")
+            args.append(created_before)
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        sql = f"""
+        SELECT id, conversation_id, graph_thread_id, checkpoint_mode, status,
+               inbound_event_id, latest_checkpoint_id, error_type, error_message,
+               metadata_json, created_at, updated_at
+        FROM graph_checkpoint_runs
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT %s
+        """
+        args.append(limit)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, tuple(args))
+                rows = await cur.fetchall()
+        for row in rows:
+            row["metadata_json"] = json_loads(row.get("metadata_json") or "{}")
+        return rows
+
+    async def get_run(self, run_id: int) -> dict | None:
+        sql = """
+        SELECT id, conversation_id, graph_thread_id, checkpoint_mode, status,
+               inbound_event_id, latest_checkpoint_id, error_type, error_message,
+               metadata_json, created_at, updated_at
+        FROM graph_checkpoint_runs
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (run_id,))
+                row = await cur.fetchone()
+        if row:
+            row["metadata_json"] = json_loads(row.get("metadata_json") or "{}")
+        return row
+
+    async def fetch_latest(
+        self,
+        conversation_id: str | None = None,
+        graph_thread_id: str | None = None,
+        inbound_event_id: int | None = None,
+        status: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> dict | None:
+        rows = await self.list_runs(
+            conversation_id=conversation_id,
+            graph_thread_id=graph_thread_id,
+            inbound_event_id=inbound_event_id,
+            status=status,
+            created_after=created_after,
+            created_before=created_before,
+            limit=1,
+        )
+        return rows[0] if rows else None
 
 
 class ExternalResultTransactionRepository:

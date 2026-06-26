@@ -9,7 +9,6 @@ def test_waiting_backend_attachment_generates_append_command():
             "workflow_stage": "waiting_backend",
             "slot_memory": {"forwarded_attachment_urls": []},
             "attachments": [{"url": "https://cdn.example/supplement.png"}],
-            "signal_result": {},
         }
     )
 
@@ -24,7 +23,7 @@ def test_waiting_backend_human_request_generates_handoff_command():
             "workflow_stage": "waiting_backend",
             "slot_memory": {},
             "attachments": [],
-            "signal_result": {"has_explicit_human_request": True},
+            "raw_user_input": "quiero hablar con un agente humano",
         }
     )
 
@@ -39,7 +38,6 @@ def test_waiting_backend_followup_only_reassures():
             "workflow_stage": "waiting_backend",
             "slot_memory": {},
             "attachments": [],
-            "signal_result": {},
         }
     )
 

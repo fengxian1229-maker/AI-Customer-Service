@@ -1,7 +1,13 @@
 from typing import Any
 
 from app.workflows.command_contracts import CommandType
-from app.workflows.slot_extractors import attachment_urls, extract_amount, extract_channel, extract_identity, extract_order_id
+from app.workflows.slot_extractors import (
+    attachment_urls,
+    extract_amount,
+    extract_channel,
+    extract_identity,
+    extract_order_id,
+)
 
 
 def run_sop(state: dict[str, Any]) -> dict[str, Any]:
@@ -111,10 +117,10 @@ def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
         "status": "WAITING_EXTERNAL",
         "active_workflow": "withdrawal_blocked_or_rollover",
         "workflow_stage": "backend_querying",
-            "response_text": "一般无法提款通常与流水要求或风控限制有关。已收到你的资料，我们正在进一步查询。",
-            "commands": [
-                {
-                    "type": CommandType.BACKEND_QUERY,
+        "response_text": "一般无法提款通常与流水要求或风控限制有关。已收到你的资料，我们正在进一步查询。",
+        "commands": [
+            {
+                "type": CommandType.BACKEND_QUERY,
                 "payload": {
                     "intent": "withdrawal_blocked_or_rollover",
                     "account_or_phone": slot_memory["account_or_phone"],
@@ -132,6 +138,8 @@ def _case_card_command(intent: str, slot_memory: dict[str, Any]) -> dict[str, An
             "slot_memory": slot_memory,
         },
     }
+
+
 def _pending_reply_lookup_sop(state: dict[str, Any]) -> dict[str, Any]:
     slot_memory = dict(state.get("slot_memory") or {})
     text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")

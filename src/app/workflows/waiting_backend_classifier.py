@@ -5,7 +5,6 @@ from app.workflows.slot_extractors import attachment_urls, extract_identity, ext
 
 
 def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
-    signal = state.get("signal_result") or {}
     slot_memory = dict(state.get("slot_memory") or {})
     urls = attachment_urls(state.get("attachments", []))
     text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")
@@ -40,20 +39,20 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
             "slot_memory": slot_memory,
             "response_text": "已收到补充资料，我们会继续跟进。",
             "commands": [
-                {
-                    "type": CommandType.TELEGRAM_APPEND_TO_CASE,
-                    "payload": {
-                        "active_workflow": state.get("active_workflow"),
-                        "signal_result": {
-                            "has_contact_hint": bool(identity),
-                            "has_transaction_signal": bool(transaction or order_id),
+                    {
+                        "type": CommandType.TELEGRAM_APPEND_TO_CASE,
+                        "payload": {
+                            "active_workflow": state.get("active_workflow"),
+                            "supplement": {
+                                "has_contact_hint": bool(identity),
+                                "has_transaction_signal": bool(transaction or order_id),
+                            },
                         },
-                    },
-                }
-            ],
-        }
+                    }
+                ],
+            }
 
-    if signal.get("has_explicit_human_request") or is_explicit_human_request(text):
+    if is_explicit_human_request(text):
         return {
             **state,
             "slot_memory": slot_memory,

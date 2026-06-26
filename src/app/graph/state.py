@@ -19,7 +19,6 @@ class GraphState(TypedDict, total=False):
     workflow_stage: str | None
     slot_memory: dict[str, Any]
 
-    signal_result: dict[str, Any] | None
     intent_result: dict[str, Any] | None
     route: str | None
     rag_context: dict[str, Any] | None

@@ -45,7 +45,7 @@ Checkpoint modes:
 
 P3-B adds a checkpoint provider boundary and read-only graph debug helpers. P5-A adds durable checkpoint design, a checkpoint metadata schema, and a provider boundary that explicitly recognizes `off`, `memory`, and planned `mysql` modes. P5-A.1 wires checkpoint run metadata through `gateway_consumer -> GatewayService` using `GraphCheckpointRunRepository`. P5-B adds `langgraph-checkpoint-mysql[pymysql]`, a real `PyMySQLSaver` provider path for `LANGGRAPH_CHECKPOINT_MODE=mysql`, and an explicit setup worker for saver-managed internal tables.
 
-P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts.
+P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts. P5-C adds a read-only checkpoint admin CLI for `graph_checkpoint_runs` and `graph_run_errors`; it is for debugging only and does not modify LangGraph saver tables.
 
 Current RAG limits:
 
@@ -131,6 +131,9 @@ MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test'
 PYTHONPATH=src uv run --group dev pytest tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py -q
 
 MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration/test_checkpoint_admin_mysql_smoke.py -q
+
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
 PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
 ```
 
@@ -142,7 +145,8 @@ Notes for local MySQL integration:
 - Verified on this machine on `2026-06-26`:
   - `tests/integration/test_mysql_checkpoint_persistence.py -q` -> `1 passed`
   - `tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py -q` -> `1 passed`
-  - `tests/integration -m mysql -q` -> `5 passed`
+  - `tests/integration/test_checkpoint_admin_mysql_smoke.py -q` -> `1 passed`
+  - `tests/integration -m mysql -q` -> `6 passed`
 
 Bootstrap Database
 ------------------
@@ -163,6 +167,25 @@ Set up LangGraph MySQL checkpoint tables explicitly:
 ```bash
 PYTHONPATH=src LANGGRAPH_CHECKPOINT_MODE=mysql uv run --group dev python -m app.workers.setup_langgraph_checkpoints
 ```
+
+Read-only checkpoint admin CLI:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.checkpoint_admin list-runs --conversation-id livechat:chat-1
+PYTHONPATH=src uv run --group dev python -m app.workers.checkpoint_admin show-run --run-id 123
+PYTHONPATH=src uv run --group dev python -m app.workers.checkpoint_admin latest --conversation-id livechat:chat-1
+PYTHONPATH=src uv run --group dev python -m app.workers.checkpoint_admin errors --conversation-id livechat:chat-1
+```
+
+Supported filters:
+
+- `--conversation-id`
+- `--graph-thread-id`
+- `--inbound-event-id`
+- `--created-after`
+- `--created-before`
+- `--status` for checkpoint-run queries
+- `--limit` for list commands
 
 Run Gateway with durable MySQL checkpoints:
 
@@ -223,4 +246,4 @@ Notes
 - `LANGGRAPH_CHECKPOINT_MODE=mysql` requires `langgraph-checkpoint-mysql[pymysql]`, successful saver setup, and a MySQL server version supported by the upstream saver.
 - `mysql_checkpoint_dsn` uses `mysql://user:password@host:port/database?charset=utf8mb4` with the password URL-encoded.
 - This project uses `PyMySQLSaver` for sync `graph.invoke(...)`; it does not switch GatewayService to async graph invocation in P5-B.
-- Interrupt/resume, checkpoint admin CLI, WebSocket/Webhook, vector/embedding/LLM, and real Telegram/backend integration remain out of scope.
+- Interrupt/resume, WebSocket/Webhook, vector/embedding/LLM, and real Telegram/backend integration remain out of scope.

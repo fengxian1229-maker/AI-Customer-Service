@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -37,22 +37,38 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-- validate real checkpoint persistence behavior against a disposable MySQL database before any interrupt/resume work
-- or separately design checkpoint debug/admin tooling without mixing it with ingress or RAG work
+- build checkpoint Web admin or richer debug UX on top of the new read-only CLI / repository boundary
+- or continue tightening FAQ-only lazy RAG retrieval without mixing it with ingress changes
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
 
-## Latest P5-B.2 Status
+## Latest P5-C Status
 
 - Added `tests/integration/test_mysql_checkpoint_persistence.py`
 - Added `tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py`
+- Added `tests/integration/test_checkpoint_admin_mysql_smoke.py`
 - `tests/integration/conftest.py` now allows `settings_from_dsn(..., **overrides)` so mysql integration tests can force:
   - `langgraph_checkpoint_mode="mysql"`
   - `langgraph_checkpoint_setup_on_start=False`
-- Both new tests require `MYSQL_TEST_DSN` / `DATABASE_URL` / `AI_CS_TEST_MYSQL_DSN` pointing to a disposable database whose name contains `test`
+- Added `src/app/workers/checkpoint_admin.py` with:
+  - `list-runs`
+  - `show-run`
+  - `latest`
+  - `errors`
+- Added repository query methods instead of letting the CLI assemble SQL directly:
+  - `GraphCheckpointRunRepository.list_runs(...)`
+  - `GraphCheckpointRunRepository.get_run(...)`
+  - `GraphCheckpointRunRepository.fetch_latest(...)`
+  - `GraphRunErrorRepository.list_errors(...)`
+- The admin CLI is read-only for `graph_checkpoint_runs` / `graph_run_errors` and never modifies LangGraph saver internal tables
+- `GraphState.signal_result` has been removed
+- `waiting_backend_classifier` no longer reads `state.signal_result`; it derives supplement/human-handoff signals from text and attachments directly
+- `src/app/prompts/intent_router.md` now matches the post-routing-cleanup boundary and no longer mentions `signal_result`
+- All mysql checkpoint tests still require `MYSQL_TEST_DSN` / `DATABASE_URL` / `AI_CS_TEST_MYSQL_DSN` pointing to a disposable database whose name contains `test`
 - New checkpoint persistence test bootstraps project SQL, calls real `PyMySQLSaver.setup()`, invokes a real graph, closes the provider, reopens a new provider, and verifies the same `thread_id` checkpoint can still be read
 - New gateway smoke test inserts one deterministic inbound event, runs `gateway_consumer.process_next_batch(... checkpoint_mode="mysql" ...)`, verifies `conversation_states` / `conversation_messages` / `outbound_messages` / `graph_checkpoint_runs`, then reopens a provider and verifies checkpoint readability again
+- New checkpoint admin mysql smoke test inserts one `graph_checkpoint_runs` row plus one `graph_run_errors` row into a disposable test schema, then verifies `list-runs` / `show-run` / `latest` / `errors` all return JSON-ready data
 - `tests/integration/conftest.py` now provisions a fresh per-test MySQL schema whose name still contains `test`, bootstraps it, and drops it after the run
 - The provisioned integration schema uses `utf8mb4_0900_ai_ci` on this MySQL 8.4 machine to avoid saver collation mismatches during real checkpoint reads
 - Added `scripts/setup_mysql_test_db.sh` to create the safe local base database `ai_customer_service_test` without writing credentials to Git
@@ -60,15 +76,17 @@ Recommended next task:
 ## Latest Verification Status
 
 - Ran `uv run --group dev pytest tests/unit -q`
-- Result: `234 passed`
+- Result: `237 passed`
 - Created local base database: `ai_customer_service_test`
 - DSN env used for verification: `MYSQL_TEST_DSN`
 - Ran `PYTHONPATH=src uv run --group dev pytest tests/integration/test_mysql_checkpoint_persistence.py -q`
 - Result: `1 passed`
 - Ran `PYTHONPATH=src uv run --group dev pytest tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py -q`
 - Result: `1 passed`
+- Ran `PYTHONPATH=src uv run --group dev pytest tests/integration/test_checkpoint_admin_mysql_smoke.py -q`
+- Result: `1 passed`
 - Ran `PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`
-- Result: `5 passed`
+- Result: `6 passed`
 - No mysql integration test was run against `livechat_ai`; test provisioning remains locked to database names containing `test`
 
 ## Recommended Commands For A Prepared MySQL Test DB
@@ -82,6 +100,9 @@ PYTHONPATH=src uv run --group dev pytest tests/integration/test_mysql_checkpoint
 
 MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
 PYTHONPATH=src uv run --group dev pytest tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py -q
+
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration/test_checkpoint_admin_mysql_smoke.py -q
 
 MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
 PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
@@ -119,6 +140,7 @@ Implemented:
 - `GraphCheckpointRunRepository` records checkpoint-mode run metadata without replacing `graph_run_errors`
 - `gateway_consumer` now creates and injects `GraphCheckpointRunRepository(pool)` through the existing provider boundary
 - `gateway_consumer` keeps the MySQL checkpointer alive for the whole batch and closes it afterward
+- `python -m app.workers.checkpoint_admin list-runs|show-run|latest|errors ...` provides a read-only JSON admin surface for checkpoint metadata and graph errors
 - `knowledge_documents` stores tenant/kb-scope KB documents for deterministic retrieval
 - `gateway_consumer` creates `KnowledgeDocumentRepository(pool)` and `RagService(...)`
 - `GatewayService` prefetches `rag_context` before `graph.invoke(...)`
@@ -141,7 +163,7 @@ TODO for later phases only:
 - Webhook receiver and signature verification
 - webhook registration docs
 - interrupt/resume
-- checkpoint admin/debug CLI
+- checkpoint debug/admin Web UI
 - vector RAG, embeddings, and LLM answer generation
 - knowledge-base web management UI
 - Telegram full handoff loop

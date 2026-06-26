@@ -264,6 +264,72 @@ async def run_graph_checkpoint_run_insert(rowcount: int):
     return result, cursor
 
 
+async def run_graph_checkpoint_run_list_filtered():
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 66,
+                    "conversation_id": "livechat:chat-1",
+                    "graph_thread_id": "livechat:chat-1",
+                    "checkpoint_mode": "mysql",
+                    "status": "FAILED",
+                    "inbound_event_id": 11,
+                    "latest_checkpoint_id": "cp-1",
+                    "error_type": "RuntimeError",
+                    "error_message": "boom",
+                    "metadata_json": '{"checkpoint_mode":"mysql","node_count":5}',
+                    "created_at": "2026-06-26 00:00:00.000000",
+                    "updated_at": "2026-06-26 00:00:10.000000",
+                }
+            ]
+
+    cursor = FetchCursor(rowcount=1)
+    repository = GraphCheckpointRunRepository(FakePool(cursor))
+    rows = await repository.list_runs(
+        conversation_id="livechat:chat-1",
+        graph_thread_id="livechat:chat-1",
+        inbound_event_id=11,
+        status="FAILED",
+        created_after="2026-06-25 00:00:00",
+        created_before="2026-06-27 00:00:00",
+        limit=5,
+    )
+    return rows, cursor
+
+
+async def run_graph_run_error_list_filtered():
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 77,
+                    "conversation_id": "livechat:chat-1",
+                    "inbound_event_id": 11,
+                    "graph_thread_id": "livechat:chat-1",
+                    "node_name": "intent_router_node",
+                    "error_type": "RuntimeError",
+                    "error_message": "boom",
+                    "retryable": 0,
+                    "state_snapshot": '{"conversation_id":"livechat:chat-1"}',
+                    "created_at": "2026-06-26 00:00:00.000000",
+                }
+            ]
+
+    cursor = FetchCursor(rowcount=1)
+    repository = GraphRunErrorRepository(FakePool(cursor))
+    rows = await repository.list_errors(
+        conversation_id="livechat:chat-1",
+        graph_thread_id="livechat:chat-1",
+        inbound_event_id=11,
+        status="FAILED",
+        created_after="2026-06-25 00:00:00",
+        created_before="2026-06-27 00:00:00",
+        limit=5,
+    )
+    return rows, cursor
+
+
 async def run_graph_run_error_fetch_retryable(limit: int = 20):
     class FetchCursor(FakeCursor):
         async def fetchall(self):
@@ -458,6 +524,52 @@ def test_graph_checkpoint_run_fetch_recent_filters_by_conversation_and_loads_met
     assert "WHERE conversation_id = %s" in cursor.sql
     assert cursor.args == ("livechat:chat-1", 20)
     assert rows[0]["metadata_json"] == {"checkpoint_mode": "memory", "node_count": 5}
+
+
+def test_graph_checkpoint_run_list_runs_supports_multi_filter_query():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_graph_checkpoint_run_list_filtered())
+
+    assert "FROM graph_checkpoint_runs" in cursor.sql
+    assert "conversation_id = %s" in cursor.sql
+    assert "graph_thread_id = %s" in cursor.sql
+    assert "inbound_event_id = %s" in cursor.sql
+    assert "status = %s" in cursor.sql
+    assert "created_at >= %s" in cursor.sql
+    assert "created_at <= %s" in cursor.sql
+    assert cursor.args == (
+        "livechat:chat-1",
+        "livechat:chat-1",
+        11,
+        "FAILED",
+        "2026-06-25 00:00:00",
+        "2026-06-27 00:00:00",
+        5,
+    )
+    assert rows[0]["metadata_json"] == {"checkpoint_mode": "mysql", "node_count": 5}
+
+
+def test_graph_run_error_list_errors_supports_multi_filter_query():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_graph_run_error_list_filtered())
+
+    assert "FROM graph_run_errors" in cursor.sql
+    assert "conversation_id = %s" in cursor.sql
+    assert "graph_thread_id = %s" in cursor.sql
+    assert "inbound_event_id = %s" in cursor.sql
+    assert "created_at >= %s" in cursor.sql
+    assert "created_at <= %s" in cursor.sql
+    assert cursor.args == (
+        "livechat:chat-1",
+        "livechat:chat-1",
+        11,
+        "2026-06-25 00:00:00",
+        "2026-06-27 00:00:00",
+        5,
+    )
+    assert rows[0]["state_snapshot"] == {"conversation_id": "livechat:chat-1"}
 
 
 def test_conversation_message_insert_idempotent_for_inbound_message():
