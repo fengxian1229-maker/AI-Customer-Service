@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from app.schemas.events import InboundEvent
 
 
@@ -88,7 +90,14 @@ def test_process_next_batch_continues_after_single_event_failure(monkeypatch):
     monkeypatch.setattr(gateway_consumer, "GraphCheckpointRunRepository", FakeCheckpointRunRepository)
     monkeypatch.setattr(gateway_consumer, "RagService", FakeRagService)
     monkeypatch.setattr(gateway_consumer, "GatewayService", FakeService)
-    monkeypatch.setattr(gateway_consumer, "build_checkpointer", lambda mode: None)
+    class FakeManagedCheckpointer:
+        def __init__(self) -> None:
+            self.checkpointer = None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(gateway_consumer, "build_checkpointer", lambda mode, settings=None: FakeManagedCheckpointer())
 
     results = asyncio.run(gateway_consumer.process_next_batch(pool=object(), limit=20))
 
@@ -149,9 +158,17 @@ def test_process_next_batch_passes_off_checkpointer_to_gateway_service(monkeypat
             calls["checkpoint_mode"] = checkpoint_mode
             calls["checkpoint_run_repository"] = checkpoint_run_repository
 
-    def fake_build_checkpointer(mode: str):
+    class FakeManagedCheckpointer:
+        def __init__(self) -> None:
+            self.checkpointer = None
+
+        def close(self) -> None:
+            return None
+
+    def fake_build_checkpointer(mode: str, settings=None):
         calls["mode"] = mode
-        return None
+        calls["settings"] = settings
+        return FakeManagedCheckpointer()
 
     monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
     monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
@@ -216,9 +233,19 @@ def test_process_next_batch_builds_memory_checkpointer(monkeypatch):
             calls["checkpoint_mode"] = checkpoint_mode
             calls["checkpoint_run_repository"] = checkpoint_run_repository
 
-    def fake_build_checkpointer(mode: str):
+    class FakeManagedCheckpointer:
+        def __init__(self, checkpointer) -> None:
+            self.checkpointer = checkpointer
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            calls["closed"] = True
+
+    def fake_build_checkpointer(mode: str, settings=None):
         calls["mode"] = mode
-        return fake_checkpointer
+        calls["settings"] = settings
+        return FakeManagedCheckpointer(fake_checkpointer)
 
     monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
     monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
@@ -235,4 +262,42 @@ def test_process_next_batch_builds_memory_checkpointer(monkeypatch):
     assert calls["checkpoint_pool"] is pool
     assert calls["checkpointer"] is fake_checkpointer
     assert calls["checkpoint_mode"] == "memory"
+    assert calls["closed"] is True
     assert isinstance(calls["checkpoint_run_repository"], FakeCheckpointRunRepository)
+
+
+def test_process_next_batch_mysql_provider_failure_does_not_fetch_inbound(monkeypatch):
+    from app.workers import gateway_consumer
+
+    class FakeInboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def fetch_unprocessed(self, limit: int = 20) -> list[dict]:
+            raise AssertionError("fetch_unprocessed should not be called")
+
+    class FakeTransactionalRepository:
+        def __init__(self, pool, inbound_repository=None) -> None:
+            self.pool = pool
+
+    class FakeKnowledgeRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+    class FakeCheckpointRunRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+    class FakeRagService:
+        def __init__(self, knowledge_repository=None) -> None:
+            self.knowledge_repository = knowledge_repository
+
+    monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
+    monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
+    monkeypatch.setattr(gateway_consumer, "KnowledgeDocumentRepository", FakeKnowledgeRepository)
+    monkeypatch.setattr(gateway_consumer, "GraphCheckpointRunRepository", FakeCheckpointRunRepository)
+    monkeypatch.setattr(gateway_consumer, "RagService", FakeRagService)
+    monkeypatch.setattr(gateway_consumer, "build_checkpointer", lambda mode, settings=None: (_ for _ in ()).throw(RuntimeError("mysql init failed")))
+
+    with pytest.raises(RuntimeError, match="mysql init failed"):
+        asyncio.run(gateway_consumer.process_next_batch(pool=object(), limit=20, checkpoint_mode="mysql", settings=object()))

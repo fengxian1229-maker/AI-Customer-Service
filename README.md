@@ -41,9 +41,9 @@ Checkpoint modes:
 
 - `off`: default, no checkpointer.
 - `memory`: local/dev/test only, uses LangGraph `InMemorySaver` and is not durable.
-- `mysql`: recognized but intentionally not enabled in P5-A; using it currently raises a clear configuration error.
+- `mysql`: explicit durable mode for LangGraph MySQL checkpoints. It must be configured intentionally and should only be used after saver setup succeeds.
 
-P3-B adds a checkpoint provider boundary and read-only graph debug helpers. P5-A adds durable checkpoint design, a checkpoint metadata schema, and a provider boundary that explicitly recognizes `off`, `memory`, and planned `mysql` modes. P5-A.1 wires checkpoint run metadata through `gateway_consumer -> GatewayService` using `GraphCheckpointRunRepository`. A real MySQL LangGraph saver is still not implemented in P5-A/P5-A.1.
+P3-B adds a checkpoint provider boundary and read-only graph debug helpers. P5-A adds durable checkpoint design, a checkpoint metadata schema, and a provider boundary that explicitly recognizes `off`, `memory`, and planned `mysql` modes. P5-A.1 wires checkpoint run metadata through `gateway_consumer -> GatewayService` using `GraphCheckpointRunRepository`. P5-B adds `langgraph-checkpoint-mysql[pymysql]`, a real `PyMySQLSaver` provider path for `LANGGRAPH_CHECKPOINT_MODE=mysql`, and an explicit setup worker for saver-managed internal tables.
 
 P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts.
 
@@ -124,7 +124,19 @@ Durable checkpoint design:
 - [docs/durable-checkpoint-storage-design.md](/Users/andy/ai-agent/docs/durable-checkpoint-storage-design.md)
 - `graph_checkpoint_runs` is metadata-only and does not replace `conversation_states`, `conversation_messages`, or `graph_run_errors`
 - `gateway_consumer` now creates and injects `GraphCheckpointRunRepository(pool)` for lightweight checkpoint-run metadata auditing
-- real MySQL LangGraph checkpoint persistence remains later work
+- LangGraph saver internal tables are created by saver `.setup()`, not by handwritten project SQL
+
+Set up LangGraph MySQL checkpoint tables explicitly:
+
+```bash
+PYTHONPATH=src LANGGRAPH_CHECKPOINT_MODE=mysql uv run --group dev python -m app.workers.setup_langgraph_checkpoints
+```
+
+Run Gateway with durable MySQL checkpoints:
+
+```bash
+PYTHONPATH=src LANGGRAPH_CHECKPOINT_MODE=mysql uv run --group dev python -m app.workers.gateway_consumer --once --limit 20
+```
 
 Poll LiveChat Once
 ------------------
@@ -176,4 +188,7 @@ Notes
 - Polling-first remains the only ingress in this stage. WebSocket/Webhook are later phases.
 - `LANGGRAPH_CHECKPOINT_MODE=off` remains the default runtime recommendation.
 - `LANGGRAPH_CHECKPOINT_MODE=memory` is only for local/dev/test.
-- `LANGGRAPH_CHECKPOINT_MODE=mysql` is not ready for smoke or production in P5-A.
+- `LANGGRAPH_CHECKPOINT_MODE=mysql` requires `langgraph-checkpoint-mysql[pymysql]`, successful saver setup, and a MySQL server version supported by the upstream saver.
+- `mysql_checkpoint_dsn` uses `mysql://user:password@host:port/database?charset=utf8mb4` with the password URL-encoded.
+- This project uses `PyMySQLSaver` for sync `graph.invoke(...)`; it does not switch GatewayService to async graph invocation in P5-B.
+- Interrupt/resume, checkpoint admin CLI, WebSocket/Webhook, vector/embedding/LLM, and real Telegram/backend integration remain out of scope.

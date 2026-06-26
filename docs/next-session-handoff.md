@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary that still fails fast instead of enabling a real MySQL saver. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -37,8 +37,8 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-- P5-B: implement a real MySQL LangGraph saver only after confirming the exact LangGraph saver schema and compatibility contract.
-- Or separately design checkpoint debug/admin tooling without mixing it with ingress or RAG work.
+- validate real checkpoint persistence behavior against a disposable MySQL database before any interrupt/resume work
+- or separately design checkpoint debug/admin tooling without mixing it with ingress or RAG work
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
@@ -65,12 +65,14 @@ Implemented:
 - `conversation_messages` for customer, assistant, and external summary history
 - LangGraph invoke config uses `configurable.thread_id = conversation_id`
 - `build_workflow_graph(checkpointer=...)` supports injecting a checkpointer without creating one internally
-- `LANGGRAPH_CHECKPOINT_MODE=off|memory|mysql` is recognized by the provider boundary
-- `mysql` currently raises a clear P5-A error instead of silently falling back
+- `LANGGRAPH_CHECKPOINT_MODE=off|memory|mysql` is supported by the provider boundary
+- `mysql` now uses `PyMySQLSaver` from `langgraph-checkpoint-mysql[pymysql]`
+- `python -m app.workers.setup_langgraph_checkpoints` runs saver `.setup()` explicitly
 - read-only graph debug helpers can fetch latest state and state history by `conversation_id`
 - `sql/011_graph_checkpoint_metadata.sql` adds project-owned `graph_checkpoint_runs` metadata
 - `GraphCheckpointRunRepository` records checkpoint-mode run metadata without replacing `graph_run_errors`
 - `gateway_consumer` now creates and injects `GraphCheckpointRunRepository(pool)` through the existing provider boundary
+- `gateway_consumer` keeps the MySQL checkpointer alive for the whole batch and closes it afterward
 - `knowledge_documents` stores tenant/kb-scope KB documents for deterministic retrieval
 - `gateway_consumer` creates `KnowledgeDocumentRepository(pool)` and `RagService(...)`
 - `GatewayService` prefetches `rag_context` before `graph.invoke(...)`
@@ -92,8 +94,7 @@ TODO for later phases only:
 - WebSocket RTM receiver
 - Webhook receiver and signature verification
 - webhook registration docs
-- durable LangGraph checkpoint store, checkpoint management, and interrupt/resume
-- MySQL checkpoint saver
+- interrupt/resume
 - checkpoint admin/debug CLI
 - vector RAG, embeddings, and LLM answer generation
 - knowledge-base web management UI

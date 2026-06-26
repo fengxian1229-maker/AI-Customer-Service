@@ -1,3 +1,5 @@
+from urllib.parse import quote_plus
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +25,7 @@ class Settings(BaseSettings):
     poll_limit: int = 20
     livechat_allowed_group_ids: str = ""
     langgraph_checkpoint_mode: str = "off"
+    langgraph_checkpoint_setup_on_start: bool = False
 
     @property
     def livechat_self_author_id_set(self) -> set[str]:
@@ -39,3 +42,11 @@ class Settings(BaseSettings):
             for item in self.livechat_allowed_group_ids.split(",")
             if item.strip()
         }
+
+    @property
+    def mysql_checkpoint_dsn(self) -> str:
+        password = quote_plus(self.mysql_password)
+        return (
+            f"mysql://{self.mysql_user}:{password}"
+            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}?charset=utf8mb4"
+        )

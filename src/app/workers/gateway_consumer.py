@@ -16,45 +16,48 @@ from app.services.gateway import GatewayService
 from app.services.rag import RagService
 
 
-async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off") -> dict:
+async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off", settings=None) -> dict:
     inbound_repository = InboundEventRepository(pool)
     transactional_repository = GatewayTransactionRepository(pool, inbound_repository=inbound_repository)
     knowledge_repository = KnowledgeDocumentRepository(pool)
     checkpoint_run_repository = GraphCheckpointRunRepository(pool)
     rag_service = RagService(knowledge_repository=knowledge_repository)
-    checkpointer = build_checkpointer(checkpoint_mode)
-    service = GatewayService(
-        transactional_repository=transactional_repository,
-        checkpointer=checkpointer,
-        checkpoint_mode=checkpoint_mode,
-        checkpoint_run_repository=checkpoint_run_repository,
-        rag_service=rag_service,
-    )
+    managed_checkpointer = build_checkpointer(checkpoint_mode, settings=settings)
+    try:
+        service = GatewayService(
+            transactional_repository=transactional_repository,
+            checkpointer=managed_checkpointer.checkpointer,
+            checkpoint_mode=checkpoint_mode,
+            checkpoint_run_repository=checkpoint_run_repository,
+            rag_service=rag_service,
+        )
 
-    results = []
-    failures = []
-    rows = await inbound_repository.fetch_unprocessed(limit=limit)
-    for row in rows:
-        inbound_event_id = row.pop("id")
-        event = InboundEvent(**row)
-        try:
-            results.append(await service.process_event(inbound_event_id, event))
-        except Exception as exc:
-            failures.append(
-                {
-                    "inbound_event_id": inbound_event_id,
-                    "event_id": event.event_id,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                }
-            )
-    return {
-        "results": results,
-        "failures": failures,
-        "processed": len(results),
-        "failed": len(failures),
-        "enqueued": sum(1 for result in results if result.get("outbound_message")),
-    }
+        results = []
+        failures = []
+        rows = await inbound_repository.fetch_unprocessed(limit=limit)
+        for row in rows:
+            inbound_event_id = row.pop("id")
+            event = InboundEvent(**row)
+            try:
+                results.append(await service.process_event(inbound_event_id, event))
+            except Exception as exc:
+                failures.append(
+                    {
+                        "inbound_event_id": inbound_event_id,
+                        "event_id": event.event_id,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
+        return {
+            "results": results,
+            "failures": failures,
+            "processed": len(results),
+            "failed": len(failures),
+            "enqueued": sum(1 for result in results if result.get("outbound_message")),
+        }
+    finally:
+        managed_checkpointer.close()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -75,6 +78,7 @@ async def run_once(limit: int) -> dict:
             pool,
             limit=limit,
             checkpoint_mode=settings.langgraph_checkpoint_mode,
+            settings=settings,
         )
         return {
             "worker": "gateway_consumer",

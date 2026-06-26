@@ -121,9 +121,10 @@ def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
         calls["settings"] = settings
         return FakePool()
 
-    async def fake_process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off"):
+    async def fake_process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off", settings=None):
         calls["limit"] = limit
         calls["checkpoint_mode"] = checkpoint_mode
+        calls["process_settings"] = settings
         return {
             "results": [{"outbound_message": {"id": 1}}],
             "failures": [],
@@ -149,6 +150,120 @@ def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
     assert result["processed"] == 1
     assert result["failed"] == 0
     assert result["enqueued"] == 1
+
+
+def test_setup_langgraph_checkpoints_skips_when_mode_is_off(monkeypatch):
+    import asyncio
+
+    from app.workers import setup_langgraph_checkpoints
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.langgraph_checkpoint_mode = "off"
+            self.langgraph_checkpoint_setup_on_start = False
+            self.mysql_password = "secret"
+            self.mysql_host = "127.0.0.1"
+            self.mysql_port = 3306
+            self.mysql_user = "root"
+            self.mysql_database = "livechat_ai"
+
+        @property
+        def mysql_checkpoint_dsn(self) -> str:
+            return "mysql://root:secret@127.0.0.1:3306/livechat_ai"
+
+    monkeypatch.setattr(setup_langgraph_checkpoints, "Settings", FakeSettings)
+
+    result = asyncio.run(setup_langgraph_checkpoints.run())
+
+    assert result["worker"] == "setup_langgraph_checkpoints"
+    assert result["checkpoint_mode"] == "off"
+    assert result["status"] == "skipped"
+    assert "secret" not in str(result)
+
+
+def test_setup_langgraph_checkpoints_mysql_calls_setup(monkeypatch):
+    import asyncio
+
+    from app.workers import setup_langgraph_checkpoints
+
+    calls = {"setup": 0, "closed": 0, "preflight": 0}
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.langgraph_checkpoint_mode = "mysql"
+            self.langgraph_checkpoint_setup_on_start = False
+            self.mysql_password = "secret"
+
+        @property
+        def mysql_checkpoint_dsn(self) -> str:
+            return "mysql://root:secret@127.0.0.1:3306/livechat_ai"
+
+    class FakeManagedCheckpointer:
+        def __init__(self) -> None:
+            self.checkpointer = self
+
+        def setup(self) -> None:
+            calls["setup"] += 1
+
+        def close(self) -> None:
+            calls["closed"] += 1
+
+    def fake_build_checkpointer(mode: str, settings=None):
+        calls["mode"] = mode
+        calls["settings"] = settings
+        return FakeManagedCheckpointer()
+
+    async def fake_preflight(settings):
+        calls["preflight"] += 1
+        return {"engine": "MySQL", "version": "8.0.36"}
+
+    monkeypatch.setattr(setup_langgraph_checkpoints, "Settings", FakeSettings)
+    monkeypatch.setattr(setup_langgraph_checkpoints, "build_checkpointer", fake_build_checkpointer)
+    monkeypatch.setattr(setup_langgraph_checkpoints, "check_mysql_checkpoint_version", fake_preflight)
+
+    result = asyncio.run(setup_langgraph_checkpoints.run())
+
+    assert result["checkpoint_mode"] == "mysql"
+    assert result["setup"] is True
+    assert result["status"] == "ok"
+    assert result["error_type"] is None
+    assert calls["preflight"] == 1
+    assert calls["setup"] == 1
+    assert calls["closed"] == 1
+    assert "secret" not in str(result)
+
+
+def test_setup_langgraph_checkpoints_returns_error_metadata(monkeypatch):
+    import asyncio
+
+    from app.workers import setup_langgraph_checkpoints
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.langgraph_checkpoint_mode = "mysql"
+            self.langgraph_checkpoint_setup_on_start = False
+            self.mysql_password = "topsecret"
+
+        @property
+        def mysql_checkpoint_dsn(self) -> str:
+            return "mysql://root:topsecret@127.0.0.1:3306/livechat_ai"
+
+    async def fake_preflight(settings):
+        return {"engine": "MySQL", "version": "8.0.36"}
+
+    def fake_build_checkpointer(mode: str, settings=None):
+        raise RuntimeError("setup failed")
+
+    monkeypatch.setattr(setup_langgraph_checkpoints, "Settings", FakeSettings)
+    monkeypatch.setattr(setup_langgraph_checkpoints, "build_checkpointer", fake_build_checkpointer)
+    monkeypatch.setattr(setup_langgraph_checkpoints, "check_mysql_checkpoint_version", fake_preflight)
+
+    result = asyncio.run(setup_langgraph_checkpoints.run())
+
+    assert result["status"] == "error"
+    assert result["error_type"] == "RuntimeError"
+    assert result["error_message"] == "setup failed"
+    assert "topsecret" not in str(result)
 
 
 def test_sender_cli_parser_accepts_once_and_limit():

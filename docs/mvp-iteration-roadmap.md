@@ -22,6 +22,12 @@ P5-A：durable checkpoint storage design + provider boundary + checkpoint metada
 P5-A.1：checkpoint metadata runtime wiring + repository boundary cleanup
 ```
 
+当前 P5-B 已完成：
+
+```text
+P5-B：real MySQL LangGraph checkpointer conservative integration
+```
+
 当前 RAG 仍明确不做：
 
 ```text
@@ -53,13 +59,12 @@ normal RAG path 不写 external_commands
 ```text
 LANGGRAPH_CHECKPOINT_MODE=off    默认
 LANGGRAPH_CHECKPOINT_MODE=memory 仅本地/dev/test
-LANGGRAPH_CHECKPOINT_MODE=mysql  当前仅可识别并明确报错，未启用真正 MySQL saver
+LANGGRAPH_CHECKPOINT_MODE=mysql  显式配置后可使用真实 PyMySQLSaver
 ```
 
 当前 durable checkpoint 仍未实现：
 
 ```text
-真正 durable MySQL saver
 interrupt/resume
 checkpoint admin CLI / Web 管理工具
 ```

@@ -10,6 +10,21 @@ def test_settings_defaults():
     assert settings.livechat_api_base == "https://api.livechatinc.com/v3.6"
     assert settings.poll_seconds == 5
     assert settings.mysql_port == 3306
+    assert settings.langgraph_checkpoint_setup_on_start is False
+
+
+def test_settings_mysql_checkpoint_dsn_url_encodes_password():
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        mysql_user="user",
+        mysql_password="p@ss word",
+        mysql_host="db.internal",
+        mysql_port=3307,
+        mysql_database="livechat_ai",
+    )
+
+    assert settings.mysql_checkpoint_dsn == "mysql://user:p%40ss+word@db.internal:3307/livechat_ai?charset=utf8mb4"
 
 
 def test_build_app_has_health_route():
