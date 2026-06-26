@@ -39,6 +39,7 @@ def test_load_sql_files_in_order():
             "008_graph_run_errors.sql",
             "009_conversation_messages.sql",
             "010_knowledge_documents.sql",
+            "011_graph_checkpoint_metadata.sql",
         ]
 
 
@@ -129,6 +130,21 @@ def test_knowledge_documents_schema_has_required_indexes():
     assert "UNIQUE KEY uk_knowledge_documents_tenant_scope_title" in sql
     assert "KEY idx_knowledge_documents_tenant_enabled_priority" in sql
     assert "KEY idx_knowledge_documents_scope" in sql
+
+
+def test_graph_checkpoint_runs_schema_has_required_indexes():
+    from pathlib import Path
+
+    sql = Path("sql/011_graph_checkpoint_metadata.sql").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS graph_checkpoint_runs" in sql
+    assert "checkpoint_mode VARCHAR(32) NOT NULL" in sql
+    assert "latest_checkpoint_id VARCHAR(255) NULL" in sql
+    assert "metadata_json JSON NULL" in sql
+    assert "KEY idx_graph_checkpoint_runs_conversation_created" in sql
+    assert "KEY idx_graph_checkpoint_runs_thread_created" in sql
+    assert "KEY idx_graph_checkpoint_runs_status_created" in sql
+    assert "KEY idx_graph_checkpoint_runs_inbound_event" in sql
 
 
 def test_bootstrap_adds_missing_workflow_stage_for_mysql():
@@ -353,6 +369,85 @@ def test_graph_run_errors_bootstrap_keeps_existing_sqlite_columns_and_indexes():
     asyncio.run(ensure_graph_run_errors_compat(cursor))
 
     assert not any(sql.startswith("ALTER TABLE graph_run_errors ADD COLUMN") for sql in cursor.executed)
+    assert not any(sql.startswith("CREATE INDEX") for sql in cursor.executed)
+
+
+def test_graph_checkpoint_runs_bootstrap_adds_missing_mysql_columns_and_indexes():
+    import asyncio
+
+    from app.db.bootstrap import ensure_graph_checkpoint_runs_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+            self.phase = "columns"
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+            if sql == "SHOW INDEX FROM graph_checkpoint_runs":
+                self.phase = "indexes"
+
+        async def fetchall(self):
+            if self.phase == "indexes":
+                return [("graph_checkpoint_runs", 0, "idx_graph_checkpoint_runs_inbound_event")]
+            return [("id",), ("conversation_id",), ("graph_thread_id",), ("checkpoint_mode",), ("status",), ("created_at",)]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_graph_checkpoint_runs_compat(cursor))
+
+    assert any("ALTER TABLE graph_checkpoint_runs ADD COLUMN latest_checkpoint_id VARCHAR(255) NULL" == sql for sql in cursor.executed)
+    assert any("ALTER TABLE graph_checkpoint_runs ADD COLUMN metadata_json JSON NULL" == sql for sql in cursor.executed)
+    assert any("idx_graph_checkpoint_runs_conversation_created" in sql for sql in cursor.executed)
+    assert any("idx_graph_checkpoint_runs_thread_created" in sql for sql in cursor.executed)
+    assert any("idx_graph_checkpoint_runs_status_created" in sql for sql in cursor.executed)
+
+
+def test_graph_checkpoint_runs_bootstrap_keeps_existing_sqlite_columns_and_indexes():
+    import asyncio
+
+    from app.db.bootstrap import ensure_graph_checkpoint_runs_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed = []
+            self.phase = "columns"
+
+        async def execute(self, sql):
+            self.executed.append(sql)
+            if sql.startswith("SHOW"):
+                raise RuntimeError("sqlite")
+            if sql.startswith("PRAGMA index_list"):
+                self.phase = "indexes"
+
+        async def fetchall(self):
+            if self.phase == "indexes":
+                return [
+                    (0, "idx_graph_checkpoint_runs_conversation_created", 0),
+                    (1, "idx_graph_checkpoint_runs_thread_created", 0),
+                    (2, "idx_graph_checkpoint_runs_status_created", 0),
+                    (3, "idx_graph_checkpoint_runs_inbound_event", 0),
+                ]
+            return [
+                (0, "id"),
+                (1, "conversation_id"),
+                (2, "graph_thread_id"),
+                (3, "checkpoint_mode"),
+                (4, "status"),
+                (5, "inbound_event_id"),
+                (6, "latest_checkpoint_id"),
+                (7, "error_type"),
+                (8, "error_message"),
+                (9, "metadata_json"),
+                (10, "created_at"),
+                (11, "updated_at"),
+            ]
+
+    cursor = FakeCursor()
+
+    asyncio.run(ensure_graph_checkpoint_runs_compat(cursor))
+
+    assert not any(sql.startswith("ALTER TABLE graph_checkpoint_runs ADD COLUMN") for sql in cursor.executed)
     assert not any(sql.startswith("CREATE INDEX") for sql in cursor.executed)
 
 

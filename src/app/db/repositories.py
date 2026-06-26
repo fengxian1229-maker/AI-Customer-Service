@@ -913,6 +913,79 @@ class GraphRunErrorRepository:
             row["state_snapshot"] = json_loads(row["state_snapshot"])
         return rows
 
+
+class GraphCheckpointRunRepository:
+    def __init__(self, pool) -> None:
+        self.pool = pool
+
+    async def insert_run(self, record: dict) -> int:
+        sql = """
+        INSERT INTO graph_checkpoint_runs (
+          conversation_id, graph_thread_id, checkpoint_mode, status,
+          inbound_event_id, latest_checkpoint_id, metadata_json
+        ) VALUES (%s, %s, %s, %s, %s, %s, CAST(%s AS JSON))
+        """
+        args = (
+            record["conversation_id"],
+            record["graph_thread_id"],
+            record["checkpoint_mode"],
+            record.get("status") or "CREATED",
+            record.get("inbound_event_id"),
+            record.get("latest_checkpoint_id"),
+            json_dumps(_sanitize_checkpoint_metadata(record.get("metadata_json") or {})),
+        )
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, args)
+                return cur.lastrowid
+
+    async def mark_succeeded(self, run_id: int, latest_checkpoint_id: str | None = None) -> None:
+        sql = """
+        UPDATE graph_checkpoint_runs
+        SET status = 'SUCCEEDED',
+            latest_checkpoint_id = %s,
+            error_type = NULL,
+            error_message = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (latest_checkpoint_id, run_id))
+
+    async def mark_failed(self, run_id: int, error: Exception | str) -> None:
+        error_type = type(error).__name__ if isinstance(error, Exception) else "RuntimeError"
+        error_message = str(error)
+        sql = """
+        UPDATE graph_checkpoint_runs
+        SET status = 'FAILED',
+            error_type = %s,
+            error_message = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (error_type, error_message, run_id))
+
+    async def fetch_recent(self, conversation_id: str, limit: int = 20) -> list[dict]:
+        sql = """
+        SELECT id, conversation_id, graph_thread_id, checkpoint_mode, status,
+               inbound_event_id, latest_checkpoint_id, error_type, error_message,
+               metadata_json, created_at, updated_at
+        FROM graph_checkpoint_runs
+        WHERE conversation_id = %s
+        ORDER BY created_at DESC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (conversation_id, limit))
+                rows = await cur.fetchall()
+        for row in rows:
+            row["metadata_json"] = json_loads(row.get("metadata_json") or "{}")
+        return rows
+
     async def fetch_retryable(self, limit: int = 20) -> list[dict]:
         sql = """
         SELECT id, conversation_id, inbound_event_id, graph_thread_id, node_name,
@@ -1025,13 +1098,27 @@ class SenderTransactionRepository:
 
 
 def json_dumps(payload: dict) -> str:
-    return json.dumps(payload, ensure_ascii=False)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def json_loads(payload) -> dict:
     if isinstance(payload, str):
         return json.loads(payload)
     return payload
+
+
+def _sanitize_checkpoint_metadata(metadata: dict) -> dict:
+    sensitive_tokens = ("token", "access_token", "secret", "api_key", "password")
+    sanitized = {}
+    for key, value in metadata.items():
+        lowered = str(key).lower()
+        if any(token in lowered for token in sensitive_tokens):
+            continue
+        if isinstance(value, str):
+            sanitized[key] = value[:500]
+        else:
+            sanitized[key] = value
+    return sanitized
 
 
 def build_external_command_dedup_key(

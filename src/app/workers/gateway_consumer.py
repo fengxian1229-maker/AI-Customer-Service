@@ -20,6 +20,7 @@ async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off"
     service = GatewayService(
         transactional_repository=transactional_repository,
         checkpointer=checkpointer,
+        checkpoint_mode=checkpoint_mode,
         rag_service=rag_service,
     )
 

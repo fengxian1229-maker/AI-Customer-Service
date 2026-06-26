@@ -41,8 +41,9 @@ Checkpoint modes:
 
 - `off`: default, no checkpointer.
 - `memory`: local/dev/test only, uses LangGraph `InMemorySaver` and is not durable.
+- `mysql`: recognized but intentionally not enabled in P5-A; using it currently raises a clear configuration error.
 
-P3-B adds a checkpoint provider boundary and read-only graph debug helpers. Durable MySQL checkpoint storage, checkpoint tables, and interrupt/resume are not implemented.
+P3-B adds a checkpoint provider boundary and read-only graph debug helpers. P5-A adds durable checkpoint design, a checkpoint metadata schema, and a provider boundary that explicitly recognizes `off`, `memory`, and planned `mysql` modes. A real MySQL LangGraph saver is still not implemented in P5-A.
 
 P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts.
 
@@ -118,6 +119,12 @@ Bootstrap Database
 PYTHONPATH=src uv run --group dev python -m app.workers.bootstrap_db
 ```
 
+Durable checkpoint design:
+
+- [docs/durable-checkpoint-storage-design.md](/Users/andy/ai-agent/docs/durable-checkpoint-storage-design.md)
+- `graph_checkpoint_runs` is metadata-only and does not replace `conversation_states`, `conversation_messages`, or `graph_run_errors`
+- real MySQL LangGraph checkpoint persistence remains later work
+
 Poll LiveChat Once
 ------------------
 
@@ -166,3 +173,6 @@ Notes
 - The current polling receiver requires explicit `--groups` or `LIVECHAT_ALLOWED_GROUP_IDS`; do not run broad all-group polling.
 - `get_chat` is used when available. If LiveChat returns a permission error, the receiver falls back to `list_chats.last_event_per_type`.
 - Polling-first remains the only ingress in this stage. WebSocket/Webhook are later phases.
+- `LANGGRAPH_CHECKPOINT_MODE=off` remains the default runtime recommendation.
+- `LANGGRAPH_CHECKPOINT_MODE=memory` is only for local/dev/test.
+- `LANGGRAPH_CHECKPOINT_MODE=mysql` is not ready for smoke or production in P5-A.

@@ -10,6 +10,12 @@
 P4-C：tenant/kb_scope knowledge management + deterministic ranking v1
 ```
 
+当前 P5-A 已完成：
+
+```text
+P5-A：durable checkpoint storage design + provider boundary + checkpoint metadata schema
+```
+
 当前 RAG 仍明确不做：
 
 ```text
@@ -34,6 +40,22 @@ backend_fact 不查 knowledge repository
 backend_fact 不编造后台事实
 normal RAG path 不生成 RAG_PLACEHOLDER
 normal RAG path 不写 external_commands
+```
+
+当前 checkpoint 状态：
+
+```text
+LANGGRAPH_CHECKPOINT_MODE=off    默认
+LANGGRAPH_CHECKPOINT_MODE=memory 仅本地/dev/test
+LANGGRAPH_CHECKPOINT_MODE=mysql  当前仅可识别并明确报错，未启用真正 MySQL saver
+```
+
+当前 durable checkpoint 仍未实现：
+
+```text
+真正 durable MySQL saver
+interrupt/resume
+checkpoint admin CLI / Web 管理工具
 ```
 
 本文档重点说明：哪些能力当前应该做，哪些能力后续再做，避免在 MVP 阶段过早开发复杂抽象，也避免把后续必须抽象的设计写死在代码中。

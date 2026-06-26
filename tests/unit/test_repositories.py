@@ -3,6 +3,7 @@ from app.db.repositories import (
     ExternalCommandRepository,
     ExternalCommandResultRepository,
     ExternalResultTransactionRepository,
+    GraphCheckpointRunRepository,
     GraphRunErrorRepository,
     InboundEventRepository,
     KnowledgeDocumentRepository,
@@ -203,6 +204,24 @@ async def run_graph_run_error_insert(rowcount: int):
     return result, cursor
 
 
+async def run_graph_checkpoint_run_insert(rowcount: int):
+    cursor = FakeCursor(rowcount=rowcount)
+    cursor.lastrowid = 66
+    repository = GraphCheckpointRunRepository(FakePool(cursor))
+    result = await repository.insert_run(
+        {
+            "conversation_id": "livechat:chat-1",
+            "graph_thread_id": "livechat:chat-1",
+            "checkpoint_mode": "memory",
+            "status": "CREATED",
+            "inbound_event_id": 11,
+            "latest_checkpoint_id": None,
+            "metadata_json": {"checkpoint_mode": "memory", "node_count": 5, "api_key": "skip-me"},
+        }
+    )
+    return result, cursor
+
+
 def make_conversation_message(**overrides) -> dict:
     base = {
         "conversation_id": "livechat:chat-1",
@@ -287,6 +306,79 @@ def test_graph_run_error_insert_writes_json_snapshot():
     assert cursor.args[6] == 0
     assert cursor.args[7] == '{"conversation_id":"livechat:chat-1"}'
     assert result == 77
+
+
+def test_graph_checkpoint_run_insert_writes_json_metadata():
+    import asyncio
+
+    result, cursor = asyncio.run(run_graph_checkpoint_run_insert(rowcount=1))
+
+    assert "INSERT INTO graph_checkpoint_runs" in cursor.sql
+    assert "metadata_json" in cursor.sql
+    assert cursor.args[0] == "livechat:chat-1"
+    assert cursor.args[2] == "memory"
+    assert cursor.args[5] is None
+    assert cursor.args[6] == '{"checkpoint_mode":"memory","node_count":5}'
+    assert result == 66
+
+
+def test_graph_checkpoint_run_mark_succeeded_updates_status_and_checkpoint_id():
+    import asyncio
+
+    cursor = FakeCursor(rowcount=1)
+    repository = GraphCheckpointRunRepository(FakePool(cursor))
+
+    asyncio.run(repository.mark_succeeded(66, latest_checkpoint_id="cp-1"))
+
+    assert "UPDATE graph_checkpoint_runs" in cursor.sql
+    assert "SET status = 'SUCCEEDED'" in cursor.sql
+    assert cursor.args == ("cp-1", 66)
+
+
+def test_graph_checkpoint_run_mark_failed_writes_error_fields():
+    import asyncio
+
+    cursor = FakeCursor(rowcount=1)
+    repository = GraphCheckpointRunRepository(FakePool(cursor))
+
+    asyncio.run(repository.mark_failed(66, RuntimeError("checkpoint failed")))
+
+    assert "UPDATE graph_checkpoint_runs" in cursor.sql
+    assert "SET status = 'FAILED'" in cursor.sql
+    assert cursor.args == ("RuntimeError", "checkpoint failed", 66)
+
+
+def test_graph_checkpoint_run_fetch_recent_filters_by_conversation_and_loads_metadata():
+    import asyncio
+
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 66,
+                    "conversation_id": "livechat:chat-1",
+                    "graph_thread_id": "livechat:chat-1",
+                    "checkpoint_mode": "memory",
+                    "status": "SUCCEEDED",
+                    "inbound_event_id": 11,
+                    "latest_checkpoint_id": "cp-1",
+                    "error_type": None,
+                    "error_message": None,
+                    "metadata_json": '{"checkpoint_mode":"memory","node_count":5}',
+                    "created_at": "2026-06-26 00:00:00.000000",
+                    "updated_at": "2026-06-26 00:00:00",
+                }
+            ]
+
+    cursor = FetchCursor(rowcount=1)
+    repository = GraphCheckpointRunRepository(FakePool(cursor))
+
+    rows = asyncio.run(repository.fetch_recent("livechat:chat-1", limit=20))
+
+    assert "FROM graph_checkpoint_runs" in cursor.sql
+    assert "WHERE conversation_id = %s" in cursor.sql
+    assert cursor.args == ("livechat:chat-1", 20)
+    assert rows[0]["metadata_json"] == {"checkpoint_mode": "memory", "node_count": 5}
 
 
 def test_conversation_message_insert_idempotent_for_inbound_message():

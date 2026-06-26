@@ -40,9 +40,11 @@ class GatewayService:
         external_command_repository=None,
         message_repository=None,
         graph_run_error_repository=None,
+        checkpoint_run_repository=None,
         transactional_repository=None,
         workflow_graph=None,
         checkpointer=None,
+        checkpoint_mode: str = "off",
         rag_service=None,
         recent_message_limit: int = 10,
     ) -> None:
@@ -59,6 +61,8 @@ class GatewayService:
             or (ConversationMessageRepository(pool) if pool else None)
         )
         self.graph_run_error_repository = graph_run_error_repository or (GraphRunErrorRepository(pool) if pool else None)
+        self.checkpoint_run_repository = checkpoint_run_repository
+        self.checkpoint_mode = checkpoint_mode
         self.rag_service = rag_service
         self.recent_message_limit = recent_message_limit
 
@@ -143,14 +147,22 @@ class GatewayService:
     ) -> dict:
         graph_state = build_graph_state_from_event(event, conversation, recent_messages=recent_messages)
         graph_thread_id = conversation["conversation_id"]
+        checkpoint_run_id = await self._create_checkpoint_run_metadata(
+            inbound_event_id=inbound_event_id,
+            conversation=conversation,
+            graph_thread_id=graph_thread_id,
+        )
         try:
             if self.rag_service:
                 graph_state["rag_context"] = await self.rag_service.retrieve(graph_state)
-            return self.workflow_graph.invoke(
+            result = self.workflow_graph.invoke(
                 graph_state,
                 config={"configurable": {"thread_id": graph_thread_id}},
             )
+            await self._mark_checkpoint_run_succeeded(checkpoint_run_id)
+            return result
         except Exception as exc:
+            await self._mark_checkpoint_run_failed(checkpoint_run_id, exc)
             await self._record_graph_run_error(
                 inbound_event_id=inbound_event_id,
                 conversation=conversation,
@@ -159,6 +171,49 @@ class GatewayService:
                 error=exc,
             )
             raise
+
+    async def _create_checkpoint_run_metadata(
+        self,
+        inbound_event_id: int,
+        conversation: dict,
+        graph_thread_id: str,
+    ) -> int | None:
+        if not self.checkpoint_run_repository:
+            return None
+        try:
+            return await self.checkpoint_run_repository.insert_run(
+                {
+                    "conversation_id": conversation.get("conversation_id") or graph_thread_id,
+                    "graph_thread_id": graph_thread_id,
+                    "checkpoint_mode": self.checkpoint_mode,
+                    "status": "CREATED",
+                    "inbound_event_id": inbound_event_id,
+                    "latest_checkpoint_id": None,
+                    "metadata_json": {
+                        "checkpoint_mode": self.checkpoint_mode,
+                        "config_summary": {"thread_id": graph_thread_id},
+                        "recent_message_limit": self.recent_message_limit,
+                    },
+                }
+            )
+        except Exception:
+            return None
+
+    async def _mark_checkpoint_run_succeeded(self, checkpoint_run_id: int | None) -> None:
+        if not self.checkpoint_run_repository or checkpoint_run_id is None:
+            return
+        try:
+            await self.checkpoint_run_repository.mark_succeeded(checkpoint_run_id, latest_checkpoint_id=None)
+        except Exception:
+            return
+
+    async def _mark_checkpoint_run_failed(self, checkpoint_run_id: int | None, error: Exception) -> None:
+        if not self.checkpoint_run_repository or checkpoint_run_id is None:
+            return
+        try:
+            await self.checkpoint_run_repository.mark_failed(checkpoint_run_id, error)
+        except Exception:
+            return
 
     async def _load_recent_messages(self, conversation: dict) -> list[dict]:
         if not self.message_repository:

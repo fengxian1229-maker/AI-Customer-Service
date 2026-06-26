@@ -55,10 +55,11 @@ def test_process_next_batch_continues_after_single_event_failure(monkeypatch):
             self.knowledge_repository = knowledge_repository
 
     class FakeService:
-        def __init__(self, transactional_repository=None, checkpointer=None, rag_service=None) -> None:
+        def __init__(self, transactional_repository=None, checkpointer=None, rag_service=None, checkpoint_mode="off") -> None:
             self.transactional_repository = transactional_repository
             self.checkpointer = checkpointer
             self.rag_service = rag_service
+            self.checkpoint_mode = checkpoint_mode
 
         async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
             calls.append((inbound_event_id, event.event_id))
@@ -118,9 +119,10 @@ def test_process_next_batch_passes_off_checkpointer_to_gateway_service(monkeypat
             calls["knowledge_repository"] = knowledge_repository
 
     class FakeService:
-        def __init__(self, transactional_repository=None, checkpointer=None, rag_service=None) -> None:
+        def __init__(self, transactional_repository=None, checkpointer=None, rag_service=None, checkpoint_mode="off") -> None:
             calls["checkpointer"] = checkpointer
             calls["rag_service"] = rag_service
+            calls["checkpoint_mode"] = checkpoint_mode
 
     def fake_build_checkpointer(mode: str):
         calls["mode"] = mode
@@ -137,6 +139,7 @@ def test_process_next_batch_passes_off_checkpointer_to_gateway_service(monkeypat
 
     assert calls["mode"] == "off"
     assert calls["checkpointer"] is None
+    assert calls["checkpoint_mode"] == "off"
     assert calls["knowledge_pool"] is not None
     assert isinstance(calls["rag_service"], FakeRagService)
     assert isinstance(calls["knowledge_repository"], FakeKnowledgeRepository)
@@ -169,8 +172,9 @@ def test_process_next_batch_builds_memory_checkpointer(monkeypatch):
             self.knowledge_repository = knowledge_repository
 
     class FakeService:
-        def __init__(self, transactional_repository=None, checkpointer=None, rag_service=None) -> None:
+        def __init__(self, transactional_repository=None, checkpointer=None, rag_service=None, checkpoint_mode="off") -> None:
             calls["checkpointer"] = checkpointer
+            calls["checkpoint_mode"] = checkpoint_mode
 
     def fake_build_checkpointer(mode: str):
         calls["mode"] = mode
@@ -185,4 +189,4 @@ def test_process_next_batch_builds_memory_checkpointer(monkeypatch):
 
     asyncio.run(gateway_consumer.process_next_batch(pool=object(), limit=20, checkpoint_mode="memory"))
 
-    assert calls == {"mode": "memory", "checkpointer": fake_checkpointer}
+    assert calls == {"mode": "memory", "checkpointer": fake_checkpointer, "checkpoint_mode": "memory"}

@@ -110,6 +110,29 @@ class FakeConversationMessageRepository:
         return {"inserted": True, "duplicate": False, "id": len(self.inserted)}
 
 
+class FakeCheckpointRunRepository:
+    def __init__(self, fail_on_insert: bool = False, fail_on_mark: bool = False) -> None:
+        self.fail_on_insert = fail_on_insert
+        self.fail_on_mark = fail_on_mark
+        self.inserted = []
+        self.succeeded = []
+        self.failed = []
+
+    async def insert_run(self, record: dict) -> int:
+        if self.fail_on_insert:
+            raise RuntimeError("checkpoint metadata insert failed")
+        self.inserted.append(record)
+        return 91
+
+    async def mark_succeeded(self, run_id: int, latest_checkpoint_id: str | None = None) -> None:
+        if self.fail_on_mark:
+            raise RuntimeError("checkpoint metadata success failed")
+        self.succeeded.append((run_id, latest_checkpoint_id))
+
+    async def mark_failed(self, run_id: int, error) -> None:
+        self.failed.append((run_id, type(error).__name__, str(error)))
+
+
 class FakeRagService:
     def __init__(self, context=None, error: Exception | None = None) -> None:
         self.context = context or {
@@ -295,6 +318,63 @@ def test_gateway_service_invokes_graph_with_conversation_thread_config():
     assert config == {"configurable": {"thread_id": "livechat:chat-1"}}
     assert state["thread_id"] == "thread-1"
     assert result["graph_state"]["thread_id"] == "thread-1"
+    assert result["outbound_message"]["payload_json"]["text"] == "ok"
+
+
+def test_gateway_service_records_checkpoint_run_metadata_without_breaking_main_flow():
+    checkpoint_repository = FakeCheckpointRunRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=RecordingGraph(),
+        checkpoint_run_repository=checkpoint_repository,
+    )
+
+    result = asyncio.run(service.process_event(11, make_inbound_event()))
+
+    assert result["outbound_message"]["payload_json"]["text"] == "ok"
+    assert checkpoint_repository.inserted[0]["conversation_id"] == "livechat:chat-1"
+    assert checkpoint_repository.inserted[0]["checkpoint_mode"] == "off"
+    assert checkpoint_repository.succeeded == [(91, None)]
+
+
+def test_gateway_service_marks_checkpoint_run_failed_when_graph_invoke_fails():
+    checkpoint_repository = FakeCheckpointRunRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        graph_run_error_repository=FakeGraphRunErrorRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=ExplodingGraph(RuntimeError("graph exploded")),
+        checkpoint_run_repository=checkpoint_repository,
+    )
+
+    try:
+        asyncio.run(service.process_event(11, make_inbound_event()))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected graph invoke to fail")
+
+    assert checkpoint_repository.failed == [(91, "RuntimeError", "graph exploded")]
+
+
+def test_gateway_service_ignores_checkpoint_metadata_insert_failures():
+    checkpoint_repository = FakeCheckpointRunRepository(fail_on_insert=True)
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=RecordingGraph(),
+        checkpoint_run_repository=checkpoint_repository,
+    )
+
+    result = asyncio.run(service.process_event(11, make_inbound_event()))
+
     assert result["outbound_message"]["payload_json"]["text"] == "ok"
 
 

@@ -22,6 +22,7 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
             await ensure_graph_run_errors_compat(cur)
             await ensure_conversation_messages_compat(cur)
             await ensure_knowledge_documents_compat(cur)
+            await ensure_graph_checkpoint_runs_compat(cur)
 
 
 async def ensure_inbound_events_compat(cur) -> None:
@@ -232,6 +233,54 @@ async def ensure_knowledge_documents_compat(cur) -> None:
             "idx_knowledge_documents_scope": (
                 "CREATE INDEX idx_knowledge_documents_scope "
                 "ON knowledge_documents (tenant_id, kb_scope, enabled)"
+            ),
+        },
+    )
+
+
+async def ensure_graph_checkpoint_runs_compat(cur) -> None:
+    await ensure_columns(
+        cur,
+        "graph_checkpoint_runs",
+        {
+            "conversation_id": "ALTER TABLE graph_checkpoint_runs ADD COLUMN conversation_id VARCHAR(128) NOT NULL",
+            "graph_thread_id": "ALTER TABLE graph_checkpoint_runs ADD COLUMN graph_thread_id VARCHAR(128) NOT NULL",
+            "checkpoint_mode": "ALTER TABLE graph_checkpoint_runs ADD COLUMN checkpoint_mode VARCHAR(32) NOT NULL",
+            "status": "ALTER TABLE graph_checkpoint_runs ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'CREATED'",
+            "inbound_event_id": "ALTER TABLE graph_checkpoint_runs ADD COLUMN inbound_event_id BIGINT UNSIGNED NULL",
+            "latest_checkpoint_id": "ALTER TABLE graph_checkpoint_runs ADD COLUMN latest_checkpoint_id VARCHAR(255) NULL",
+            "error_type": "ALTER TABLE graph_checkpoint_runs ADD COLUMN error_type VARCHAR(128) NULL",
+            "error_message": "ALTER TABLE graph_checkpoint_runs ADD COLUMN error_message TEXT NULL",
+            "metadata_json": "ALTER TABLE graph_checkpoint_runs ADD COLUMN metadata_json JSON NULL",
+            "created_at": (
+                "ALTER TABLE graph_checkpoint_runs "
+                "ADD COLUMN created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"
+            ),
+            "updated_at": (
+                "ALTER TABLE graph_checkpoint_runs "
+                "ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+            ),
+        },
+    )
+    await ensure_indexes(
+        cur,
+        "graph_checkpoint_runs",
+        {
+            "idx_graph_checkpoint_runs_conversation_created": (
+                "CREATE INDEX idx_graph_checkpoint_runs_conversation_created "
+                "ON graph_checkpoint_runs (conversation_id, created_at)"
+            ),
+            "idx_graph_checkpoint_runs_thread_created": (
+                "CREATE INDEX idx_graph_checkpoint_runs_thread_created "
+                "ON graph_checkpoint_runs (graph_thread_id, created_at)"
+            ),
+            "idx_graph_checkpoint_runs_status_created": (
+                "CREATE INDEX idx_graph_checkpoint_runs_status_created "
+                "ON graph_checkpoint_runs (status, created_at)"
+            ),
+            "idx_graph_checkpoint_runs_inbound_event": (
+                "CREATE INDEX idx_graph_checkpoint_runs_inbound_event "
+                "ON graph_checkpoint_runs (inbound_event_id)"
             ),
         },
     )
