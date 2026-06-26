@@ -1,6 +1,6 @@
 # AI Customer Service MVP Next Session Handoff
 
-Date: 2026-06-24
+Date: 2026-06-26
 Repository: `https://github.com/fengxian1229-maker/AI-Customer-Service.git`
 Local path: `/Users/andy/ai-agent`
 
@@ -18,15 +18,17 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection; normal FAQ/RAG answers no longer emit `external_commands`.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
 - Do not use broad all-group polling.
 - Do not send direct replies outside the outbox/sender worker except for explicit smoke tests.
 - Do not let LLM/RAG decide payment, withdrawal, account, turnover, or backend facts.
+- Backend-fact questions must return a safe fallback and must not query `knowledge_documents`.
 - Keep all facts from deterministic code, LiveChat, Telegram staff, backend API, or stored state.
 - Keep `.env` out of Git.
+- Normal FAQ/RAG path must only emit `livechat.send_text`; do not emit `RAG_PLACEHOLDER` or write `external_commands`.
 
 Before coding:
 1. Inspect the latest local files.
@@ -35,10 +37,9 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-- P4-C / later:
-- improve knowledge ranking and tenant-scoped KB management without adding vector DB or LLM generation yet
-- design durable checkpoint storage separately before adding a MySQL checkpoint store
-- keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change
+- Design the next post-P4-C slice, likely durable checkpoint storage or receiver staging, as a separate change.
+- Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
+- Do not add vector DB, embeddings, LLM answer generation, or a KB web admin UI in the same change.
 ```
 
 ## Current Polling-First Worker Status
@@ -65,13 +66,15 @@ Implemented:
 - `build_workflow_graph(checkpointer=...)` supports injecting a checkpointer without creating one internally
 - `LANGGRAPH_CHECKPOINT_MODE=off|memory` controls the gateway checkpointer provider
 - read-only graph debug helpers can fetch latest state and state history by `conversation_id`
-- `knowledge_documents` stores minimal tenant KB documents for deterministic keyword retrieval
+- `knowledge_documents` stores tenant/kb-scope KB documents for deterministic retrieval
 - `gateway_consumer` creates `KnowledgeDocumentRepository(pool)` and `RagService(...)`
 - `GatewayService` prefetches `rag_context` before `graph.invoke(...)`
 - `rag_node` reads `rag_context` synchronously and never opens DB connections
 - normal FAQ/RAG path produces only customer-facing `livechat.send_text`
 - normal FAQ/RAG path no longer emits `rag.placeholder` external commands
 - `python -m app.workers.seed_knowledge --tenant-id default --kb-scope default` seeds default static FAQ documents idempotently
+- `python -m app.workers.seed_knowledge --tenant-id default --kb-scope default --source-file <path>` supports JSON file seeding with skip counts for invalid documents
+- `python -m app.workers.knowledge_admin list|get|enable|disable ...` provides lightweight KB administration via repository methods only
 
 Ingress staging remains:
 
@@ -87,6 +90,7 @@ TODO for later phases only:
 - durable LangGraph checkpoint store, checkpoint management, and interrupt/resume
 - MySQL checkpoint saver and checkpoint tables
 - vector RAG, embeddings, and LLM answer generation
+- knowledge-base web management UI
 - Telegram full handoff loop
 - backend API fact lookup and withdrawal workflows
 

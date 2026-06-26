@@ -158,3 +158,100 @@ def test_sender_cli_parser_accepts_once_and_limit():
 
     assert args.once is True
     assert args.limit == 20
+
+
+def test_seed_knowledge_run_dry_run_does_not_create_pool(monkeypatch):
+    import asyncio
+
+    from app.workers import seed_knowledge
+
+    calls = {"pool": 0}
+
+    async def fake_create_pool(_settings):
+        calls["pool"] += 1
+        raise AssertionError("create_pool should not be called")
+
+    monkeypatch.setattr(seed_knowledge, "create_pool", fake_create_pool)
+
+    result = asyncio.run(
+        seed_knowledge.run(["--tenant-id", "default", "--kb-scope", "default", "--dry-run"])
+    )
+
+    assert result["dry_run"] is True
+    assert calls["pool"] == 0
+
+
+def test_knowledge_admin_cli_calls_list_and_get():
+    import asyncio
+
+    from app.workers import knowledge_admin
+
+    calls = []
+
+    class FakeRepository:
+        async def list_documents(self, tenant_id: str, kb_scope: str = "default", enabled=None, limit: int = 50):
+            calls.append(("list", tenant_id, kb_scope, enabled, limit))
+            return [{"title": "奖金规则说明"}]
+
+        async def get_by_title(self, tenant_id: str, kb_scope: str, title: str):
+            calls.append(("get", tenant_id, kb_scope, title))
+            return {"title": title}
+
+    list_result = asyncio.run(
+        knowledge_admin.run_command(
+            knowledge_admin.build_arg_parser().parse_args(["list", "--tenant-id", "default", "--kb-scope", "default"]),
+            FakeRepository(),
+        )
+    )
+    get_result = asyncio.run(
+        knowledge_admin.run_command(
+            knowledge_admin.build_arg_parser().parse_args(
+                ["get", "--tenant-id", "default", "--kb-scope", "default", "--title", "奖金规则说明"]
+            ),
+            FakeRepository(),
+        )
+    )
+
+    assert list_result["documents"] == [{"title": "奖金规则说明"}]
+    assert get_result["document"] == {"title": "奖金规则说明"}
+    assert calls == [
+        ("list", "default", "default", None, 50),
+        ("get", "default", "default", "奖金规则说明"),
+    ]
+
+
+def test_knowledge_admin_cli_calls_enable_and_disable():
+    import asyncio
+
+    from app.workers import knowledge_admin
+
+    calls = []
+
+    class FakeRepository:
+        async def set_enabled(self, tenant_id: str, kb_scope: str, title: str, enabled: bool):
+            calls.append((tenant_id, kb_scope, title, enabled))
+            return {"updated": True, "rowcount": 1}
+
+    disable_result = asyncio.run(
+        knowledge_admin.run_command(
+            knowledge_admin.build_arg_parser().parse_args(
+                ["disable", "--tenant-id", "default", "--kb-scope", "default", "--title", "奖金规则说明"]
+            ),
+            FakeRepository(),
+        )
+    )
+    enable_result = asyncio.run(
+        knowledge_admin.run_command(
+            knowledge_admin.build_arg_parser().parse_args(
+                ["enable", "--tenant-id", "default", "--kb-scope", "default", "--title", "奖金规则说明"]
+            ),
+            FakeRepository(),
+        )
+    )
+
+    assert disable_result["result"] == {"updated": True, "rowcount": 1}
+    assert enable_result["result"] == {"updated": True, "rowcount": 1}
+    assert calls == [
+        ("default", "default", "奖金规则说明", False),
+        ("default", "default", "奖金规则说明", True),
+    ]

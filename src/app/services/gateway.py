@@ -207,7 +207,33 @@ class GatewayService:
             "signal_result": graph_state.get("signal_result"),
             "rewrite_result": graph_state.get("rewrite_result"),
         }
+        if graph_state.get("rag_context"):
+            snapshot["rag_context"] = self._sanitize_rag_context(graph_state["rag_context"])
         return self._sanitize_value(snapshot)
+
+    def _sanitize_rag_context(self, rag_context: dict) -> dict:
+        documents = []
+        for document in rag_context.get("documents") or []:
+            documents.append(
+                {
+                    "id": document.get("id"),
+                    "title": document.get("title"),
+                    "score": document.get("score"),
+                    "priority": document.get("priority"),
+                    "matched_fields": list(document.get("matched_fields") or []),
+                    "matched_terms": list(document.get("matched_terms") or []),
+                }
+            )
+        return {
+            "matched": rag_context.get("matched"),
+            "fallback_reason": rag_context.get("fallback_reason"),
+            "source": rag_context.get("source"),
+            "query": rag_context.get("query"),
+            "tenant_id": rag_context.get("tenant_id"),
+            "kb_scope": rag_context.get("kb_scope"),
+            "answer": rag_context.get("answer"),
+            "documents": documents,
+        }
 
     def _sanitize_value(self, value):
         sensitive_tokens = ("token", "access_token", "secret", "api_key", "password")

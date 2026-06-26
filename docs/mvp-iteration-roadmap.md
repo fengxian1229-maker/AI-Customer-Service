@@ -4,6 +4,38 @@
 
 当前阶段明确采用 **polling-first**：前期使用官方 API 轮询方式获取 LiveChat/Text.com 聊天消息；中期再接入 WebSocket；后期正式上线再接入 Webhook。
 
+当前已完成到 P4-C：
+
+```text
+P4-C：tenant/kb_scope knowledge management + deterministic ranking v1
+```
+
+当前 RAG 仍明确不做：
+
+```text
+vector DB
+embedding
+LLM answer generation
+知识库 Web 管理后台
+```
+
+当前知识库运维入口仅包含：
+
+```text
+seed_knowledge worker
+lightweight knowledge_admin CLI
+```
+
+当前 backend_fact 规则：
+
+```text
+backend_fact 只能返回安全 fallback
+backend_fact 不查 knowledge repository
+backend_fact 不编造后台事实
+normal RAG path 不生成 RAG_PLACEHOLDER
+normal RAG path 不写 external_commands
+```
+
 本文档重点说明：哪些能力当前应该做，哪些能力后续再做，避免在 MVP 阶段过早开发复杂抽象，也避免把后续必须抽象的设计写死在代码中。
 
 ---

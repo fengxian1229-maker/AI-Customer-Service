@@ -4,7 +4,7 @@ import hashlib
 import aiomysql
 
 from app.schemas.events import InboundEvent
-from app.services.rag import score_knowledge_document
+from app.services.rag import rank_knowledge_document
 from app.workflows.slot_extractors import normalize_text
 
 
@@ -752,7 +752,8 @@ class KnowledgeDocumentRepository:
           keywords = VALUES(keywords),
           language = VALUES(language),
           priority = VALUES(priority),
-          enabled = VALUES(enabled)
+          enabled = VALUES(enabled),
+          updated_at = CURRENT_TIMESTAMP
         """
         args = (
             document.get("tenant_id") or "default",
@@ -768,7 +769,62 @@ class KnowledgeDocumentRepository:
             async with conn.cursor() as cur:
                 await cur.execute(sql, args)
                 inserted = cur.rowcount == 1
-                return {"inserted": inserted, "duplicate": not inserted, "id": cur.lastrowid if inserted else None}
+                return {
+                    "inserted": inserted,
+                    "duplicate": not inserted,
+                    "id": cur.lastrowid,
+                }
+
+    async def list_documents(
+        self,
+        tenant_id: str,
+        kb_scope: str = "default",
+        enabled: bool | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        sql = """
+        SELECT id, tenant_id, kb_scope, title, content, keywords, language,
+               priority, enabled, created_at, updated_at
+        FROM knowledge_documents
+        WHERE tenant_id = %s
+          AND kb_scope = %s
+        """
+        args: list[object] = [tenant_id, kb_scope]
+        if enabled is not None:
+            sql += "\n  AND enabled = %s"
+            args.append(1 if enabled else 0)
+        sql += "\n        ORDER BY priority ASC, id ASC\n        LIMIT %s"
+        args.append(limit)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, tuple(args))
+                rows = await cur.fetchall()
+        return [self._decode_document(row) for row in rows]
+
+    async def get_by_title(self, tenant_id: str, kb_scope: str, title: str) -> dict | None:
+        sql = """
+        SELECT id, tenant_id, kb_scope, title, content, keywords, language,
+               priority, enabled, created_at, updated_at
+        FROM knowledge_documents
+        WHERE tenant_id = %s AND kb_scope = %s AND title = %s
+        LIMIT 1
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (tenant_id, kb_scope, title))
+                row = await cur.fetchone()
+        return self._decode_document(row) if row else None
+
+    async def set_enabled(self, tenant_id: str, kb_scope: str, title: str, enabled: bool) -> dict:
+        sql = """
+        UPDATE knowledge_documents
+        SET enabled = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE tenant_id = %s AND kb_scope = %s AND title = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (1 if enabled else 0, tenant_id, kb_scope, title))
+                return {"updated": cur.rowcount > 0, "rowcount": cur.rowcount}
 
     async def search(
         self,
@@ -793,12 +849,19 @@ class KnowledgeDocumentRepository:
         query_text = normalize_text(query)
         scored = []
         for row in rows:
-            row["keywords"] = json_loads(row.get("keywords") or "[]")
-            score = score_knowledge_document(row, query_text)
-            if score > 0:
-                scored.append({**row, "score": score})
+            decoded = self._decode_document(row)
+            ranked = rank_knowledge_document(decoded, query_text)
+            if ranked["score"] > 0:
+                scored.append({**decoded, **ranked})
         scored.sort(key=lambda item: (-item["score"], item.get("priority", 100), item["id"]))
         return scored[:limit]
+
+    def _decode_document(self, row: dict | None) -> dict | None:
+        if row is None:
+            return None
+        decoded = dict(row)
+        decoded["keywords"] = json_loads(decoded.get("keywords") or "[]")
+        return decoded
 
 
 class GraphRunErrorRepository:

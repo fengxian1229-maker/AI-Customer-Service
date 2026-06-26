@@ -44,14 +44,17 @@ Checkpoint modes:
 
 P3-B adds a checkpoint provider boundary and read-only graph debug helpers. Durable MySQL checkpoint storage, checkpoint tables, and interrupt/resume are not implemented.
 
-P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts.
+P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts.
 
 Current RAG limits:
 
 - No vector database.
 - No embeddings.
 - No LLM answer generation.
+- No knowledge-base web admin UI.
 - No real backend or Telegram calls.
+- Backend-fact questions always return a safe fallback and never query the knowledge repository.
+- Normal RAG path never emits `RAG_PLACEHOLDER` and never writes `external_commands`.
 
 Seed default knowledge documents:
 
@@ -63,6 +66,21 @@ Preview seed documents without writing:
 
 ```bash
 PYTHONPATH=src uv run --group dev python -m app.workers.seed_knowledge --tenant-id default --kb-scope default --dry-run
+```
+
+Seed from a JSON file or disable documents at seed time:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.seed_knowledge --tenant-id default --kb-scope default --source-file ./knowledge.json --enabled false --limit 10
+```
+
+Lightweight knowledge admin CLI:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.knowledge_admin list --tenant-id default --kb-scope default
+PYTHONPATH=src uv run --group dev python -m app.workers.knowledge_admin get --tenant-id default --kb-scope default --title "奖金规则说明"
+PYTHONPATH=src uv run --group dev python -m app.workers.knowledge_admin disable --tenant-id default --kb-scope default --title "奖金规则说明"
+PYTHONPATH=src uv run --group dev python -m app.workers.knowledge_admin enable --tenant-id default --kb-scope default --title "奖金规则说明"
 ```
 
 Current receiver boundaries:
@@ -147,3 +165,4 @@ Notes
 - `.env` is ignored by Git and must not be committed.
 - The current polling receiver requires explicit `--groups` or `LIVECHAT_ALLOWED_GROUP_IDS`; do not run broad all-group polling.
 - `get_chat` is used when available. If LiveChat returns a permission error, the receiver falls back to `list_chats.last_event_per_type`.
+- Polling-first remains the only ingress in this stage. WebSocket/Webhook are later phases.

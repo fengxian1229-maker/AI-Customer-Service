@@ -263,6 +263,7 @@ def test_gateway_service_records_error_and_skips_side_effects_when_rag_retrieve_
     assert external_repository.inserted == []
     assert graph_error_repository.inserted[0]["error_type"] == "RuntimeError"
     assert graph_error_repository.inserted[0]["error_message"] == "rag retrieve failed"
+    assert "rag_context" not in graph_error_repository.inserted[0]["state_snapshot"]
 
 
 class RecordingGraph:
@@ -295,6 +296,40 @@ def test_gateway_service_invokes_graph_with_conversation_thread_config():
     assert state["thread_id"] == "thread-1"
     assert result["graph_state"]["thread_id"] == "thread-1"
     assert result["outbound_message"]["payload_json"]["text"] == "ok"
+
+
+def test_gateway_snapshot_sanitizes_rag_context_to_metadata_and_hides_secrets():
+    service = GatewayService()
+
+    snapshot = service._sanitize_graph_state_snapshot(
+        {
+            "conversation_id": "livechat:chat-1",
+            "tenant_id": "default",
+            "chat_id": "chat-1",
+            "thread_id": "thread-1",
+            "raw_user_input": "bonus rules",
+            "event_type": "MESSAGE_CREATED",
+            "slot_memory": {"password": "secret-password", "safe": "ok"},
+            "rag_context": {
+                "matched": True,
+                "answer": "x" * 2500,
+                "documents": [
+                    {
+                        "id": 1,
+                        "title": "Bonus rules",
+                        "content": "y" * 5000,
+                        "matched_fields": ["title"],
+                    }
+                ],
+            },
+        }
+    )
+
+    assert snapshot["slot_memory"] == {"safe": "ok"}
+    assert snapshot["rag_context"]["matched"] is True
+    assert snapshot["rag_context"]["documents"][0]["title"] == "Bonus rules"
+    assert "content" not in snapshot["rag_context"]["documents"][0]
+    assert len(snapshot["rag_context"]["answer"]) == 2000
 
 
 class FakeTransactionalGatewayRepository:

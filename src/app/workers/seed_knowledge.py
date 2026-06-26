@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+from pathlib import Path
 
 from app.core.settings import Settings
 from app.db.mysql import create_pool
@@ -28,55 +29,95 @@ EXTRA_SEED_DOCUMENTS = [
 ]
 
 
-def build_seed_documents(tenant_id: str = "default", kb_scope: str = "default") -> list[dict]:
+def build_seed_documents(
+    tenant_id: str = "default",
+    kb_scope: str = "default",
+    source_documents: list[dict] | None = None,
+    enabled: bool = True,
+    limit: int | None = None,
+) -> list[dict]:
     documents = []
-    for document in [*DEFAULT_KNOWLEDGE_DOCUMENTS, *EXTRA_SEED_DOCUMENTS]:
+    base_documents = source_documents if source_documents is not None else [*DEFAULT_KNOWLEDGE_DOCUMENTS, *EXTRA_SEED_DOCUMENTS]
+    for document in base_documents[:limit]:
         copied = dict(document)
         copied["tenant_id"] = tenant_id
         copied["kb_scope"] = kb_scope
-        copied["enabled"] = True
+        copied["enabled"] = bool(copied.get("enabled", enabled))
         documents.append(copied)
     return documents
 
 
-async def seed_repository(repository, tenant_id: str = "default", kb_scope: str = "default", dry_run: bool = False) -> dict:
-    documents = build_seed_documents(tenant_id=tenant_id, kb_scope=kb_scope)
-    if dry_run:
-        return {
-            "dry_run": True,
-            "tenant_id": tenant_id,
-            "kb_scope": kb_scope,
-            "documents": len(documents),
-            "upserted": 0,
-        }
+def load_source_documents(source_file: str | None) -> list[dict] | None:
+    if not source_file:
+        return None
+    payload = json.loads(Path(source_file).read_text(encoding="utf-8"))
+    return payload if isinstance(payload, list) else []
 
-    results = []
-    for document in documents:
-        results.append(await repository.insert_idempotent(document))
 
-    return {
-        "dry_run": False,
+async def seed_repository(
+    repository,
+    tenant_id: str = "default",
+    kb_scope: str = "default",
+    dry_run: bool = False,
+    source_file: str | None = None,
+    enabled: bool = True,
+    limit: int | None = None,
+) -> dict:
+    source_documents = load_source_documents(source_file)
+    documents = build_seed_documents(
+        tenant_id=tenant_id,
+        kb_scope=kb_scope,
+        source_documents=source_documents,
+        enabled=enabled,
+        limit=limit,
+    )
+    result = {
+        "dry_run": dry_run,
         "tenant_id": tenant_id,
         "kb_scope": kb_scope,
         "documents": len(documents),
-        "upserted": len(results),
-        "inserted": sum(1 for result in results if result.get("inserted")),
-        "duplicates": sum(1 for result in results if result.get("duplicate")),
+        "inserted": 0,
+        "duplicates": 0,
+        "skipped": 0,
     }
+    if dry_run:
+        return result
+
+    for document in documents:
+        if not document.get("title") or not document.get("content"):
+            result["skipped"] += 1
+            continue
+        upsert = await repository.insert_idempotent(document)
+        if upsert.get("inserted"):
+            result["inserted"] += 1
+        else:
+            result["duplicates"] += 1
+    return result
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Seed default deterministic knowledge documents.")
+    parser = argparse.ArgumentParser(description="Seed deterministic knowledge documents.")
     parser.add_argument("--tenant-id", default="default", help="Tenant id to seed.")
     parser.add_argument("--kb-scope", default="default", help="Knowledge base scope to seed.")
     parser.add_argument("--dry-run", action="store_true", help="Print the plan without writing documents.")
+    parser.add_argument("--source-file", help="Optional JSON file of knowledge documents.")
+    parser.add_argument("--enabled", choices=("true", "false"), default="true", help="Seed documents as enabled or disabled.")
+    parser.add_argument("--limit", type=int, help="Limit how many source documents to seed.")
     return parser
 
 
 async def run(argv: list[str] | None = None) -> dict:
     args = build_arg_parser().parse_args(argv)
     if args.dry_run:
-        return await seed_repository(None, tenant_id=args.tenant_id, kb_scope=args.kb_scope, dry_run=True)
+        return await seed_repository(
+            None,
+            tenant_id=args.tenant_id,
+            kb_scope=args.kb_scope,
+            dry_run=True,
+            source_file=args.source_file,
+            enabled=args.enabled == "true",
+            limit=args.limit,
+        )
 
     settings = Settings(
         livechat_agent_access_token="unused-for-seed",
@@ -85,7 +126,14 @@ async def run(argv: list[str] | None = None) -> dict:
     pool = await create_pool(settings)
     try:
         repository = KnowledgeDocumentRepository(pool)
-        return await seed_repository(repository, tenant_id=args.tenant_id, kb_scope=args.kb_scope)
+        return await seed_repository(
+            repository,
+            tenant_id=args.tenant_id,
+            kb_scope=args.kb_scope,
+            source_file=args.source_file,
+            enabled=args.enabled == "true",
+            limit=args.limit,
+        )
     finally:
         pool.close()
         await pool.wait_closed()
