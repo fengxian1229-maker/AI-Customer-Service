@@ -1,3 +1,5 @@
+import re
+
 from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
 from app.graph.builder import build_workflow_graph
 from app.graph.nodes import build_graph_state_from_event, prepare_route_state
@@ -750,9 +752,18 @@ class GatewayService:
         return value
 
     def _redact_sensitive_text(self, value: str) -> str:
-        redacted = value
-        for token in ("access_token", "api_key", "secret", "password", "token"):
-            redacted = redacted.replace(token, "[redacted]")
+        redacted = re.sub(
+            r"\b(access_token|api_key|secret|password|token)\s*[:=]\s*([^\s,;]+)",
+            lambda match: f"{match.group(1)}=[redacted]",
+            value,
+            flags=re.IGNORECASE,
+        )
+        redacted = re.sub(
+            r"\b(Bearer)\s+([^\s,;]+)",
+            lambda match: f"{match.group(1)} [redacted]",
+            redacted,
+            flags=re.IGNORECASE,
+        )
         return redacted
 
     def _build_llm_rewrite_shadow_input(self, graph_state: dict) -> LLMRewriteShadowInput:

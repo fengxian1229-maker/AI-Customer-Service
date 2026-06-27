@@ -135,6 +135,34 @@ async def run_fetch_unprocessed_with_datetime():
     return rows, cursor
 
 
+async def run_fetch_unprocessed_by_id_with_datetime():
+    class FetchCursor(FakeCursor):
+        async def fetchone(self):
+            return {
+                "id": 55,
+                "chat_id": "chat-55",
+                "thread_id": "thread-55",
+                "event_id": "event-55",
+                "event_type": "message",
+                "standard_event_type": "MESSAGE_CREATED",
+                "author_id": "user-1",
+                "sender_role": "external",
+                "occurred_at": datetime(2026, 6, 24, 0, 0, 0),
+                "dedup_key": "dedup:event-55",
+                "payload_json": '{"event":{"text":"hello"}}',
+                "raw_action": "polling.event",
+                "source": "polling_fallback",
+                "organization_id": None,
+                "ignored": 0,
+                "ignore_reason": None,
+            }
+
+    cursor = FetchCursor(rowcount=1)
+    repository = InboundEventRepository(FakePool(cursor))
+    row = await repository.fetch_unprocessed_by_id(55)
+    return row, cursor
+
+
 def make_outbound_message() -> dict:
     return {
         "chat_id": "chat-1",
@@ -158,6 +186,35 @@ async def run_outbound_fetch_pending():
 
     rows = await repository.fetch_pending(limit=5)
 
+    return rows, cursor
+
+
+async def run_outbound_fetch_pending_by_inbound_event():
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 7,
+                    "tenant_id": "default",
+                    "channel_type": "livechat",
+                    "conversation_id": "livechat:chat-1",
+                    "inbound_event_id": 55,
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "action_type": "livechat.send_text",
+                    "message_type": "text",
+                    "payload_json": '{"text":"hello"}',
+                    "status": "PENDING",
+                    "dedup_key": "dedup",
+                    "block_index": 0,
+                    "message_kind": "text",
+                    "command_type": "livechat.send_text",
+                }
+            ]
+
+    cursor = FetchCursor(rowcount=1)
+    repository = OutboundMessageRepository(FakePool(cursor))
+    rows = await repository.fetch_pending_by_inbound_event(55, limit=3)
     return rows, cursor
 
 
@@ -187,6 +244,31 @@ def test_inbound_insert_uses_duplicate_key_update():
 
     assert "ON DUPLICATE KEY UPDATE id = id" in cursor.sql
     assert result == {"inserted": True, "duplicate": False}
+
+
+def test_fetch_unprocessed_by_id_filters_specific_unprocessed_nonignored_event():
+    import asyncio
+
+    row, cursor = asyncio.run(run_fetch_unprocessed_by_id_with_datetime())
+
+    assert "WHERE id = %s" in cursor.sql
+    assert "AND processed = 0" in cursor.sql
+    assert "AND ignored = 0" in cursor.sql
+    assert cursor.args == (55,)
+    assert row["id"] == 55
+    assert row["payload_json"] == {"event": {"text": "hello"}}
+    assert row["occurred_at"] == "2026-06-24 00:00:00.000000"
+
+
+def test_outbound_fetch_pending_by_inbound_event_scopes_query_and_decodes_payload():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_outbound_fetch_pending_by_inbound_event())
+
+    assert "WHERE m.status = 'PENDING'" in cursor.sql
+    assert "AND m.inbound_event_id = %s" in cursor.sql
+    assert cursor.args == (55, 3)
+    assert rows[0]["payload_json"] == {"text": "hello"}
 
 
 def test_outbound_mark_pending_by_inbound_event_skipped_only_updates_pending_rows():

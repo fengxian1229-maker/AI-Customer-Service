@@ -133,6 +133,55 @@ def test_process_pending_message_marks_success_with_event_id():
     assert message_repository.inserted[0]["text_content"] == "hello"
 
 
+def test_process_pending_for_inbound_event_only_fetches_target_inbound(monkeypatch):
+    class SenderClient:
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            return {"event_id": "event-1"}
+
+    class FakeRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+            self.sent = []
+            self.failures = []
+
+        async def fetch_pending_by_inbound_event(self, inbound_event_id: int, limit: int = 20) -> list[dict]:
+            assert inbound_event_id == 55
+            assert limit == 3
+            return [make_message()]
+
+        async def mark_sent(self, outbound_message_id: int) -> None:
+            self.sent.append(outbound_message_id)
+
+        async def mark_failed(self, outbound_message_id: int, status: str, error: str, retryable: bool) -> None:
+            self.failures.append((outbound_message_id, status, error, retryable))
+
+    class FakeMessageRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def insert_idempotent(self, message: dict) -> dict:
+            return {"inserted": True, "duplicate": False, "id": 1}
+
+    class FakeTransactionRepository:
+        def __init__(self, pool, outbound_repository=None, conversation_message_repository=None) -> None:
+            self.pool = pool
+            self.outbound_repository = outbound_repository
+
+        async def mark_sent_with_message(self, outbound_message_id: int, message_record: dict) -> dict:
+            await self.outbound_repository.mark_sent(outbound_message_id)
+            return {"message_insert": {"inserted": True}}
+
+    monkeypatch.setattr(sender_worker, "OutboundMessageRepository", FakeRepository)
+    monkeypatch.setattr(sender_worker, "ConversationMessageRepository", FakeMessageRepository)
+    monkeypatch.setattr(sender_worker, "SenderTransactionRepository", FakeTransactionRepository)
+
+    result = asyncio.run(sender_worker.process_pending_for_inbound_event(object(), SenderClient(), inbound_event_id=55, limit=3))
+
+    assert result[0]["status"] == "SENT"
+    assert result[0]["outbound_message_id"] == 7
+    assert result[0]["inbound_event_id"] == 11
+
+
 def test_process_pending_message_image_uses_mvp_url_text_fallback():
     class SenderClient:
         def __init__(self) -> None:

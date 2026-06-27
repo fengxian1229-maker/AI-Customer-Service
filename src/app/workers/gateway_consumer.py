@@ -18,6 +18,45 @@ from app.services.rag import RagService
 
 
 async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off", settings=None) -> dict:
+    inbound_repository, service, managed_checkpointer = _build_gateway_dependencies(pool, checkpoint_mode, settings)
+    try:
+        rows = await inbound_repository.fetch_unprocessed(limit=limit)
+        result = await _process_rows(service, rows)
+        return {
+            **result,
+            "llm": _build_llm_summary(settings),
+        }
+    finally:
+        managed_checkpointer.close()
+
+
+async def process_inbound_event_id(pool, inbound_event_id: int, checkpoint_mode: str = "off", settings=None) -> dict:
+    inbound_repository, service, managed_checkpointer = _build_gateway_dependencies(pool, checkpoint_mode, settings)
+    try:
+        row = await inbound_repository.fetch_unprocessed_by_id(inbound_event_id)
+        if not row:
+            return {
+                "processed": 0,
+                "failed": 0,
+                "enqueued": 0,
+                "not_found": True,
+                "inbound_event_id": inbound_event_id,
+                "failures": [],
+                "results": [],
+                "llm": _build_llm_summary(settings),
+            }
+        result = await _process_rows(service, [row])
+        return {
+            **result,
+            "not_found": False,
+            "inbound_event_id": inbound_event_id,
+            "llm": _build_llm_summary(settings),
+        }
+    finally:
+        managed_checkpointer.close()
+
+
+def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
     inbound_repository = InboundEventRepository(pool)
     transactional_repository = GatewayTransactionRepository(pool, inbound_repository=inbound_repository)
     knowledge_repository = KnowledgeDocumentRepository(pool)
@@ -25,69 +64,65 @@ async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off"
     rag_service = RagService(knowledge_repository=knowledge_repository)
     llm_provider = build_llm_provider(getattr(settings, "llm_provider", "off"), settings=settings) if settings else None
     managed_checkpointer = build_checkpointer(checkpoint_mode, settings=settings)
-    try:
-        service_kwargs = {
-            "transactional_repository": transactional_repository,
-            "checkpointer": managed_checkpointer.checkpointer,
-            "checkpoint_mode": checkpoint_mode,
-            "checkpoint_run_repository": checkpoint_run_repository,
-            "rag_service": rag_service,
-        }
-        if any(
-            [
-                llm_provider is not None,
-                getattr(settings, "llm_rewrite_shadow_enabled", False),
-                getattr(settings, "llm_rewrite_fallback_enabled", False),
-                getattr(settings, "llm_intent_shadow_enabled", False),
-                getattr(settings, "llm_intent_fallback_enabled", False),
-                getattr(settings, "llm_router_mode", "shadow") != "shadow",
-            ]
-        ):
-            service_kwargs.update(
+    service_kwargs = {
+        "transactional_repository": transactional_repository,
+        "checkpointer": managed_checkpointer.checkpointer,
+        "checkpoint_mode": checkpoint_mode,
+        "checkpoint_run_repository": checkpoint_run_repository,
+        "rag_service": rag_service,
+    }
+    if any(
+        [
+            llm_provider is not None,
+            getattr(settings, "llm_rewrite_shadow_enabled", False),
+            getattr(settings, "llm_rewrite_fallback_enabled", False),
+            getattr(settings, "llm_intent_shadow_enabled", False),
+            getattr(settings, "llm_intent_fallback_enabled", False),
+            getattr(settings, "llm_router_mode", "shadow") != "shadow",
+        ]
+    ):
+        service_kwargs.update(
+            {
+                "llm_rewrite_service": llm_provider,
+                "llm_intent_service": llm_provider,
+                "llm_rewrite_shadow_enabled": getattr(settings, "llm_rewrite_shadow_enabled", False),
+                "llm_rewrite_fallback_enabled": getattr(settings, "llm_rewrite_fallback_enabled", False),
+                "llm_intent_shadow_enabled": getattr(settings, "llm_intent_shadow_enabled", False),
+                "llm_intent_fallback_enabled": getattr(settings, "llm_intent_fallback_enabled", False),
+                "llm_intent_min_confidence": getattr(settings, "llm_intent_min_confidence", 0.75),
+                "llm_router_mode": getattr(settings, "llm_router_mode", "shadow"),
+                "llm_router_min_confidence": getattr(settings, "llm_router_min_confidence", 0.75),
+                "llm_router_fallback_to_deterministic": getattr(settings, "llm_router_fallback_to_deterministic", True),
+            }
+        )
+    service = GatewayService(**service_kwargs)
+    return inbound_repository, service, managed_checkpointer
+
+
+async def _process_rows(service, rows: list[dict]) -> dict:
+    results = []
+    failures = []
+    for row in rows:
+        inbound_event_id = row.pop("id")
+        event = InboundEvent(**row)
+        try:
+            results.append(await service.process_event(inbound_event_id, event))
+        except Exception as exc:
+            failures.append(
                 {
-                    "llm_rewrite_service": llm_provider,
-                    "llm_intent_service": llm_provider,
-                    "llm_rewrite_shadow_enabled": getattr(settings, "llm_rewrite_shadow_enabled", False),
-                    "llm_rewrite_fallback_enabled": getattr(settings, "llm_rewrite_fallback_enabled", False),
-                    "llm_intent_shadow_enabled": getattr(settings, "llm_intent_shadow_enabled", False),
-                    "llm_intent_fallback_enabled": getattr(settings, "llm_intent_fallback_enabled", False),
-                    "llm_intent_min_confidence": getattr(settings, "llm_intent_min_confidence", 0.75),
-                    "llm_router_mode": getattr(settings, "llm_router_mode", "shadow"),
-                    "llm_router_min_confidence": getattr(settings, "llm_router_min_confidence", 0.75),
-                    "llm_router_fallback_to_deterministic": getattr(settings, "llm_router_fallback_to_deterministic", True),
+                    "inbound_event_id": inbound_event_id,
+                    "event_id": event.event_id,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
                 }
             )
-        service = GatewayService(
-            **service_kwargs,
-        )
-
-        results = []
-        failures = []
-        rows = await inbound_repository.fetch_unprocessed(limit=limit)
-        for row in rows:
-            inbound_event_id = row.pop("id")
-            event = InboundEvent(**row)
-            try:
-                results.append(await service.process_event(inbound_event_id, event))
-            except Exception as exc:
-                failures.append(
-                    {
-                        "inbound_event_id": inbound_event_id,
-                        "event_id": event.event_id,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    }
-                )
-        return {
-            "results": results,
-            "failures": failures,
-            "processed": len(results),
-            "failed": len(failures),
-            "enqueued": sum(1 for result in results if result.get("outbound_message")),
-            "llm": _build_llm_summary(settings),
-        }
-    finally:
-        managed_checkpointer.close()
+    return {
+        "results": results,
+        "failures": failures,
+        "processed": len(results),
+        "failed": len(failures),
+        "enqueued": sum(1 for result in results if result.get("outbound_message")),
+    }
 
 
 def _build_llm_summary(settings) -> dict:

@@ -53,6 +53,19 @@ P8-B.1 formalizes issues found during manual real Gemini FAQ-authoritative smoke
 - Router checkpoint metadata retains compact `reason`, rewrite/query fields, `faq_query`, `language`, errors, final route/source fields, and compact RAG retrieval diagnostics.
 - `llm_shadow_admin` can JSON dump datetime values and continues to sanitize secret-like fields.
 
+## P8-B.2 Scoped Smoke Safety
+
+P8-B.2 locks the real Gemini FAQ smoke to the single inbound event it creates:
+
+- `InboundEventRepository.fetch_unprocessed_by_id()` reads only the requested unprocessed, non-ignored inbound event.
+- `gateway_consumer.process_inbound_event_id()` processes only that inbound event and returns `not_found=true` instead of falling back to a batch.
+- `OutboundMessageRepository.fetch_pending_by_inbound_event()` reads only pending outbound rows for that inbound event.
+- `sender_worker.process_pending_for_inbound_event()` sends only pending rows for that inbound event.
+- `real_gemini_faq_smoke` default no-send mode creates `Settings` with unused LiveChat credentials, so it does not require real LiveChat secrets.
+- `--send` now requires explicit `--chat-id` and `--thread-id` before any inbound row is inserted.
+- Default no-send skip still marks pending rows `SKIPPED_MANUAL_SMOKE`, but only where `outbound_messages.inbound_event_id` equals the smoke event id.
+- Gateway LLM error metadata redacts secret values such as `api_key=...`, `password: ...`, `token=...`, and `Bearer ...`, not only key names.
+
 ## FAQ Retrieval
 
 FAQ retrieval query priority is:
@@ -135,4 +148,4 @@ uv run --group dev python -m app.workers.real_gemini_faq_smoke \
   --seed-default-faq
 ```
 
-The manual smoke inserts one inbound event, runs `gateway_consumer`, prints JSON, and by default marks this smoke's pending outbound rows as `SKIPPED_MANUAL_SMOKE` instead of sending to LiveChat. Use `--send` only with a real `chat_id` / `thread_id`.
+The manual smoke inserts one inbound event, runs `gateway_consumer.process_inbound_event_id`, prints JSON, and by default marks only this smoke event's pending outbound rows as `SKIPPED_MANUAL_SMOKE` instead of sending to LiveChat. Use `--send` only with a real `chat_id` / `thread_id`; send mode dispatches through `sender_worker.process_pending_for_inbound_event`.

@@ -154,6 +154,33 @@ async def process_next_batch(pool, sender_client, limit: int = 20) -> list[dict]
     return results
 
 
+async def process_pending_for_inbound_event(pool, sender_client, inbound_event_id: int, limit: int = 20) -> list[dict]:
+    repository = OutboundMessageRepository(pool)
+    message_repository = ConversationMessageRepository(pool)
+    transaction_repository = SenderTransactionRepository(
+        pool,
+        outbound_repository=repository,
+        conversation_message_repository=message_repository,
+    )
+    results = []
+    for message in await repository.fetch_pending_by_inbound_event(inbound_event_id, limit=limit):
+        result = await process_pending_message(
+            repository,
+            sender_client,
+            message,
+            message_repository=message_repository,
+            transaction_repository=transaction_repository,
+        )
+        results.append(
+            {
+                **result,
+                "outbound_message_id": message["id"],
+                "inbound_event_id": message.get("inbound_event_id"),
+            }
+        )
+    return results
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Send pending outbound_messages through LiveChat.")
     parser.add_argument("--once", action="store_true", help="Run one sender batch and exit.")

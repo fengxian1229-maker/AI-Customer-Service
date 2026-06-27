@@ -116,6 +116,105 @@ def test_process_next_batch_continues_after_single_event_failure(monkeypatch):
     ]
 
 
+def test_process_inbound_event_id_only_processes_requested_event(monkeypatch):
+    from app.workers import gateway_consumer
+
+    calls = []
+
+    class FakeInboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def fetch_unprocessed_by_id(self, inbound_event_id: int) -> dict | None:
+            assert inbound_event_id == 55
+            return make_row("event-55", "target")
+
+    class FakeTransactionalRepository:
+        def __init__(self, pool, inbound_repository=None) -> None:
+            self.pool = pool
+            self.inbound_repository = inbound_repository
+
+    class FakeKnowledgeRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+    class FakeCheckpointRunRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+    class FakeRagService:
+        def __init__(self, knowledge_repository=None) -> None:
+            self.knowledge_repository = knowledge_repository
+
+    class FakeService:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
+            calls.append((inbound_event_id, event.event_id))
+            return {"outbound_message": {"id": 1}, "event_id": event.event_id}
+
+    class FakeManagedCheckpointer:
+        checkpointer = None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
+    monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
+    monkeypatch.setattr(gateway_consumer, "KnowledgeDocumentRepository", FakeKnowledgeRepository)
+    monkeypatch.setattr(gateway_consumer, "GraphCheckpointRunRepository", FakeCheckpointRunRepository)
+    monkeypatch.setattr(gateway_consumer, "RagService", FakeRagService)
+    monkeypatch.setattr(gateway_consumer, "GatewayService", FakeService)
+    monkeypatch.setattr(gateway_consumer, "build_checkpointer", lambda mode, settings=None: FakeManagedCheckpointer())
+
+    result = asyncio.run(gateway_consumer.process_inbound_event_id(pool=object(), inbound_event_id=55))
+
+    assert calls == [(55, "event-55")]
+    assert result["inbound_event_id"] == 55
+    assert result["processed"] == 1
+    assert result["failed"] == 0
+    assert result["enqueued"] == 1
+
+
+def test_process_inbound_event_id_returns_not_found_without_processing(monkeypatch):
+    from app.workers import gateway_consumer
+
+    class FakeInboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def fetch_unprocessed_by_id(self, inbound_event_id: int) -> dict | None:
+            return None
+
+    class FakeManagedCheckpointer:
+        checkpointer = None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
+    monkeypatch.setattr(gateway_consumer, "build_checkpointer", lambda mode, settings=None: FakeManagedCheckpointer())
+
+    result = asyncio.run(gateway_consumer.process_inbound_event_id(pool=object(), inbound_event_id=404))
+
+    assert result == {
+        "processed": 0,
+        "failed": 0,
+        "enqueued": 0,
+        "not_found": True,
+        "inbound_event_id": 404,
+        "failures": [],
+        "results": [],
+        "llm": {
+            "provider": "off",
+            "rewrite_shadow_enabled": False,
+            "intent_shadow_enabled": False,
+            "shadow_active": False,
+        },
+    }
+
+
 def test_process_next_batch_passes_off_checkpointer_to_gateway_service(monkeypatch):
     from app.workers import gateway_consumer
 

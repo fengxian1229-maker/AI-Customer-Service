@@ -11,9 +11,8 @@ from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import InboundEventRepository, KnowledgeDocumentRepository, OutboundMessageRepository
 from app.schemas.events import InboundEvent
-from app.workers import gateway_consumer
+from app.workers import gateway_consumer, sender_worker
 from app.workers.seed_knowledge import seed_repository
-from app.workers.sender_worker import process_next_batch as process_sender_batch
 
 
 DEFAULT_SKIP_ERROR = "manual smoke uses fake chat_id; not sent"
@@ -36,9 +35,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 async def run(argv: list[str] | None = None) -> dict:
     args = build_arg_parser().parse_args(argv)
-    settings = Settings()
     base_summary = _base_summary(args)
-    if settings.llm_provider != "gemini" or settings.llm_router_mode != "faq_authoritative":
+
+    if args.send and not args.chat_id:
+        return {
+            **base_summary,
+            "error": {
+                "code": "send_requires_explicit_chat_id",
+                "message": "--send requires an explicit --chat-id to avoid sending to a generated fake chat.",
+            },
+            "smoke_success": False,
+        }
+    if args.send and not args.thread_id:
+        return {
+            **base_summary,
+            "error": {
+                "code": "send_requires_explicit_thread_id",
+                "message": "--send requires an explicit --thread-id to avoid sending to a generated fake thread.",
+            },
+            "smoke_success": False,
+        }
+
+    try:
+        settings = _build_settings(send=args.send)
+    except Exception as exc:
+        return {
+            **base_summary,
+            "error": {
+                "code": "invalid_settings",
+                "message": str(exc),
+                "error_type": type(exc).__name__,
+            },
+            "smoke_success": False,
+        }
+
+    llm_provider = str(getattr(settings, "llm_provider", "") or "").strip().lower()
+    llm_router_mode = str(getattr(settings, "llm_router_mode", "") or "").strip().lower()
+    if llm_provider != "gemini" or llm_router_mode != "faq_authoritative":
         return {
             **base_summary,
             "error": {
@@ -59,9 +92,9 @@ async def run(argv: list[str] | None = None) -> dict:
                 source_file=str(Path("data/knowledge/default_multimodal_faq_seed.json")),
             )
         inbound_event_id = await _insert_smoke_event(pool, args, base_summary)
-        gateway_result = await gateway_consumer.process_next_batch(
+        gateway_result = await gateway_consumer.process_inbound_event_id(
             pool,
-            limit=1,
+            inbound_event_id=inbound_event_id,
             checkpoint_mode=settings.langgraph_checkpoint_mode,
             settings=settings,
         )
@@ -71,13 +104,19 @@ async def run(argv: list[str] | None = None) -> dict:
         graph_run_errors = await _fetch_graph_run_errors(pool, conversation_id)
         sender_results = []
         skipped_unsent_count = 0
+        pending_before_count = sum(1 for message in outbound_messages if message.get("status") == "PENDING")
         if args.send:
             sender_client = LiveChatSenderClient(
                 settings.livechat_api_base,
                 settings.livechat_account_id,
                 settings.livechat_agent_access_token,
             )
-            sender_results = await process_sender_batch(pool, sender_client, limit=args.sender_limit)
+            sender_results = await sender_worker.process_pending_for_inbound_event(
+                pool,
+                sender_client,
+                inbound_event_id=inbound_event_id,
+                limit=args.sender_limit,
+            )
             outbound_messages = await _fetch_outbound_messages(pool, conversation_id, inbound_event_id)
         elif args.mark_unsent_smoke_skipped:
             skipped_unsent_count = await OutboundMessageRepository(pool).mark_pending_by_inbound_event_skipped(
@@ -86,14 +125,25 @@ async def run(argv: list[str] | None = None) -> dict:
             )
             outbound_messages = await _fetch_outbound_messages(pool, conversation_id, inbound_event_id)
 
+        sender_ok = True
+        warning = None if args.send else DEFAULT_SKIP_ERROR
+        if args.send:
+            sender_statuses = {result.get("status") for result in sender_results}
+            sender_ok = bool(sender_results) and sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}
+            if "SKIPPED_PREVIEW" in sender_statuses:
+                warning = "buttons preview was skipped by sender_worker"
+        else:
+            sender_ok = skipped_unsent_count == pending_before_count if args.mark_unsent_smoke_skipped else True
+
         smoke_success = (
-            gateway_result.get("processed") == 1
+            gateway_result.get("inbound_event_id") == inbound_event_id
+            and gateway_result.get("processed") == 1
             and gateway_result.get("failed") == 0
             and (llm_router or {}).get("status") == "accepted"
             and (llm_router or {}).get("final_route") == "faq"
             and bool(outbound_messages)
             and not graph_run_errors
-            and (bool(sender_results) if args.send else True)
+            and sender_ok
         )
         return {
             **base_summary,
@@ -105,12 +155,25 @@ async def run(argv: list[str] | None = None) -> dict:
             "graph_run_errors": graph_run_errors,
             "sender_results": sender_results,
             "skipped_unsent_count": skipped_unsent_count,
-            "warning": None if args.send else DEFAULT_SKIP_ERROR,
+            "warning": warning,
             "smoke_success": smoke_success,
         }
     finally:
         pool.close()
         await pool.wait_closed()
+
+
+def _build_settings(send: bool):
+    if send:
+        return Settings()
+    kwargs = {
+        "livechat_agent_access_token": "unused-for-real-gemini-faq-smoke",
+        "livechat_account_id": "unused-for-real-gemini-faq-smoke",
+    }
+    try:
+        return Settings(**kwargs)
+    except TypeError:
+        return Settings()
 
 
 def _base_summary(args) -> dict:

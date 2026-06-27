@@ -65,10 +65,33 @@ class InboundEventRepository:
                 await cur.execute(sql, (limit,))
                 rows = await cur.fetchall()
         for row in rows:
-            row["payload_json"] = json_loads(row["payload_json"])
-            if isinstance(row.get("occurred_at"), datetime):
-                row["occurred_at"] = row["occurred_at"].strftime("%Y-%m-%d %H:%M:%S.%f")
+            self._normalize_inbound_row(row)
         return rows
+
+    async def fetch_unprocessed_by_id(self, inbound_event_id: int) -> dict | None:
+        sql = """
+        SELECT id, chat_id, thread_id, event_id, event_type, standard_event_type,
+               author_id, sender_role, occurred_at, dedup_key, payload_json,
+               raw_action, source, organization_id, ignored, ignore_reason
+        FROM inbound_events
+        WHERE id = %s
+          AND processed = 0
+          AND ignored = 0
+        LIMIT 1
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (inbound_event_id,))
+                row = await cur.fetchone()
+        if not row:
+            return None
+        self._normalize_inbound_row(row)
+        return row
+
+    def _normalize_inbound_row(self, row: dict) -> None:
+        row["payload_json"] = json_loads(row["payload_json"])
+        if isinstance(row.get("occurred_at"), datetime):
+            row["occurred_at"] = row["occurred_at"].strftime("%Y-%m-%d %H:%M:%S.%f")
 
     async def mark_processed(self, inbound_event_id: int) -> None:
         async with self.pool.acquire() as conn:
@@ -236,6 +259,28 @@ class OutboundMessageRepository:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(sql, (limit,))
+                rows = await cur.fetchall()
+        for row in rows:
+            row["payload_json"] = json_loads(row["payload_json"])
+        return rows
+
+    async def fetch_pending_by_inbound_event(self, inbound_event_id: int, limit: int = 20) -> list[dict]:
+        sql = """
+        SELECT m.id, COALESCE(c.tenant_id, 'default') AS tenant_id,
+               COALESCE(c.channel_type, 'livechat') AS channel_type,
+               m.conversation_id, m.inbound_event_id, m.chat_id, m.thread_id,
+               m.action_type, m.message_type, m.payload_json, m.status,
+               m.dedup_key, m.block_index, m.message_kind, m.command_type
+        FROM outbound_messages m
+        LEFT JOIN conversation_states c ON c.conversation_id = m.conversation_id
+        WHERE m.status = 'PENDING'
+          AND m.inbound_event_id = %s
+        ORDER BY m.id ASC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (inbound_event_id, limit))
                 rows = await cur.fetchall()
         for row in rows:
             row["payload_json"] = json_loads(row["payload_json"])

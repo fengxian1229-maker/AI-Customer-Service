@@ -51,6 +51,7 @@ Recommended next task:
 ## Latest P8-B Status
 
 - P8-B.1 formalized real Gemini FAQ-authoritative smoke hardening.
+- P8-B.2 locks the real Gemini FAQ smoke to the single inbound event it inserts.
 - Split Gemini router prompts into `GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT` and `FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT`; `ROUTER_SYSTEM_PROMPT` remains an alias to the guarded prompt.
 - Gateway router payloads now include `router_mode` / `mode`, and providers return the current router mode.
 - Mock provider supports `faq_authoritative` without deterministic context for common FAQ how-to aliases.
@@ -58,7 +59,10 @@ Recommended next task:
 - `faq_authoritative` active-workflow and unsupported/SOP/human/backend-like model routes now fall back to deterministic-free clarification with `fallback_to_deterministic=false`.
 - Router checkpoint metadata now preserves compact reason/query/error/RAG diagnostics and excludes full answer blocks.
 - `llm_shadow_admin` now serializes datetime values and keeps secret sanitization.
-- Added `python -m app.workers.real_gemini_faq_smoke`; it does not send by default and marks this smoke's pending outbox rows `SKIPPED_MANUAL_SMOKE`.
+- Added `python -m app.workers.real_gemini_faq_smoke`; it does not send by default, does not require real LiveChat credentials in no-send mode, and marks only this smoke inbound event's pending outbox rows `SKIPPED_MANUAL_SMOKE`.
+- Added scoped worker/repository entry points: `fetch_unprocessed_by_id`, `process_inbound_event_id`, `fetch_pending_by_inbound_event`, and `process_pending_for_inbound_event`.
+- `--send` requires explicit `--chat-id` and `--thread-id` before inserting an inbound event, then sends only pending outbound rows for that inbound event.
+- Gateway LLM error metadata redacts secret values, not only secret-like key names.
 - Added `llm_router_mode=faq_authoritative`.
 - Ordinary text messages in this mode call the LLM router before deterministic keyword routing.
 - The LLM router payload carries `deterministic_rewrite_result=None`, `deterministic_intent_result=None`, and `deterministic_route=None`.
@@ -71,7 +75,7 @@ Recommended next task:
 - Image blocks currently use MVP URL text fallback and are marked `SENT`; buttons blocks are marked `SKIPPED_PREVIEW`.
 - Added `/Users/andy/ai-agent/docs/p8-b-llm-first-faq-direct-answer-blocks.md`.
 - Added MySQL smoke `tests/integration/test_llm_faq_authoritative_multimodal_mysql_smoke.py`.
-- Still no LLM final answer generation, tool calling, external command generation, real backend, real Telegram, WebSocket/Webhook, embeddings/vector DB, production LiveChat image upload, or production rich buttons.
+- Still no LLM final answer generation, tool calling, external command generation, real backend, real Telegram, WebSocket/Webhook, embeddings/vector DB, production LiveChat image upload, production rich buttons, backend/checkpoint UI, or interrupt/resume.
 
 ## Latest P8-A Status
 

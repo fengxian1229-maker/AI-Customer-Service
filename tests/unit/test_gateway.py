@@ -714,13 +714,44 @@ def test_gateway_service_router_checkpoint_metadata_preserves_router_and_rag_sum
     assert router["final_intent"] == "deposit_howto"
     assert router["route_source"] == "llm_faq_authoritative"
     assert router["rewrite_source"] == "llm_faq_authoritative"
-    assert "api_key" not in str(router)
-    assert "password" not in str(router)
+    assert router["error_message"] == "api_key=[redacted] password=[redacted] boom"
+    assert "hidden" not in str(router)
     assert metadata["rag"]["rag_query"] == "怎么存款"
     assert metadata["rag"]["rag_matched"] is True
     assert metadata["rag"]["rag_documents"][0]["title"] == "充值方式说明"
     assert "answer_blocks" not in str(metadata["rag"])
     assert "content" not in str(metadata["rag"])
+
+
+def test_gateway_service_redacts_secret_values_from_error_metadata():
+    service = GatewayService()
+    error = RuntimeError("api_key=abc123 password: p@ss Bearer xyz token=tok123")
+
+    router_state = service._router_fallback_state(
+        {"route": "faq", "intent_result": {"intent": "faq_general"}},
+        "exception",
+        exc=error,
+    )
+    shadow_error = service._shadow_error_result(error)
+    checkpoint = service._build_checkpoint_success_metadata(
+        {
+            "route": "clarification",
+            "route_source": "llm_faq_authoritative",
+            "rewrite_source": "llm_faq_authoritative",
+            "intent_result": {"intent": "clarification_needed"},
+            "llm_router_result": router_state["llm_router_result"],
+            "llm_rewrite_result": shadow_error,
+        }
+    )
+
+    combined = str({"router": router_state["llm_router_result"], "shadow": shadow_error, "checkpoint": checkpoint})
+    assert "abc123" not in combined
+    assert "p@ss" not in combined
+    assert "xyz" not in combined
+    assert "tok123" not in combined
+    assert "api_key=[redacted]" in combined
+    assert "password=[redacted]" in combined
+    assert "Bearer [redacted]" in combined
 
 
 def test_gateway_service_faq_authoritative_renders_multimodal_answer_blocks_to_ordered_outbox_rows():
@@ -841,7 +872,9 @@ def test_gateway_service_guarded_authoritative_falls_back_for_low_confidence_inv
         assert result["graph_state"]["route_source"] == "deterministic"
         assert result["graph_state"]["llm_router_result"]["status"] == "fallback"
         assert result["graph_state"]["llm_router_result"]["fallback_reason"] == reason
-        assert "api_key" not in str(result["graph_state"]["llm_router_result"])
+        if reason == "exception":
+            assert "api_key=[redacted]" in str(result["graph_state"]["llm_router_result"])
+        assert "hidden" not in str(result["graph_state"]["llm_router_result"])
         assert graph_error_repository.inserted == []
 
 
@@ -1135,8 +1168,10 @@ def test_gateway_service_shadow_failure_does_not_block_deterministic_outbound_or
     assert result["graph_state"]["llm_rewrite_result"]["error_type"] == "RuntimeError"
     assert result["graph_state"]["llm_intent_result"]["mode"] == "shadow"
     assert result["graph_state"]["llm_intent_result"]["status"] == "error"
-    assert "api_key" not in str(result["graph_state"]["llm_rewrite_result"])
-    assert "password" not in str(result["graph_state"]["llm_intent_result"])
+    assert "api_key=[redacted]" in str(result["graph_state"]["llm_rewrite_result"])
+    assert "password=[redacted]" in str(result["graph_state"]["llm_intent_result"])
+    assert "hidden" not in str(result["graph_state"]["llm_rewrite_result"])
+    assert "hidden" not in str(result["graph_state"]["llm_intent_result"])
     assert graph_error_repository.inserted == []
 
 

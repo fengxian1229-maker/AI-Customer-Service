@@ -329,6 +329,95 @@ def test_real_gemini_faq_smoke_rejects_wrong_settings_before_writes(monkeypatch)
     assert result["inbound_event_id"] is None
 
 
+def test_real_gemini_faq_smoke_no_send_uses_unused_livechat_credentials(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    calls = {}
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            calls["settings_kwargs"] = kwargs
+            self.llm_provider = "Gemini"
+            self.llm_router_mode = "FAQ_AUTHORITATIVE"
+            self.langgraph_checkpoint_mode = "off"
+
+    class FakePool:
+        def close(self) -> None:
+            calls["closed"] = True
+
+        async def wait_closed(self) -> None:
+            calls["wait_closed"] = True
+
+    async def fake_create_pool(settings):
+        calls["settings"] = settings
+        return FakePool()
+
+    async def fake_insert_smoke_event(pool, args, summary):
+        return 55
+
+    async def fake_process_inbound_event_id(pool, inbound_event_id, checkpoint_mode="off", settings=None):
+        return {"processed": 1, "failed": 0, "enqueued": 1, "inbound_event_id": inbound_event_id, "failures": []}
+
+    async def fake_fetch_latest_router_metadata(pool, conversation_id):
+        return {"status": "accepted", "final_route": "faq", "mode": "faq_authoritative"}
+
+    async def fake_fetch_outbound_messages(pool, conversation_id, inbound_event_id):
+        return [{"id": 7, "inbound_event_id": inbound_event_id, "status": "PENDING"}]
+
+    async def fake_fetch_graph_run_errors(pool, conversation_id):
+        return []
+
+    class FakeOutboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def mark_pending_by_inbound_event_skipped(self, inbound_event_id: int, error: str):
+            calls["skipped_inbound_event_id"] = inbound_event_id
+            return 1
+
+    monkeypatch.setattr(real_gemini_faq_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(real_gemini_faq_smoke, "create_pool", fake_create_pool)
+    monkeypatch.setattr(real_gemini_faq_smoke, "_insert_smoke_event", fake_insert_smoke_event)
+    monkeypatch.setattr(real_gemini_faq_smoke.gateway_consumer, "process_inbound_event_id", fake_process_inbound_event_id)
+    monkeypatch.setattr(real_gemini_faq_smoke, "_fetch_latest_router_metadata", fake_fetch_latest_router_metadata)
+    monkeypatch.setattr(real_gemini_faq_smoke, "_fetch_outbound_messages", fake_fetch_outbound_messages)
+    monkeypatch.setattr(real_gemini_faq_smoke, "_fetch_graph_run_errors", fake_fetch_graph_run_errors)
+    monkeypatch.setattr(real_gemini_faq_smoke, "OutboundMessageRepository", FakeOutboundRepository)
+
+    result = asyncio.run(real_gemini_faq_smoke.run(["--text", "怎么存款？"]))
+
+    assert calls["settings_kwargs"] == {
+        "livechat_agent_access_token": "unused-for-real-gemini-faq-smoke",
+        "livechat_account_id": "unused-for-real-gemini-faq-smoke",
+    }
+    assert result["smoke_success"] is True
+    assert result["skipped_unsent_count"] == 1
+    assert calls["skipped_inbound_event_id"] == 55
+
+
+def test_real_gemini_faq_smoke_send_requires_explicit_chat_and_thread(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.llm_provider = "gemini"
+            self.llm_router_mode = "faq_authoritative"
+
+    monkeypatch.setattr(real_gemini_faq_smoke, "Settings", FakeSettings)
+
+    missing_chat = asyncio.run(real_gemini_faq_smoke.run(["--send", "--thread-id", "thread-1"]))
+    missing_thread = asyncio.run(real_gemini_faq_smoke.run(["--send", "--chat-id", "chat-1"]))
+
+    assert missing_chat["error"]["code"] == "send_requires_explicit_chat_id"
+    assert missing_chat["inbound_event_id"] is None
+    assert missing_thread["error"]["code"] == "send_requires_explicit_thread_id"
+    assert missing_thread["inbound_event_id"] is None
+
+
 def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
     import asyncio
 

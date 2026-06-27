@@ -264,6 +264,10 @@ P8-B 固化 LLM-first FAQ route + answer_blocks outbound smoke：
 10. P8-B.1 将 Gemini router prompt 按 guarded_authoritative / faq_authoritative 分离
 11. P8-B.1 新增 real_gemini_faq_smoke CLI，默认不发送，并把 manual smoke outbox 标记 SKIPPED_MANUAL_SMOKE
 12. P8-B.1 补强 llm_router checkpoint metadata 与 llm_shadow_admin datetime JSON 输出
+13. P8-B.2 将 real_gemini_faq_smoke 限定为只处理自己插入的 inbound_event_id
+14. P8-B.2 将 no-send skip 和 --send sender dispatch 都限定到同一个 inbound_event_id
+15. P8-B.2 no-send 模式不要求真实 LiveChat 凭据，--send 必须显式传入 chat_id/thread_id
+16. P8-B.2 补强 LLM error metadata 脱敏，隐藏 secret value 而不是只隐藏 key name
 ```
 
 当前 RAG 仍明确不做：
@@ -282,9 +286,10 @@ LLM tool calling
 当前 P7-A 后续候选：
 
 ```text
-1. 小范围真实 Gemini faq_authoritative FAQ route smoke review，仍不启用 final answer generation
-2. 将 image MVP URL fallback 替换为确认过的真实 LiveChat image/file event
-3. LLM/router shadow result review / metrics
+1. P8-A.2 小范围真实 Gemini guarded_authoritative smoke review，仍不启用 final answer generation
+2. 小范围真实 Gemini faq_authoritative FAQ route smoke review，仍不启用 final answer generation
+3. 将 image MVP URL fallback 替换为确认过的真实 LiveChat image/file event
+4. LLM/router shadow result review / metrics
 ```
 
 当前知识库运维入口仅包含：
