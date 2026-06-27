@@ -100,9 +100,18 @@ class GatewayService:
         if self.transactional_repository:
             should_reply = should_enqueue_reply(event)
             conversation = await self._load_transactional_conversation(event)
-            recent_messages = await self._load_recent_messages(conversation)
-            graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation, recent_messages) if should_reply or event.standard_event_type == "FILE_RECEIVED" else None
-            customer_message = build_customer_message_from_inbound(event, conversation, inbound_event_id) if graph_state else None
+            human_active = self._is_human_active(conversation)
+            recent_messages = await self._load_recent_messages(conversation) if not human_active else []
+            graph_state = (
+                await self._run_graph_with_boundary(inbound_event_id, event, conversation, recent_messages)
+                if not human_active and (should_reply or event.standard_event_type == "FILE_RECEIVED")
+                else None
+            )
+            customer_message = (
+                build_customer_message_from_inbound(event, conversation, inbound_event_id)
+                if graph_state or (human_active and (should_reply or event.standard_event_type == "FILE_RECEIVED"))
+                else None
+            )
             outbound_messages = self._build_outbound_messages(inbound_event_id, event, conversation["conversation_id"], graph_state)
             external_commands = self._build_external_commands(inbound_event_id, event, conversation, graph_state)
             result = await self.transactional_repository.process_event_transactionally(
@@ -130,11 +139,17 @@ class GatewayService:
             chat_id=event.chat_id or "unknown",
             thread_id=event.thread_id,
         )
+        human_active = self._is_human_active(conversation)
 
         graph_state = None
         outbound_messages = []
         customer_message = None
-        if should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED":
+        if human_active and (should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED"):
+            customer_message = build_customer_message_from_inbound(event, conversation, inbound_event_id)
+            if self.message_repository:
+                await self.message_repository.insert_idempotent(customer_message)
+            external_commands = []
+        elif should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED":
             recent_messages = await self._load_recent_messages(conversation)
             graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation, recent_messages)
             customer_message = build_customer_message_from_inbound(event, conversation, inbound_event_id)
@@ -167,6 +182,9 @@ class GatewayService:
             "outbound_messages": outbound_messages,
             "external_commands": external_commands,
         }
+
+    def _is_human_active(self, conversation: dict) -> bool:
+        return str(conversation.get("status") or "").upper() == "HUMAN_ACTIVE"
 
     async def _run_graph_with_boundary(
         self,
@@ -856,6 +874,8 @@ class GatewayService:
         graph_state: dict | None,
     ) -> list[dict]:
         if not graph_state:
+            return []
+        if graph_state.get("route") == "human_handoff":
             return []
         if graph_state.get("route") == "faq" and graph_state.get("rag_context"):
             plan = build_faq_outbound_plan_from_rag_context(

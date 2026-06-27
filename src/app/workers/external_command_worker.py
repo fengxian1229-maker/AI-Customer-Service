@@ -6,9 +6,10 @@ import os
 import socket
 import time
 
+from app.channels.livechat.sender_client import LiveChatApiError, LiveChatSenderClient
 from app.core.settings import Settings
 from app.db.mysql import create_pool
-from app.db.repositories import ExternalCommandRepository, ExternalCommandResultRepository
+from app.db.repositories import ConversationRepository, ExternalCommandRepository, ExternalCommandResultRepository
 
 
 SUPPORTED_COMMAND_TYPES = {
@@ -22,6 +23,10 @@ SUPPORTED_COMMAND_TYPES = {
 
 
 logger = logging.getLogger(__name__)
+
+HUMAN_HANDOFF_NOTICE_TEXT = "我会为你转接真人客服继续协助。"
+HUMAN_HANDOFF_COMMAND_TYPE = "human_handoff.requested"
+HUMAN_HANDOFF_RESULT_TYPE = "human_handoff.transfer_chat.result"
 
 
 MOCK_RESULT_BY_COMMAND_TYPE = {
@@ -77,15 +82,17 @@ MOCK_RESULT_BY_COMMAND_TYPE = {
 async def process_pending_commands(
     repository: ExternalCommandRepository,
     result_repository: ExternalCommandResultRepository | None = None,
+    conversation_repository: ConversationRepository | None = None,
     limit: int = 20,
     dry_run: bool = True,
     emit_result: bool = False,
+    execute_human_handoff: bool = False,
+    settings: Settings | None = None,
+    sender_client_factory=None,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
 ) -> list[dict]:
-    if not dry_run:
-        raise ValueError("external_command_worker currently supports --dry-run only")
     if emit_result and result_repository is None:
         raise ValueError("result_repository is required when emit_result=True")
 
@@ -97,27 +104,24 @@ async def process_pending_commands(
         try:
             if command_type not in SUPPORTED_COMMAND_TYPES:
                 raise ValueError(f"unsupported command_type: {command_type}")
-            print(json.dumps({"dry_run": True, "command": command}, ensure_ascii=False, default=str))
-            result_insert = None
-            if emit_result:
-                result_type, result_json = MOCK_RESULT_BY_COMMAND_TYPE[command_type]
-                result_insert = await result_repository.insert_idempotent(
-                    {
-                        "external_command_id": command["id"],
-                        "tenant_id": command.get("tenant_id") or "default",
-                        "conversation_id": command["conversation_id"],
-                        "chat_id": command["chat_id"],
-                        "thread_id": command.get("thread_id"),
-                        "inbound_event_id": command.get("inbound_event_id"),
-                        "command_type": command_type,
-                        "result_type": result_type,
-                        "result_json": result_json,
-                    }
+            if dry_run:
+                item = await _process_dry_run_command(
+                    command,
+                    repository=repository,
+                    result_repository=result_repository,
+                    emit_result=emit_result,
                 )
-            await repository.mark_dry_run_done(command["id"])
-            item = {"id": command["id"], "command_type": command_type, "status": "DRY_RUN_DONE"}
-            if emit_result:
-                item["result_insert"] = result_insert
+            else:
+                item = await _process_real_command(
+                    command,
+                    repository=repository,
+                    result_repository=result_repository,
+                    conversation_repository=conversation_repository,
+                    emit_result=emit_result,
+                    execute_human_handoff=execute_human_handoff,
+                    settings=settings,
+                    sender_client_factory=sender_client_factory,
+                )
             results.append(item)
         except Exception as exc:
             await repository.mark_processing_failed(command["id"], str(exc), max_retries=max_retries)
@@ -125,11 +129,178 @@ async def process_pending_commands(
     return results
 
 
+async def _process_dry_run_command(
+    command: dict,
+    repository: ExternalCommandRepository,
+    result_repository: ExternalCommandResultRepository | None,
+    emit_result: bool,
+) -> dict:
+    command_type = command["command_type"]
+    print(json.dumps({"dry_run": True, "command": command}, ensure_ascii=False, default=str))
+    result_insert = None
+    if emit_result:
+        result_type, result_json = MOCK_RESULT_BY_COMMAND_TYPE[command_type]
+        result_insert = await result_repository.insert_idempotent(_build_result_record(command, result_type, result_json))
+    await repository.mark_dry_run_done(command["id"])
+    item = {"id": command["id"], "command_type": command_type, "status": "DRY_RUN_DONE"}
+    if emit_result:
+        item["result_insert"] = result_insert
+    return item
+
+
+async def _process_real_command(
+    command: dict,
+    repository: ExternalCommandRepository,
+    result_repository: ExternalCommandResultRepository | None,
+    conversation_repository: ConversationRepository | None,
+    emit_result: bool,
+    execute_human_handoff: bool,
+    settings: Settings | None,
+    sender_client_factory,
+) -> dict:
+    command_type = command["command_type"]
+    if command_type != HUMAN_HANDOFF_COMMAND_TYPE:
+        error = f"real execution unsupported for command_type: {command_type}"
+        await _mark_command_status(repository, command["id"], "FAILED_UNSUPPORTED", error)
+        return {"id": command["id"], "command_type": command_type, "status": "FAILED_UNSUPPORTED", "error": error}
+
+    block_reason = _handoff_block_reason(command, settings, execute_human_handoff)
+    if block_reason:
+        status = "SKIPPED_DISABLED" if block_reason in {"livechat_handoff_enabled is false", "--execute-human-handoff is required"} else "FAILED_CONFIG"
+        await _mark_command_status(repository, command["id"], status, block_reason)
+        return {"id": command["id"], "command_type": command_type, "status": status, "error": block_reason}
+
+    sender_client_factory = sender_client_factory or _build_sender_client
+    sender_client = sender_client_factory(settings)
+    target_group_id = settings.livechat_handoff_target_group_id
+    ignore_agents_availability = settings.livechat_handoff_ignore_agents_availability
+    ignore_requester_presence = settings.livechat_handoff_ignore_requester_presence
+
+    try:
+        await sender_client.send_text(command["chat_id"], command.get("thread_id"), HUMAN_HANDOFF_NOTICE_TEXT)
+        livechat_response = await sender_client.transfer_chat_to_group(
+            command["chat_id"],
+            target_group_id,
+            ignore_agents_availability=ignore_agents_availability,
+            ignore_requester_presence=ignore_requester_presence,
+        )
+    except Exception as exc:
+        status = classify_handoff_error(exc)
+        await _mark_command_status(repository, command["id"], status, str(exc))
+        return {"id": command["id"], "command_type": command_type, "status": status, "error": str(exc)}
+
+    if conversation_repository is not None:
+        await conversation_repository.update_workflow_state(
+            command["conversation_id"],
+            {
+                "status": "HUMAN_ACTIVE",
+                "active_workflow": "human_handoff",
+                "workflow_stage": "transferred",
+                "slot_memory": {},
+            },
+        )
+    result_insert = None
+    result_json = {
+        "status": "TRANSFERRED",
+        "chat_id": command["chat_id"],
+        "target_group_id": target_group_id,
+        "ignore_agents_availability": ignore_agents_availability,
+        "ignore_requester_presence": ignore_requester_presence,
+        "livechat_response": livechat_response,
+    }
+    if emit_result:
+        result_insert = await result_repository.insert_idempotent(
+            _build_result_record(command, HUMAN_HANDOFF_RESULT_TYPE, result_json)
+        )
+    await repository.mark_sent(command["id"])
+    item = {"id": command["id"], "command_type": command_type, "status": "SENT", "transfer_result": result_json}
+    if emit_result:
+        item["result_insert"] = result_insert
+    return item
+
+
+def _handoff_block_reason(command: dict, settings: Settings | None, execute_human_handoff: bool) -> str | None:
+    if not execute_human_handoff:
+        return "--execute-human-handoff is required"
+    if settings is None:
+        return "settings are required for real human handoff"
+    if not settings.livechat_handoff_enabled:
+        return "livechat_handoff_enabled is false"
+    if not command.get("chat_id"):
+        return "command.chat_id is required"
+    if settings.livechat_handoff_target_group_id is None:
+        return "livechat_handoff_target_group_id is required"
+    return None
+
+
+def classify_handoff_error(exc: Exception) -> str:
+    if isinstance(exc, LiveChatApiError):
+        if exc.status in {401, 403}:
+            return "FAILED_CONFIG"
+        if exc.status in {429, 500, 502, 503, 504}:
+            return "RETRYABLE"
+        text = json.dumps(exc.data, ensure_ascii=False).lower()
+        business_tokens = (
+            "inactive",
+            "not active",
+            "closed",
+            "not found",
+            "requester presence",
+            "group access",
+        )
+        if any(token in text for token in business_tokens):
+            return "FAILED_BUSINESS"
+        return "FAILED_UNKNOWN"
+    if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
+        return "RETRYABLE"
+    return "FAILED_UNKNOWN"
+
+
+def _build_sender_client(settings: Settings) -> LiveChatSenderClient:
+    return LiveChatSenderClient(
+        settings.livechat_api_base,
+        settings.livechat_account_id,
+        settings.livechat_agent_access_token,
+    )
+
+
+def _build_result_record(command: dict, result_type: str, result_json: dict) -> dict:
+    return {
+        "external_command_id": command["id"],
+        "tenant_id": command.get("tenant_id") or "default",
+        "conversation_id": command["conversation_id"],
+        "chat_id": command["chat_id"],
+        "thread_id": command.get("thread_id"),
+        "inbound_event_id": command.get("inbound_event_id"),
+        "command_type": command["command_type"],
+        "result_type": result_type,
+        "result_json": result_json,
+    }
+
+
+async def _mark_command_status(repository: ExternalCommandRepository, command_id: int, status: str, error: str | None) -> None:
+    if hasattr(repository, "mark_status"):
+        await repository.mark_status(command_id, status, error)
+        return
+    if status == "RETRYABLE" and hasattr(repository, "mark_retryable"):
+        await repository.mark_retryable(command_id, error or status)
+        return
+    if hasattr(repository, "mark_failed"):
+        await repository.mark_failed(command_id, error or status)
+        return
+    raise AttributeError("repository does not support status updates")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Dry-run pending external_commands.")
+    parser = argparse.ArgumentParser(description="Process pending external_commands.")
     parser.add_argument("--once", action="store_true", help="Run one external command batch and exit.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum external commands to process.")
     parser.add_argument("--dry-run", action="store_true", help="Do not call real external systems.")
+    parser.add_argument(
+        "--execute-human-handoff",
+        action="store_true",
+        help="Explicitly allow real LiveChat transfer_chat execution for human_handoff.requested.",
+    )
     parser.add_argument("--emit-result", action="store_true", help="Emit mock external_command_results in dry-run mode.")
     parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
     parser.add_argument("--lease-seconds", type=int, default=60, help="Seconds before a queue lease expires.")
@@ -151,11 +322,12 @@ async def run_once(
     limit: int,
     dry_run: bool,
     emit_result: bool = False,
+    execute_human_handoff: bool = False,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
 ) -> dict:
-    settings = Settings(
+    settings = Settings() if execute_human_handoff else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
     )
@@ -163,12 +335,16 @@ async def run_once(
     try:
         repository = ExternalCommandRepository(pool)
         result_repository = ExternalCommandResultRepository(pool) if emit_result else None
+        conversation_repository = ConversationRepository(pool)
         results = await process_pending_commands(
             repository,
             result_repository=result_repository,
+            conversation_repository=conversation_repository,
             limit=limit,
             dry_run=dry_run,
             emit_result=emit_result,
+            execute_human_handoff=execute_human_handoff,
+            settings=settings,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
             max_retries=max_retries,
@@ -177,11 +353,14 @@ async def run_once(
             "worker": "external_command_worker",
             "mode": "once",
             "dry_run": dry_run,
+            "execute_human_handoff": execute_human_handoff,
             "emit_result": emit_result,
             "processed": len(results),
             "dry_run_done": sum(1 for result in results if result["status"] == "DRY_RUN_DONE"),
+            "sent": sum(1 for result in results if result["status"] == "SENT"),
             "results_emitted": sum(1 for result in results if result.get("result_insert")),
             "failed": sum(1 for result in results if result["status"] == "FAILED"),
+            "results": results,
         }
     finally:
         pool.close()
@@ -212,12 +391,13 @@ async def run_forever(
     limit: int,
     dry_run: bool,
     emit_result: bool = False,
+    execute_human_handoff: bool = False,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
     recover_interval_seconds: int = 30,
 ) -> None:
-    settings = Settings(
+    settings = Settings() if execute_human_handoff else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
     )
@@ -226,13 +406,17 @@ async def run_forever(
     try:
         repository = ExternalCommandRepository(pool)
         result_repository = ExternalCommandResultRepository(pool) if emit_result else None
+        conversation_repository = ConversationRepository(pool)
         await run_polling_loop(
             repository=repository,
             result_repository=result_repository,
+            conversation_repository=conversation_repository,
             poll_seconds=settings.poll_seconds,
             limit=limit,
             dry_run=dry_run,
             emit_result=emit_result,
+            execute_human_handoff=execute_human_handoff,
+            settings=settings,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
             max_retries=max_retries,
@@ -250,7 +434,10 @@ async def run_polling_loop(
     poll_seconds: int,
     limit: int,
     dry_run: bool,
+    conversation_repository: ConversationRepository | None = None,
     emit_result: bool = False,
+    execute_human_handoff: bool = False,
+    settings: Settings | None = None,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
@@ -270,9 +457,12 @@ async def run_polling_loop(
             await process_pending_commands(
                 repository,
                 result_repository=result_repository,
+                conversation_repository=conversation_repository,
                 limit=limit,
                 dry_run=dry_run,
                 emit_result=emit_result,
+                execute_human_handoff=execute_human_handoff,
+                settings=settings,
                 worker_id=worker_id,
                 lease_seconds=lease_seconds,
                 max_retries=max_retries,
@@ -292,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
                 limit=args.limit,
                 dry_run=args.dry_run,
                 emit_result=args.emit_result,
+                execute_human_handoff=args.execute_human_handoff,
                 worker_id=args.worker_id,
                 lease_seconds=args.lease_seconds,
                 max_retries=args.max_retries,
@@ -304,6 +495,7 @@ def main(argv: list[str] | None = None) -> int:
                 limit=args.limit,
                 dry_run=args.dry_run,
                 emit_result=args.emit_result,
+                execute_human_handoff=args.execute_human_handoff,
                 worker_id=args.worker_id,
                 lease_seconds=args.lease_seconds,
                 max_retries=args.max_retries,

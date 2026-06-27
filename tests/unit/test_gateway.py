@@ -42,9 +42,10 @@ def test_build_fixed_reply_message():
 
 
 class FakeConversationRepository:
-    def __init__(self) -> None:
+    def __init__(self, status: str = "AI_ACTIVE") -> None:
         self.calls = []
         self.updated = []
+        self.status = status
 
     async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
         self.calls.append((chat_id, thread_id))
@@ -54,7 +55,7 @@ class FakeConversationRepository:
             "channel_type": "livechat",
             "chat_id": chat_id,
             "current_thread_id": thread_id,
-            "status": "AI_ACTIVE",
+            "status": self.status,
             "active_workflow": None,
             "workflow_stage": None,
             "slot_memory": {},
@@ -354,6 +355,36 @@ def test_gateway_service_human_handoff_keeps_existing_external_command_semantics
     assert rag_service.calls == []
     assert result["graph_state"]["route"] == "human_handoff"
     assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
+    assert result["outbound_messages"] == []
+    assert outbound_repository.inserted == []
+
+
+def test_gateway_service_human_active_records_inbound_but_does_not_run_graph_or_enqueue_work():
+    conversation_repository = FakeConversationRepository(status="HUMAN_ACTIVE")
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    message_repository = FakeConversationMessageRepository()
+    graph = RecordingGraph()
+    inbound_repository = FakeInboundRepository()
+    service = GatewayService(
+        inbound_repository=inbound_repository,
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        message_repository=message_repository,
+        workflow_graph=graph,
+    )
+
+    result = asyncio.run(service.process_event(15, make_event_with_text("are you there?")))
+
+    assert graph.calls == []
+    assert result["graph_state"] is None
+    assert result["outbound_messages"] == []
+    assert result["external_commands"] == []
+    assert outbound_repository.inserted == []
+    assert external_repository.inserted == []
+    assert message_repository.inserted[0]["sender_role"] == "customer"
+    assert inbound_repository.processed == [15]
 
 
 def test_gateway_service_prefetches_rag_context_only_for_faq_route():

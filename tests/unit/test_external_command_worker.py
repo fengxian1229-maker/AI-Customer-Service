@@ -19,6 +19,14 @@ def test_external_command_worker_cli_accepts_emit_result():
     assert args.emit_result is True
 
 
+def test_external_command_worker_cli_accepts_execute_human_handoff():
+    from app.workers.external_command_worker import build_arg_parser
+
+    args = build_arg_parser().parse_args(["--once", "--execute-human-handoff"])
+
+    assert args.execute_human_handoff is True
+
+
 def test_external_command_worker_cli_accepts_lease_options():
     from app.workers.external_command_worker import build_arg_parser
 
@@ -150,6 +158,324 @@ def test_external_command_worker_dry_run_marks_pending_done():
         {"id": 1, "command_type": "telegram.send_case_card", "status": "DRY_RUN_DONE"},
         {"id": 2, "command_type": "backend.query", "status": "DRY_RUN_DONE"},
     ]
+
+
+def test_external_command_worker_human_handoff_dry_run_keeps_mock_behavior():
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.done = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 8,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 18,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {},
+                }
+            ]
+
+        async def mark_dry_run_done(self, command_id: int) -> None:
+            self.done.append(command_id)
+
+    class FakeResultRepository:
+        def __init__(self) -> None:
+            self.inserted = []
+
+        async def insert_idempotent(self, result: dict) -> dict:
+            self.inserted.append(result)
+            return {"inserted": True, "duplicate": False, "id": 100}
+
+    repository = FakeCommandRepository()
+    result_repository = FakeResultRepository()
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            result_repository=result_repository,
+            dry_run=True,
+            emit_result=True,
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.done == [8]
+    assert result[0]["status"] == "DRY_RUN_DONE"
+    assert result_repository.inserted[0]["result_type"] == "human_handoff.requested.mock_result"
+    assert result_repository.inserted[0]["result_json"]["status"] == "MOCKED"
+
+
+def test_external_command_worker_real_handoff_disabled_does_not_call_livechat():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.statuses = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 9,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 19,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {},
+                }
+            ]
+
+        async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+            self.statuses.append((command_id, status, error))
+
+    class SenderClient:
+        async def send_text(self, chat_id, thread_id, text):
+            raise AssertionError("LiveChat must not be called")
+
+        async def transfer_chat_to_group(self, *args, **kwargs):
+            raise AssertionError("LiveChat must not be called")
+
+    repository = FakeCommandRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_enabled=False,
+        livechat_handoff_target_group_id=23,
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            dry_run=False,
+            execute_human_handoff=True,
+            settings=settings,
+            sender_client_factory=lambda settings: SenderClient(),
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.statuses == [(9, "SKIPPED_DISABLED", "livechat_handoff_enabled is false")]
+    assert result[0]["status"] == "SKIPPED_DISABLED"
+
+
+def test_external_command_worker_real_handoff_requires_explicit_execute_flag():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.statuses = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 10,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 20,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {},
+                }
+            ]
+
+        async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+            self.statuses.append((command_id, status, error))
+
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_enabled=True,
+        livechat_handoff_target_group_id=23,
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            FakeCommandRepository(),
+            dry_run=False,
+            execute_human_handoff=False,
+            settings=settings,
+            worker_id="worker-a",
+        )
+    )
+
+    assert result[0]["status"] == "SKIPPED_DISABLED"
+    assert result[0]["error"] == "--execute-human-handoff is required"
+
+
+def test_external_command_worker_real_handoff_success_transfers_emits_result_and_marks_human_active():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.done = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 11,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 21,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {},
+                }
+            ]
+
+        async def mark_sent(self, command_id: int) -> None:
+            self.done.append(command_id)
+
+    class FakeResultRepository:
+        def __init__(self) -> None:
+            self.inserted = []
+
+        async def insert_idempotent(self, result: dict) -> dict:
+            self.inserted.append(result)
+            return {"inserted": True, "duplicate": False, "id": 101}
+
+    class FakeConversationRepository:
+        def __init__(self) -> None:
+            self.updated = []
+
+        async def update_workflow_state(self, conversation_id: str, graph_state: dict) -> None:
+            self.updated.append((conversation_id, graph_state))
+
+    class SenderClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_text(self, chat_id, thread_id, text):
+            self.calls.append(("send_text", chat_id, thread_id, text))
+            return {"event_id": "notice-1"}
+
+        async def transfer_chat_to_group(self, chat_id, group_id, ignore_agents_availability=True, ignore_requester_presence=True):
+            self.calls.append(
+                (
+                    "transfer",
+                    chat_id,
+                    group_id,
+                    ignore_agents_availability,
+                    ignore_requester_presence,
+                )
+            )
+            return {}
+
+    sender_client = SenderClient()
+    result_repository = FakeResultRepository()
+    conversation_repository = FakeConversationRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_enabled=True,
+        livechat_handoff_target_group_id=23,
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            FakeCommandRepository(),
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            dry_run=False,
+            emit_result=True,
+            execute_human_handoff=True,
+            settings=settings,
+            sender_client_factory=lambda settings: sender_client,
+            worker_id="worker-a",
+        )
+    )
+
+    assert sender_client.calls == [
+        ("send_text", "chat-1", "thread-1", "我会为你转接真人客服继续协助。"),
+        ("transfer", "chat-1", 23, True, True),
+    ]
+    assert result[0]["status"] == "SENT"
+    assert result_repository.inserted[0]["result_type"] == "human_handoff.transfer_chat.result"
+    assert result_repository.inserted[0]["result_json"]["status"] == "TRANSFERRED"
+    assert result_repository.inserted[0]["result_json"]["livechat_response"] == {}
+    assert conversation_repository.updated == [
+        (
+            "livechat:chat-1",
+            {
+                "status": "HUMAN_ACTIVE",
+                "active_workflow": "human_handoff",
+                "workflow_stage": "transferred",
+                "slot_memory": {},
+            },
+        )
+    ]
+
+
+def test_external_command_worker_real_handoff_classifies_livechat_errors():
+    from app.channels.livechat.sender_client import LiveChatApiError
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import classify_handoff_error, process_pending_commands
+
+    assert classify_handoff_error(LiveChatApiError(403, {"error": "denied"})) == "FAILED_CONFIG"
+    assert classify_handoff_error(LiveChatApiError(429, {"error": "rate"})) == "RETRYABLE"
+    assert classify_handoff_error(TimeoutError("timed out")) == "RETRYABLE"
+    assert classify_handoff_error(LiveChatApiError(400, {"error": "chat is not active"})) == "FAILED_BUSINESS"
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.statuses = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 12,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 22,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {},
+                }
+            ]
+
+        async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+            self.statuses.append((command_id, status, error))
+
+    class SenderClient:
+        async def send_text(self, chat_id, thread_id, text):
+            return {}
+
+        async def transfer_chat_to_group(self, *args, **kwargs):
+            raise LiveChatApiError(429, {"error": "rate limited"})
+
+    repository = FakeCommandRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_enabled=True,
+        livechat_handoff_target_group_id=23,
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            dry_run=False,
+            execute_human_handoff=True,
+            settings=settings,
+            sender_client_factory=lambda settings: SenderClient(),
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.statuses[0][0:2] == (12, "RETRYABLE")
+    assert result[0]["status"] == "RETRYABLE"
 
 
 def test_external_command_worker_emit_result_inserts_mock_results_idempotently():

@@ -289,3 +289,43 @@ def test_livechat_auth_header_accepts_preencoded_basic_token_with_different_env_
     )
 
     assert client.auth_header() == "Basic YWNjb3VudC0xOnRva2VuLTE="
+
+
+def test_livechat_transfer_chat_to_group_posts_expected_payload_and_accepts_empty_response():
+    from app.channels.livechat.sender_client import LiveChatSenderClient
+
+    calls = []
+
+    class Client(LiveChatSenderClient):
+        async def _post_json(self, path: str, body: dict) -> dict:
+            calls.append((path, body, self.auth_header()))
+            return {}
+
+    client = Client(
+        base_url="https://api.livechatinc.com/v3.6",
+        account_id="account-1",
+        access_token="token-1",
+    )
+
+    result = asyncio.run(
+        client.transfer_chat_to_group(
+            chat_id="PJ0MRSHTDG",
+            group_id=23,
+            ignore_agents_availability=True,
+            ignore_requester_presence=False,
+        )
+    )
+
+    assert result == {}
+    assert calls == [
+        (
+            "/agent/action/transfer_chat",
+            {
+                "id": "PJ0MRSHTDG",
+                "target": {"type": "group", "ids": [23]},
+                "ignore_agents_availability": True,
+                "ignore_requester_presence": False,
+            },
+            "Basic YWNjb3VudC0xOnRva2VuLTE=",
+        )
+    ]

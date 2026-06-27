@@ -520,6 +520,22 @@ class ExternalCommandRepository:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (error, command_id))
 
+    async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+        processed_sql = ", processed_at = NOW(6)" if status in {"DRY_RUN_DONE", "SENT", "PROCESSED", "DONE"} else ""
+        sql = f"""
+        UPDATE external_commands
+        SET status = %s,
+            last_error = %s,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL{processed_sql},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (status, error, command_id))
+
     async def mark_processing_failed(self, command_id: int, error: str, max_retries: int = 3) -> None:
         sql = """
         UPDATE external_commands

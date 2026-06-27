@@ -45,6 +45,21 @@ class LiveChatSenderClient:
         data = await self._post_json("/agent/action/get_chat", {"chat_id": chat_id})
         return data.get("chat") or data
 
+    async def transfer_chat_to_group(
+        self,
+        chat_id: str,
+        group_id: int,
+        ignore_agents_availability: bool = True,
+        ignore_requester_presence: bool = True,
+    ) -> dict:
+        body = {
+            "id": chat_id,
+            "target": {"type": "group", "ids": [group_id]},
+            "ignore_agents_availability": ignore_agents_availability,
+            "ignore_requester_presence": ignore_requester_presence,
+        }
+        return await self._post_json("/agent/action/transfer_chat", body)
+
     async def _post_json(self, path: str, body: dict) -> dict:
         return await asyncio.to_thread(self._post_json_sync, path, body)
 

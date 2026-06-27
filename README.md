@@ -101,6 +101,42 @@ Current LLM boundary:
 - `models/` reference code is not part of the current MVP runtime boundary and is not used by the active provider path.
 - Third-party actions still must go through deterministic `external_commands` plus workers; the LLM boundary does not call external APIs directly.
 
+Current human handoff boundary:
+
+- `human_handoff.requested` is produced by deterministic graph routing and persisted as an `external_commands` row.
+- Real LiveChat handoff is disabled by default with `LIVECHAT_HANDOFF_ENABLED=false`.
+- Real handoff requires both `LIVECHAT_HANDOFF_ENABLED=true` and the external command worker flag `--execute-human-handoff`.
+- `LIVECHAT_HANDOFF_TARGET_GROUP_ID` must be set for real handoff; missing group id is a configuration failure and does not fall back to text-only handoff.
+- On successful handoff, the worker sends the handoff notice, calls LiveChat `/agent/action/transfer_chat`, and marks the conversation `HUMAN_ACTIVE` / `human_handoff` / `transferred`.
+- Once a conversation is `HUMAN_ACTIVE`, Gateway records later customer inbound messages but does not run LangGraph, enqueue outbounds, or create new external commands.
+
+Human handoff worker dry-run:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.external_command_worker --once --dry-run --emit-result
+```
+
+Human handoff real execution:
+
+```bash
+LIVECHAT_HANDOFF_ENABLED=true LIVECHAT_HANDOFF_TARGET_GROUP_ID=<group_id> PYTHONPATH=src \
+uv run --group dev python -m app.workers.external_command_worker --once --execute-human-handoff --emit-result
+```
+
+Scoped handoff smoke, default dry-run:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.human_handoff_smoke --inbound-event-id <id>
+PYTHONPATH=src uv run --group dev python -m app.workers.human_handoff_smoke --chat-id <livechat_chat_id>
+```
+
+Scoped handoff smoke, real transfer:
+
+```bash
+LIVECHAT_HANDOFF_ENABLED=true LIVECHAT_HANDOFF_TARGET_GROUP_ID=<group_id> PYTHONPATH=src \
+uv run --group dev python -m app.workers.human_handoff_smoke --chat-id <livechat_chat_id> --execute-human-handoff
+```
+
 Seed default knowledge documents:
 
 ```bash

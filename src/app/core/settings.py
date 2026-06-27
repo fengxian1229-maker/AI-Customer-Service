@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     livechat_account_id: str
     livechat_api_base: str = "https://api.livechatinc.com/v3.6"
     livechat_self_author_ids: str = ""
+    livechat_handoff_target_group_id: int | None = None
+    livechat_handoff_ignore_agents_availability: bool = True
+    livechat_handoff_ignore_requester_presence: bool = True
+    livechat_handoff_enabled: bool = False
 
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
