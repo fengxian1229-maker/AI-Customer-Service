@@ -16,6 +16,7 @@ ALLOWED_LLM_ROUTES = (
 ALLOWED_LLM_INTENTS = (
     "faq_general",
     "deposit_howto",
+    "deposit_inquiry",
     "withdrawal_howto",
     "forgot_password_howto",
     "screenshot_upload_howto",
@@ -100,7 +101,16 @@ def normalize_confidence(value) -> float:
 
 
 def validate_llm_route(route: str) -> str:
-    normalized = str(route or "").strip()
+    normalized = str(route or "").strip().lower()
+    route_aliases = {
+        "sop": "sop",
+        "faq": "faq",
+        "clarification": "clarification",
+        "unsupported": "unsupported",
+        "human": "human_handoff",
+        "human_handoff": "human_handoff",
+    }
+    normalized = route_aliases.get(normalized, normalized)
     if normalized not in ALLOWED_LLM_ROUTES:
         raise ValueError(f"Unsupported llm route: {normalized or route}")
     return normalized
