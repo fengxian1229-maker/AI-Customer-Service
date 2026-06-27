@@ -2,7 +2,7 @@ from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepo
 from app.graph.builder import build_workflow_graph
 from app.graph.nodes import build_graph_state_from_event, prepare_route_state
 from app.llm.contracts import LLMIntentShadowInput, LLMRewriteShadowInput, LLMRouterInput
-from app.llm.guardrails import validate_router_decision_output
+from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.message_history import build_customer_message_from_inbound
@@ -22,23 +22,6 @@ EXTERNAL_COMMAND_TYPES = {
 
 LLM_ROUTER_MODES = {"deterministic", "shadow", "guarded_authoritative"}
 ACTIVE_WORKFLOW_GUARD_STAGES = {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}
-BACKEND_FACT_GUARD_TOKENS = (
-    "backend",
-    "account",
-    "order",
-    "payment",
-    "balance",
-    "status",
-    "withdrawal status",
-    "order status",
-    "提款状态",
-    "订单",
-    "余额",
-    "支付",
-    "付款",
-    "未到账",
-    "没到账",
-)
 
 
 def should_enqueue_reply(event: InboundEvent) -> bool:
@@ -413,13 +396,17 @@ class GatewayService:
             return "file_without_text"
         if is_explicit_human_request(graph_state.get("raw_user_input")):
             return "explicit_human_request"
+        if graph_state.get("route") in {"sop", "faq_then_sop"}:
+            return "deterministic_sop"
+        if graph_state.get("route") in {"human_handoff", "emotion_care"}:
+            return "deterministic_human"
         if graph_state.get("route") == "faq" and self._contains_backend_fact_signal(graph_state):
             return "backend_fact"
         return None
 
     def _contains_backend_fact_signal(self, graph_state: dict) -> bool:
         text = normalize_text(graph_state.get("rewritten_question") or graph_state.get("raw_user_input")).lower()
-        return any(token in text for token in BACKEND_FACT_GUARD_TOKENS)
+        return contains_backend_fact_signal(text)
 
     def _router_fallback_state(
         self,

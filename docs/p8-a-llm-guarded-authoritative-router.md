@@ -12,6 +12,8 @@ LLM_ROUTER_MIN_CONFIDENCE=0.75
 LLM_ROUTER_FALLBACK_TO_DETERMINISTIC=true
 ```
 
+`LLM_ROUTER_FALLBACK_TO_DETERMINISTIC` is retained as a config and diagnostics field in P8-A, but safety fallback is not disableable: rejected, low-confidence, invalid, or hard-guarded LLM router decisions always continue through deterministic routing.
+
 Supported `LLM_ROUTER_MODE` values:
 
 - `deterministic`: do not call the router LLM.
@@ -26,9 +28,9 @@ The LLM router decision is accepted only when all checks pass:
 - `route` is in the route whitelist
 - `intent` is in the intent whitelist
 - `confidence >= LLM_ROUTER_MIN_CONFIDENCE`
-- FAQ decisions are rejected for backend/account/order/payment/balance/status fact-like requests
+- FAQ decisions are rejected for backend/account/order/payment/balance/status fact-like requests, including Spanish deposit/withdrawal missing-status phrasing such as `mi deposito no llegó`
 - human-required decisions must use `human_handoff`
-- active workflows, file-without-text events, explicit human requests, and FAQ-leaning backend fact-like traffic use deterministic hard guards
+- active workflows, file-without-text events, explicit human requests, deterministic SOP / `faq_then_sop` routes, deterministic human/emotion routes, and FAQ-leaning backend fact-like traffic use deterministic hard guards
 
 Accepted decisions set:
 
@@ -84,4 +86,4 @@ MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test'
 PYTHONPATH=src uv run --group dev pytest tests/integration/test_llm_guarded_authoritative_router_mysql_smoke.py -q
 ```
 
-The MySQL test provisions an isolated schema whose name contains `test`, then verifies FAQ acceptance, SOP acceptance, low-confidence fallback, active-workflow hard guard, checkpoint metadata, and no `graph_run_errors`.
+The MySQL test provisions an isolated schema whose name contains `test`, then verifies FAQ acceptance, deterministic SOP hard guards for Chinese and Spanish deposit-missing cases, low-confidence fallback, active-workflow hard guard, checkpoint metadata, and no `graph_run_errors`.

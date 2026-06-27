@@ -82,7 +82,7 @@ Current LLM boundary:
 - `llm_router_mode` supports `deterministic`, `shadow`, and `guarded_authoritative`; default is still `shadow`.
 - In `guarded_authoritative`, accepted LLM router decisions may set `rewritten_question`, `rewrite_result`, `intent_result`, and `route` before graph invoke.
 - Router decisions are recorded in `graph_checkpoint_runs.metadata_json.llm_router` with accepted/fallback status.
-- Router hard guards keep active workflows, explicit human requests, file-without-text events, and FAQ-leaning backend/account/order/payment/balance/status fact-like requests on deterministic safety paths.
+- Router hard guards keep active workflows, explicit human requests, file-without-text events, deterministic SOP / human / emotion routes, and FAQ-leaning backend/account/order/payment/balance/status fact-like requests on deterministic safety paths. `llm_router_fallback_to_deterministic` is retained for config/diagnostics, but P8-A safety fallback is not disableable.
 - Gateway-path shadow result/error summaries are stored in `graph_checkpoint_runs.metadata_json.llm_shadow`.
 - Shadow failures are isolated from deterministic graph execution and do not create `graph_run_errors`.
 - Gemini is not used for final customer reply generation.

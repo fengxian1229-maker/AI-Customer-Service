@@ -498,7 +498,7 @@ def test_gateway_service_without_rag_service_keeps_static_fallback_for_faq():
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
 
 
-def test_gateway_service_guarded_authoritative_uses_llm_faq_route_without_generating_reply_or_commands():
+def test_gateway_service_guarded_authoritative_blocks_llm_faq_for_deterministic_sop_without_generating_reply_or_commands():
     router_service = FakeLLMRouterService()
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
@@ -511,12 +511,14 @@ def test_gateway_service_guarded_authoritative_uses_llm_faq_route_without_genera
 
     result = asyncio.run(service.process_event(26, make_event_with_text("mi deposito no llegó")))
 
-    assert len(router_service.calls) == 1
-    assert result["graph_state"]["route"] == "faq"
-    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
-    assert result["graph_state"]["rewrite_source"] == "llm_guarded_authoritative"
-    assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
-    assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
+    assert router_service.calls == []
+    assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["route_source"] == "deterministic"
+    assert result["graph_state"]["rewrite_source"] == "deterministic"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
+    assert result["graph_state"]["llm_router_result"]["status"] == "fallback"
+    assert result["graph_state"]["llm_router_result"]["fallback_reason"] == "hard_guard"
+    assert result["graph_state"]["llm_router_result"]["hard_guard"] == "deterministic_sop"
     assert result["outbound_messages"][0]["message_type"] == "text"
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
     assert "response_text" not in result["graph_state"]["llm_router_result"]

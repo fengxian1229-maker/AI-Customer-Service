@@ -44,17 +44,34 @@ ALLOWED_RISK_FLAGS = (
     "unsupported_intent",
 )
 
-_BACKEND_FACT_TOKENS = (
+BACKEND_FACT_TOKENS = (
     "backend",
     "account",
     "order",
     "payment",
     "balance",
     "status",
+    "deposit status",
     "withdrawal status",
     "order status",
+    "deposito",
+    "depósito",
+    "retiro",
+    "saldo",
+    "estado",
+    "orden",
+    "pago",
+    "pagaron",
+    "no llegó",
+    "no llego",
+    "no acreditado",
     "未到账",
     "没到账",
+    "提款状态",
+    "订单",
+    "余额",
+    "支付",
+    "付款",
 )
 _USER_FACT_TOKENS = (
     "amount",
@@ -113,7 +130,7 @@ def enforce_rewrite_risk_flags(payload: dict[str, Any], output: dict[str, Any]) 
     lowered = raw_user_input.lower()
     if payload.get("active_workflow"):
         flags.append("active_workflow")
-    if _contains_backend_fact_signal(lowered):
+    if contains_backend_fact_signal(lowered):
         flags.append("backend_fact_like")
     if _contains_user_fact_signal(lowered):
         flags.append("user_fact_present")
@@ -196,8 +213,9 @@ def _string_list(value) -> list[str]:
     return [str(item) for item in value if str(item).strip()]
 
 
-def _contains_backend_fact_signal(lowered: str) -> bool:
-    return any(token in lowered for token in _BACKEND_FACT_TOKENS)
+def contains_backend_fact_signal(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(token in lowered for token in BACKEND_FACT_TOKENS)
 
 
 def _contains_user_fact_signal(lowered: str) -> bool:

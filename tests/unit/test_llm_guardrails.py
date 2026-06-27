@@ -58,3 +58,26 @@ def test_validate_rewrite_output_enforces_active_workflow_backend_fact_and_attac
         "attachment_present",
     ]
 
+
+def test_validate_rewrite_output_flags_spanish_missing_deposit_as_backend_fact_like():
+    from app.llm.guardrails import validate_rewrite_output
+
+    output = validate_rewrite_output(
+        {
+            "raw_user_input": "mi deposito no llegó",
+            "active_workflow": None,
+            "attachments_summary": [],
+        },
+        {
+            "rewritten_question": "mi deposito no llegó",
+            "normalized_query": "mi deposito no llegó",
+            "language": "es",
+            "preserved_entities": [],
+            "missing_or_ambiguous": [],
+            "risk_flags": [],
+            "confidence": 0.9,
+            "reason": "shadow",
+        },
+    )
+
+    assert "backend_fact_like" in output["risk_flags"]

@@ -50,23 +50,26 @@ async def _test_llm_guarded_authoritative_router_mysql_smoke(monkeypatch) -> Non
         await seed_faq_document(pool, test_id)
         faq_event = await seed_event(pool, test_id, "faq", "怎么存款？")
         sop_event = await seed_event(pool, test_id, "sop", "存款订单 D123456 没到账")
+        spanish_sop_event = await seed_event(pool, test_id, "spanish-sop", "mi deposito no llegó")
         low_confidence_event = await seed_event(pool, test_id, "low-confidence", "how to deposit low confidence")
         active_event = await seed_active_workflow_event(pool, test_id)
 
         batch_result = await gateway_consumer.process_next_batch(
             pool,
-            limit=4,
+            limit=5,
             checkpoint_mode="off",
             settings=settings,
         )
 
-        assert batch_result["processed"] == 4
+        assert batch_result["processed"] == 5
         assert batch_result["failed"] == 0
         assert batch_result["llm"]["router_mode"] == "guarded_authoritative"
         assert batch_result["llm"]["router_min_confidence"] == 0.75
         assert batch_result["llm"]["router_fallback_to_deterministic"] is True
-        assert len(provider.calls) == 3
+        assert len(provider.calls) == 2
         assert f"livechat:{active_event.chat_id}" not in [call["conversation_id"] for call in provider.calls]
+        assert f"livechat:{sop_event.chat_id}" not in [call["conversation_id"] for call in provider.calls]
+        assert f"livechat:{spanish_sop_event.chat_id}" not in [call["conversation_id"] for call in provider.calls]
 
         faq_conversation_id = f"livechat:{faq_event.chat_id}"
         faq_outbound = await fetch_one(
@@ -84,8 +87,9 @@ async def _test_llm_guarded_authoritative_router_mysql_smoke(monkeypatch) -> Non
         assert faq_router["route_source"] == "llm_guarded_authoritative"
 
         sop_router = await fetch_router_metadata(pool, f"livechat:{sop_event.chat_id}")
-        assert sop_router["status"] == "accepted"
-        assert sop_router["route"] == "sop"
+        assert sop_router["status"] == "fallback"
+        assert sop_router["fallback_reason"] == "hard_guard"
+        assert sop_router["hard_guard"] == "deterministic_sop"
         assert sop_router["final_route"] == "sop"
         assert sop_router["final_intent"] == "deposit_missing"
         sop_outbound = await fetch_one(
@@ -94,6 +98,19 @@ async def _test_llm_guarded_authoritative_router_mysql_smoke(monkeypatch) -> Non
             (f"livechat:{sop_event.chat_id}",),
         )
         assert sop_outbound["payload_json"]["text"] != "可以在充值页面选择可用通道，并按页面提示完成存款。"
+
+        spanish_sop_router = await fetch_router_metadata(pool, f"livechat:{spanish_sop_event.chat_id}")
+        assert spanish_sop_router["status"] == "fallback"
+        assert spanish_sop_router["fallback_reason"] == "hard_guard"
+        assert spanish_sop_router["hard_guard"] == "deterministic_sop"
+        assert spanish_sop_router["final_route"] == "sop"
+        assert spanish_sop_router["final_intent"] == "deposit_missing"
+        spanish_sop_outbound = await fetch_one(
+            pool,
+            "SELECT payload_json FROM outbound_messages WHERE conversation_id = %s",
+            (f"livechat:{spanish_sop_event.chat_id}",),
+        )
+        assert spanish_sop_outbound["payload_json"]["text"] != "可以在充值页面选择可用通道，并按页面提示完成存款。"
 
         low_confidence_router = await fetch_router_metadata(pool, f"livechat:{low_confidence_event.chat_id}")
         assert low_confidence_router["status"] == "fallback"
@@ -106,7 +123,7 @@ async def _test_llm_guarded_authoritative_router_mysql_smoke(monkeypatch) -> Non
         assert active_router["hard_guard"] == "active_workflow"
         assert active_router["final_route"] == "sop"
 
-        for event in [faq_event, sop_event, low_confidence_event, active_event]:
+        for event in [faq_event, sop_event, spanish_sop_event, low_confidence_event, active_event]:
             errors = await fetch_all(
                 pool,
                 "SELECT id FROM graph_run_errors WHERE conversation_id = %s",
