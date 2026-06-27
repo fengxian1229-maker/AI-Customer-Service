@@ -35,9 +35,9 @@ def _select_platform_asset_ref(block: dict[str, Any], platform: str | None) -> s
 def render_answer_blocks_preview(
     answer_blocks: list[dict[str, Any]],
     *,
-    platform: str | None = None,
-    channel_type: str | None = None,
-    language: str | None = None,
+    platform: str | None = "JUE999",
+    channel_type: str | None = "livechat",
+    language: str | None = "zh",
 ) -> list[PreviewBlock]:
     """Render FAQ answer_blocks into an internal read-only preview structure.
 

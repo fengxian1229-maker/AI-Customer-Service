@@ -173,6 +173,17 @@ def test_graph_checkpoint_runs_schema_has_required_indexes():
     assert "KEY idx_graph_checkpoint_runs_inbound_event" in sql
 
 
+def test_readme_keeps_worker_operation_commands():
+    from pathlib import Path
+
+    readme = Path("README.md").read_text()
+
+    assert "Poll LiveChat Once" in readme
+    assert "Run Gateway Once" in readme
+    assert "Run Sender Once" in readme
+    assert "Safe Group 23 Smoke" in readme
+
+
 def test_bootstrap_adds_missing_workflow_stage_for_mysql():
     import asyncio
 

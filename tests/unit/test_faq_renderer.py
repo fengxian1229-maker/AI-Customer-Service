@@ -42,6 +42,22 @@ def test_renderer_preview_selects_platform_asset_ref():
     ]
 
 
+def test_renderer_preview_defaults_to_jue999_platform_asset_ref():
+    preview = render_answer_blocks_preview(
+        [
+            {
+                "type": "image",
+                "asset_key": "deposit_howto",
+                "platform_asset_map": {
+                    "JUE999": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+                },
+            }
+        ]
+    )
+
+    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/JUE999/deposit.jpg"
+
+
 def test_renderer_preview_falls_back_to_default_asset_ref():
     preview = render_answer_blocks_preview(
         [
