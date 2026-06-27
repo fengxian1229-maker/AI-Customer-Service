@@ -87,3 +87,33 @@ PYTHONPATH=src uv run --group dev pytest tests/integration/test_llm_guarded_auth
 ```
 
 The MySQL test provisions an isolated schema whose name contains `test`, then verifies FAQ acceptance, deterministic SOP hard guards for Chinese and Spanish deposit-missing cases, low-confidence fallback, active-workflow hard guard, checkpoint metadata, and no `graph_run_errors`.
+
+## P8-A.2 Real Gemini Dry-Run Review
+
+`python -m app.workers.real_gemini_guarded_smoke` runs a dry-run-only real Gemini `guarded_authoritative` small-sample review.
+
+Default cases:
+
+- `faq_deposit_howto_zh`: `怎么存款？`, expects final FAQ route and no external commands.
+- `faq_withdrawal_howto_en`: `how to withdraw?`, expects final FAQ route and no external commands.
+- `sop_deposit_missing_es`: `mi deposito no llegó`, forbids final FAQ route.
+- `explicit_human_en`: `I want a human agent`, forbids final FAQ route.
+- `backend_fact_balance_en`: `what is my balance?`, forbids final FAQ route.
+- `backend_fact_order_status_zh`: `我的订单现在是什么状态？`, forbids final FAQ route.
+- `file_without_text`: `FILE_RECEIVED` with empty text, forbids final FAQ route and accepted router takeover.
+
+The CLI always uses generated fake chat/thread ids, calls `gateway_consumer.process_inbound_event_id`, reads diagnostics by `(conversation_id, inbound_event_id)`, marks pending dry-run outbounds as `SKIPPED_MANUAL_SMOKE`, and never sends LiveChat.
+
+```bash
+LLM_PROVIDER=gemini \
+LLM_ROUTER_MODE=guarded_authoritative \
+LLM_ROUTER_MIN_CONFIDENCE=0.75 \
+GEMINI_MODEL=gemini-3.1-flash-lite \
+GEMINI_VERTEXAI=true \
+GEMINI_PROJECT=project-gemini-0306 \
+GEMINI_LOCATION=global \
+PYTHONPATH=src \
+uv run --group dev python -m app.workers.real_gemini_guarded_smoke \
+  --case-set default \
+  --seed-default-faq
+```

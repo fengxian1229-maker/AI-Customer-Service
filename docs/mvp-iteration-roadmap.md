@@ -268,6 +268,10 @@ P8-B 固化 LLM-first FAQ route + answer_blocks outbound smoke：
 14. P8-B.2 将 no-send skip 和 --send sender dispatch 都限定到同一个 inbound_event_id
 15. P8-B.2 no-send 模式不要求真实 LiveChat 凭据，--send 必须显式传入 chat_id/thread_id
 16. P8-B.2 补强 LLM error metadata 脱敏，隐藏 secret value 而不是只隐藏 key name
+17. P8-B.2.1 修复 --send 完整性判定，sender_result_count 必须等于 pending_before_count，且 pending_after_count 必须为 0
+18. P8-B.2.1 将 router metadata / graph_run_errors 查询限定到 conversation_id + inbound_event_id
+19. P8-B.2.1 扩展 api-key / x-api-key / Authorization Bearer / quoted secret value 脱敏
+20. P8-A.2 新增 real_gemini_guarded_smoke dry-run-only CLI，用真实 Gemini 跑 guarded_authoritative 小样本安全 review
 ```
 
 当前 RAG 仍明确不做：
@@ -286,7 +290,7 @@ LLM tool calling
 当前 P7-A 后续候选：
 
 ```text
-1. P8-A.2 小范围真实 Gemini guarded_authoritative smoke review，仍不启用 final answer generation
+1. 使用真实 Gemini 与测试 MySQL DSN 运行 P8-A.2 guarded_authoritative dry-run review，并审阅 JSON 结果
 2. 小范围真实 Gemini faq_authoritative FAQ route smoke review，仍不启用 final answer generation
 3. 将 image MVP URL fallback 替换为确认过的真实 LiveChat image/file event
 4. LLM/router shadow result review / metrics

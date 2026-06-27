@@ -360,13 +360,13 @@ def test_real_gemini_faq_smoke_no_send_uses_unused_livechat_credentials(monkeypa
     async def fake_process_inbound_event_id(pool, inbound_event_id, checkpoint_mode="off", settings=None):
         return {"processed": 1, "failed": 0, "enqueued": 1, "inbound_event_id": inbound_event_id, "failures": []}
 
-    async def fake_fetch_latest_router_metadata(pool, conversation_id):
+    async def fake_fetch_latest_router_metadata(pool, conversation_id, inbound_event_id):
         return {"status": "accepted", "final_route": "faq", "mode": "faq_authoritative"}
 
     async def fake_fetch_outbound_messages(pool, conversation_id, inbound_event_id):
         return [{"id": 7, "inbound_event_id": inbound_event_id, "status": "PENDING"}]
 
-    async def fake_fetch_graph_run_errors(pool, conversation_id):
+    async def fake_fetch_graph_run_errors(pool, conversation_id, inbound_event_id):
         return []
 
     class FakeOutboundRepository:
@@ -416,6 +416,414 @@ def test_real_gemini_faq_smoke_send_requires_explicit_chat_and_thread(monkeypatc
     assert missing_chat["inbound_event_id"] is None
     assert missing_thread["error"]["code"] == "send_requires_explicit_thread_id"
     assert missing_thread["inbound_event_id"] is None
+
+
+def test_real_gemini_faq_smoke_send_fails_when_sender_limit_leaves_pending(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    result = asyncio.run(
+        _run_faq_smoke_send_case(
+            monkeypatch,
+            real_gemini_faq_smoke,
+            before_statuses=["PENDING", "PENDING", "PENDING"],
+            sender_results=[{"status": "SENT", "inbound_event_id": 55}],
+            after_statuses=["SENT", "PENDING", "PENDING"],
+        )
+    )
+
+    assert result["smoke_success"] is False
+    assert result["pending_before_count"] == 3
+    assert result["sender_result_count"] == 1
+    assert result["pending_after_count"] == 2
+    assert "sender_limit_may_have_left_pending_outbounds" in result["warning"]
+
+
+def test_real_gemini_faq_smoke_send_succeeds_when_all_pending_are_sent(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    result = asyncio.run(
+        _run_faq_smoke_send_case(
+            monkeypatch,
+            real_gemini_faq_smoke,
+            before_statuses=["PENDING", "PENDING"],
+            sender_results=[
+                {"status": "SENT", "inbound_event_id": 55},
+                {"status": "SENT", "inbound_event_id": 55},
+            ],
+            after_statuses=["SENT", "SENT"],
+        )
+    )
+
+    assert result["smoke_success"] is True
+    assert result["pending_before_count"] == 2
+    assert result["sender_result_count"] == 2
+    assert result["pending_after_count"] == 0
+
+
+def test_real_gemini_faq_smoke_send_fails_for_failed_sender_status(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    result = asyncio.run(
+        _run_faq_smoke_send_case(
+            monkeypatch,
+            real_gemini_faq_smoke,
+            before_statuses=["PENDING"],
+            sender_results=[{"status": "FAILED_UNKNOWN", "inbound_event_id": 55}],
+            after_statuses=["FAILED_UNKNOWN"],
+        )
+    )
+
+    assert result["smoke_success"] is False
+    assert "sender_results_not_all_send_safe" in result["warning"]
+
+
+def test_real_gemini_faq_smoke_send_allows_buttons_preview_with_warning(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    result = asyncio.run(
+        _run_faq_smoke_send_case(
+            monkeypatch,
+            real_gemini_faq_smoke,
+            before_statuses=["PENDING", "PENDING"],
+            sender_results=[
+                {"status": "SENT", "inbound_event_id": 55},
+                {"status": "SKIPPED_PREVIEW", "inbound_event_id": 55},
+            ],
+            after_statuses=["SENT", "SKIPPED_PREVIEW"],
+        )
+    )
+
+    assert result["smoke_success"] is True
+    assert result["warning"] == "buttons preview was skipped by sender_worker"
+
+
+def test_real_gemini_faq_smoke_send_fails_for_mismatched_sender_inbound_event(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    result = asyncio.run(
+        _run_faq_smoke_send_case(
+            monkeypatch,
+            real_gemini_faq_smoke,
+            before_statuses=["PENDING"],
+            sender_results=[{"status": "SENT", "inbound_event_id": 99}],
+            after_statuses=["SENT"],
+        )
+    )
+
+    assert result["smoke_success"] is False
+    assert "sender_results_not_scoped_to_inbound_event" in result["warning"]
+
+
+async def _run_faq_smoke_send_case(monkeypatch, real_gemini_faq_smoke, before_statuses, sender_results, after_statuses):
+    calls = {"fetch_outbound": 0}
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.llm_provider = "gemini"
+            self.llm_router_mode = "faq_authoritative"
+            self.langgraph_checkpoint_mode = "off"
+            self.livechat_api_base = "https://example.test"
+            self.livechat_account_id = "account"
+            self.livechat_agent_access_token = "token"
+
+    class FakePool:
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    async def fake_create_pool(settings):
+        return FakePool()
+
+    async def fake_insert_smoke_event(pool, args, summary):
+        return 55
+
+    async def fake_process_inbound_event_id(pool, inbound_event_id, checkpoint_mode="off", settings=None):
+        return {"processed": 1, "failed": 0, "enqueued": 1, "inbound_event_id": inbound_event_id, "failures": []}
+
+    async def fake_fetch_latest_router_metadata(pool, conversation_id, inbound_event_id):
+        return {"status": "accepted", "final_route": "faq", "mode": "faq_authoritative"}
+
+    async def fake_fetch_outbound_messages(pool, conversation_id, inbound_event_id):
+        calls["fetch_outbound"] += 1
+        statuses = before_statuses if calls["fetch_outbound"] == 1 else after_statuses
+        return [
+            {"id": index + 1, "inbound_event_id": inbound_event_id, "status": status}
+            for index, status in enumerate(statuses)
+        ]
+
+    async def fake_fetch_graph_run_errors(pool, conversation_id, inbound_event_id):
+        return []
+
+    async def fake_process_pending_for_inbound_event(pool, sender_client, inbound_event_id, limit=20):
+        return sender_results
+
+    monkeypatch.setattr(real_gemini_faq_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(real_gemini_faq_smoke, "create_pool", fake_create_pool)
+    monkeypatch.setattr(real_gemini_faq_smoke, "_insert_smoke_event", fake_insert_smoke_event)
+    monkeypatch.setattr(real_gemini_faq_smoke.gateway_consumer, "process_inbound_event_id", fake_process_inbound_event_id)
+    monkeypatch.setattr(real_gemini_faq_smoke, "_fetch_latest_router_metadata", fake_fetch_latest_router_metadata)
+    monkeypatch.setattr(real_gemini_faq_smoke, "_fetch_outbound_messages", fake_fetch_outbound_messages)
+    monkeypatch.setattr(real_gemini_faq_smoke, "_fetch_graph_run_errors", fake_fetch_graph_run_errors)
+    monkeypatch.setattr(real_gemini_faq_smoke.sender_worker, "process_pending_for_inbound_event", fake_process_pending_for_inbound_event)
+
+    return await real_gemini_faq_smoke.run(["--send", "--chat-id", "chat-1", "--thread-id", "thread-1", "--sender-limit", "1"])
+
+
+def test_real_gemini_faq_smoke_router_and_errors_queries_filter_inbound_event_id():
+    import asyncio
+    import json
+
+    from app.workers import real_gemini_faq_smoke
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.queries = []
+
+        async def execute(self, sql, args):
+            self.queries.append((sql, args))
+
+        async def fetchall(self):
+            sql, args = self.queries[-1]
+            if "graph_checkpoint_runs" in sql:
+                return [{"metadata_json": json.dumps({"llm_router": {"status": "accepted", "inbound": args[1]}})}]
+            if "graph_run_errors" in sql:
+                return [{"id": 1, "inbound_event_id": args[1], "error_type": "RuntimeError", "error_message": "boom"}]
+            return []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConnection:
+        def __init__(self, cursor) -> None:
+            self.cursor_obj = cursor
+
+        def cursor(self, *args, **kwargs):
+            return self.cursor_obj
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.cursor = FakeCursor()
+
+        def acquire(self):
+            return FakeConnection(self.cursor)
+
+    pool = FakePool()
+
+    router = asyncio.run(real_gemini_faq_smoke._fetch_latest_router_metadata(pool, "livechat:chat-1", 55))
+    errors = asyncio.run(real_gemini_faq_smoke._fetch_graph_run_errors(pool, "livechat:chat-1", 55))
+
+    assert router == {"status": "accepted", "inbound": 55}
+    assert errors == [{"id": 1, "inbound_event_id": 55, "error_type": "RuntimeError", "error_message": "boom"}]
+    checkpoint_sql, checkpoint_args = pool.cursor.queries[0]
+    error_sql, error_args = pool.cursor.queries[1]
+    assert "AND inbound_event_id = %s" in checkpoint_sql
+    assert checkpoint_args == ("livechat:chat-1", 55)
+    assert "AND inbound_event_id = %s" in error_sql
+    assert error_args == ("livechat:chat-1", 55)
+
+
+def test_real_gemini_guarded_smoke_parser_defaults():
+    from app.workers.real_gemini_guarded_smoke import build_arg_parser
+
+    args = build_arg_parser().parse_args([])
+
+    assert args.case_set == "default"
+    assert args.tenant_id == "default"
+    assert args.kb_scope == "default"
+    assert args.seed_default_faq is False
+    assert args.limit is None
+    assert args.case is None
+
+
+def test_real_gemini_guarded_smoke_rejects_invalid_settings_before_writes(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_guarded_smoke
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.llm_provider = "mock"
+            self.llm_router_mode = "guarded_authoritative"
+
+    async def fail_create_pool(settings):
+        raise AssertionError("invalid settings must not create a pool")
+
+    monkeypatch.setattr(real_gemini_guarded_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "create_pool", fail_create_pool)
+
+    result = asyncio.run(real_gemini_guarded_smoke.run([]))
+
+    assert result["worker"] == "real_gemini_guarded_smoke"
+    assert result["error"]["code"] == "invalid_settings"
+    assert result["total"] == 0
+    assert result["smoke_success"] is False
+
+
+def test_real_gemini_guarded_smoke_runs_cases_with_unique_fake_threads_and_scoped_processing(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_guarded_smoke
+
+    calls = {"insert_summaries": [], "processed": [], "skipped": []}
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            calls["settings_kwargs"] = kwargs
+            self.llm_provider = "Gemini"
+            self.llm_router_mode = "GUARDED_AUTHORITATIVE"
+            self.llm_router_min_confidence = 0.75
+            self.langgraph_checkpoint_mode = "off"
+
+    class FakePool:
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class FakeOutboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def mark_pending_by_inbound_event_skipped(self, inbound_event_id: int, error: str):
+            calls["skipped"].append(inbound_event_id)
+            return 1
+
+    async def fake_create_pool(settings):
+        return FakePool()
+
+    async def fake_insert_smoke_event(pool, case, summary):
+        calls["insert_summaries"].append(summary)
+        return 100 + len(calls["insert_summaries"])
+
+    async def fake_process_inbound_event_id(pool, inbound_event_id, checkpoint_mode="off", settings=None):
+        calls["processed"].append(inbound_event_id)
+        return {"processed": 1, "failed": 0, "enqueued": 1, "inbound_event_id": inbound_event_id, "results": [{"graph_state": {"route": "faq"}}], "failures": []}
+
+    async def fake_fetch_latest_router_metadata(pool, conversation_id, inbound_event_id):
+        return {"status": "accepted", "final_route": "faq", "route_source": "llm_guarded_authoritative"}
+
+    async def fake_fetch_outbound_messages(pool, conversation_id, inbound_event_id):
+        return [{"id": 1, "inbound_event_id": inbound_event_id, "status": "PENDING"}]
+
+    async def fake_fetch_external_commands(pool, conversation_id, inbound_event_id):
+        return []
+
+    async def fake_fetch_graph_run_errors(pool, conversation_id, inbound_event_id):
+        return []
+
+    monkeypatch.setattr(real_gemini_guarded_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "create_pool", fake_create_pool)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_insert_smoke_event", fake_insert_smoke_event)
+    monkeypatch.setattr(real_gemini_guarded_smoke.gateway_consumer, "process_inbound_event_id", fake_process_inbound_event_id)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_latest_router_metadata", fake_fetch_latest_router_metadata)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_outbound_messages", fake_fetch_outbound_messages)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_external_commands", fake_fetch_external_commands)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_graph_run_errors", fake_fetch_graph_run_errors)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "OutboundMessageRepository", FakeOutboundRepository)
+
+    result = asyncio.run(real_gemini_guarded_smoke.run(["--case", "faq_deposit_howto_zh"]))
+
+    assert calls["settings_kwargs"] == {
+        "livechat_agent_access_token": "unused-for-real-gemini-guarded-smoke",
+        "livechat_account_id": "unused-for-real-gemini-guarded-smoke",
+    }
+    assert calls["processed"] == [101]
+    assert calls["skipped"] == [101]
+    assert len(calls["insert_summaries"]) == 1
+    assert calls["insert_summaries"][0]["chat_id"].startswith("manual-gemini-guarded-faq_deposit_howto_zh-")
+    assert result["cases"][0]["pass"] is True
+    assert result["smoke_success"] is True
+
+
+def test_real_gemini_guarded_smoke_evaluator_blocks_non_faq_safety_cases():
+    from app.workers.real_gemini_guarded_smoke import DEFAULT_CASES, evaluate_case_result
+
+    cases = {case["case_id"]: case for case in DEFAULT_CASES}
+
+    assert evaluate_case_result(cases["faq_deposit_howto_zh"], "faq", "llm_guarded_authoritative", None, 0)["pass"] is True
+    assert evaluate_case_result(cases["sop_deposit_missing_es"], "faq", "llm_guarded_authoritative", None, 0)["pass"] is False
+    assert evaluate_case_result(cases["explicit_human_en"], "faq", "llm_guarded_authoritative", None, 0)["pass"] is False
+    assert evaluate_case_result(cases["backend_fact_balance_en"], "faq", "llm_guarded_authoritative", None, 0)["pass"] is False
+    assert evaluate_case_result(cases["file_without_text"], "faq", "llm_guarded_authoritative", {"status": "accepted"}, 0)["pass"] is False
+
+
+def test_real_gemini_guarded_smoke_failure_sets_summary_failure(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_guarded_smoke
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.llm_provider = "gemini"
+            self.llm_router_mode = "guarded_authoritative"
+            self.llm_router_min_confidence = 0.75
+            self.langgraph_checkpoint_mode = "off"
+
+    class FakePool:
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    async def fake_create_pool(settings):
+        return FakePool()
+
+    async def fake_insert_smoke_event(pool, case, summary):
+        return 55
+
+    async def fake_process_inbound_event_id(pool, inbound_event_id, checkpoint_mode="off", settings=None):
+        return {"processed": 1, "failed": 0, "inbound_event_id": inbound_event_id, "results": [{"graph_state": {"route": "faq"}}], "failures": []}
+
+    async def fake_fetch_latest_router_metadata(pool, conversation_id, inbound_event_id):
+        return {"status": "accepted", "final_route": "faq", "route_source": "llm_guarded_authoritative"}
+
+    async def fake_empty(*args, **kwargs):
+        return []
+
+    class FakeOutboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def mark_pending_by_inbound_event_skipped(self, inbound_event_id: int, error: str):
+            return 0
+
+    monkeypatch.setattr(real_gemini_guarded_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "create_pool", fake_create_pool)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_insert_smoke_event", fake_insert_smoke_event)
+    monkeypatch.setattr(real_gemini_guarded_smoke.gateway_consumer, "process_inbound_event_id", fake_process_inbound_event_id)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_latest_router_metadata", fake_fetch_latest_router_metadata)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_outbound_messages", fake_empty)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_external_commands", fake_empty)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_graph_run_errors", fake_empty)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "OutboundMessageRepository", FakeOutboundRepository)
+
+    result = asyncio.run(real_gemini_guarded_smoke.run(["--case", "sop_deposit_missing_es"]))
+
+    assert result["failed"] == 1
+    assert result["smoke_success"] is False
 
 
 def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):

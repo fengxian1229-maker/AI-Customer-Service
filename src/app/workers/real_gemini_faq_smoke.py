@@ -99,12 +99,13 @@ async def run(argv: list[str] | None = None) -> dict:
             settings=settings,
         )
         conversation_id = base_summary["conversation_id"]
-        llm_router = await _fetch_latest_router_metadata(pool, conversation_id)
+        llm_router = await _fetch_latest_router_metadata(pool, conversation_id, inbound_event_id)
         outbound_messages = await _fetch_outbound_messages(pool, conversation_id, inbound_event_id)
-        graph_run_errors = await _fetch_graph_run_errors(pool, conversation_id)
+        graph_run_errors = await _fetch_graph_run_errors(pool, conversation_id, inbound_event_id)
         sender_results = []
         skipped_unsent_count = 0
         pending_before_count = sum(1 for message in outbound_messages if message.get("status") == "PENDING")
+        pending_after_count = pending_before_count
         if args.send:
             sender_client = LiveChatSenderClient(
                 settings.livechat_api_base,
@@ -118,20 +119,40 @@ async def run(argv: list[str] | None = None) -> dict:
                 limit=args.sender_limit,
             )
             outbound_messages = await _fetch_outbound_messages(pool, conversation_id, inbound_event_id)
+            pending_after_count = sum(1 for message in outbound_messages if message.get("status") == "PENDING")
         elif args.mark_unsent_smoke_skipped:
             skipped_unsent_count = await OutboundMessageRepository(pool).mark_pending_by_inbound_event_skipped(
                 inbound_event_id,
                 error=DEFAULT_SKIP_ERROR,
             )
             outbound_messages = await _fetch_outbound_messages(pool, conversation_id, inbound_event_id)
+            pending_after_count = sum(1 for message in outbound_messages if message.get("status") == "PENDING")
 
         sender_ok = True
         warning = None if args.send else DEFAULT_SKIP_ERROR
         if args.send:
             sender_statuses = {result.get("status") for result in sender_results}
-            sender_ok = bool(sender_results) and sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}
+            sender_result_count = len(sender_results)
+            sender_scoped = all(result.get("inbound_event_id") == inbound_event_id for result in sender_results)
+            sender_ok = (
+                pending_before_count > 0
+                and sender_result_count == pending_before_count
+                and sender_scoped
+                and sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}
+                and pending_after_count == 0
+            )
+            warnings = []
+            if sender_result_count < pending_before_count:
+                warnings.append("sender_limit_may_have_left_pending_outbounds")
+            if not sender_scoped:
+                warnings.append("sender_results_not_scoped_to_inbound_event")
+            if not sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}:
+                warnings.append("sender_results_not_all_send_safe")
             if "SKIPPED_PREVIEW" in sender_statuses:
-                warning = "buttons preview was skipped by sender_worker"
+                warnings.append("buttons preview was skipped by sender_worker")
+            if pending_after_count:
+                warnings.append("pending_outbounds_remain_after_send")
+            warning = "; ".join(warnings) if warnings else None
         else:
             sender_ok = skipped_unsent_count == pending_before_count if args.mark_unsent_smoke_skipped else True
 
@@ -155,6 +176,9 @@ async def run(argv: list[str] | None = None) -> dict:
             "graph_run_errors": graph_run_errors,
             "sender_results": sender_results,
             "skipped_unsent_count": skipped_unsent_count,
+            "pending_before_count": pending_before_count,
+            "sender_result_count": len(sender_results),
+            "pending_after_count": pending_after_count,
             "warning": warning,
             "smoke_success": smoke_success,
         }
@@ -224,17 +248,18 @@ async def _insert_smoke_event(pool, args, summary: dict) -> int:
     return row["id"]
 
 
-async def _fetch_latest_router_metadata(pool, conversation_id: str) -> dict | None:
+async def _fetch_latest_router_metadata(pool, conversation_id: str, inbound_event_id: int) -> dict | None:
     row = await _fetch_one(
         pool,
         """
         SELECT metadata_json
         FROM graph_checkpoint_runs
         WHERE conversation_id = %s
+          AND inbound_event_id = %s
         ORDER BY id DESC
         LIMIT 1
         """,
-        (conversation_id,),
+        (conversation_id, inbound_event_id),
         required=False,
     )
     if not row:
@@ -256,11 +281,17 @@ async def _fetch_outbound_messages(pool, conversation_id: str, inbound_event_id:
     )
 
 
-async def _fetch_graph_run_errors(pool, conversation_id: str) -> list[dict]:
+async def _fetch_graph_run_errors(pool, conversation_id: str, inbound_event_id: int) -> list[dict]:
     return await _fetch_all(
         pool,
-        "SELECT id, error_type, error_message FROM graph_run_errors WHERE conversation_id = %s ORDER BY id",
-        (conversation_id,),
+        """
+        SELECT id, inbound_event_id, error_type, error_message
+        FROM graph_run_errors
+        WHERE conversation_id = %s
+          AND inbound_event_id = %s
+        ORDER BY id
+        """,
+        (conversation_id, inbound_event_id),
     )
 
 

@@ -87,7 +87,9 @@ Current LLM boundary:
 - Router checkpoint metadata now keeps compact rewrite/query/reason/error fields plus compact RAG retrieval diagnostics without storing full answer blocks.
 - Router hard guards keep active workflows, explicit human requests, file-without-text events, deterministic SOP / human / emotion routes, and FAQ-leaning backend/account/order/payment/balance/status fact-like requests on deterministic safety paths. `llm_router_fallback_to_deterministic` is retained for config/diagnostics, but P8-A safety fallback is not disableable.
 - Real Gemini FAQ smoke is scoped to the inbound event it inserts: gateway processing, sender dispatch, and default no-send skip all filter by that `inbound_event_id`. Default no-send uses unused LiveChat credentials; `--send` requires explicit `--chat-id` and `--thread-id`.
-- LLM router/shadow error metadata redacts secret values in common `api_key=...`, `password: ...`, `token=...`, and `Bearer ...` forms.
+- Real Gemini FAQ smoke send-mode success now requires every pending outbound for the smoke inbound event to be processed, every sender result to match that `inbound_event_id`, no unsafe sender status, and zero remaining pending rows.
+- `real_gemini_guarded_smoke` provides a dry-run-only real Gemini `guarded_authoritative` small-sample review for FAQ, SOP, human, backend-fact, and file-without-text safety cases.
+- LLM router/shadow error metadata redacts secret values in common `api_key=...`, `api-key=...`, `x-api-key: ...`, `Authorization: Bearer ...`, `password: ...`, `token=...`, and `Bearer ...` forms.
 - Gateway-path shadow result/error summaries are stored in `graph_checkpoint_runs.metadata_json.llm_shadow`.
 - Shadow failures are isolated from deterministic graph execution and do not create `graph_run_errors`.
 - Gemini is not used for final customer reply generation.

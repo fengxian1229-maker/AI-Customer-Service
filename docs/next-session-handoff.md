@@ -52,6 +52,8 @@ Recommended next task:
 
 - P8-B.1 formalized real Gemini FAQ-authoritative smoke hardening.
 - P8-B.2 locks the real Gemini FAQ smoke to the single inbound event it inserts.
+- P8-B.2.1 tightens FAQ smoke send-mode success: all pending outbounds for the smoke inbound event must be processed, sender results must match the same inbound event, unsafe statuses fail, and `pending_after_count` must be zero.
+- P8-A.2 adds `python -m app.workers.real_gemini_guarded_smoke`, a dry-run-only real Gemini `guarded_authoritative` small-sample review.
 - Split Gemini router prompts into `GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT` and `FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT`; `ROUTER_SYSTEM_PROMPT` remains an alias to the guarded prompt.
 - Gateway router payloads now include `router_mode` / `mode`, and providers return the current router mode.
 - Mock provider supports `faq_authoritative` without deterministic context for common FAQ how-to aliases.
@@ -62,7 +64,8 @@ Recommended next task:
 - Added `python -m app.workers.real_gemini_faq_smoke`; it does not send by default, does not require real LiveChat credentials in no-send mode, and marks only this smoke inbound event's pending outbox rows `SKIPPED_MANUAL_SMOKE`.
 - Added scoped worker/repository entry points: `fetch_unprocessed_by_id`, `process_inbound_event_id`, `fetch_pending_by_inbound_event`, and `process_pending_for_inbound_event`.
 - `--send` requires explicit `--chat-id` and `--thread-id` before inserting an inbound event, then sends only pending outbound rows for that inbound event.
-- Gateway LLM error metadata redacts secret values, not only secret-like key names.
+- Gateway LLM error metadata redacts secret values, not only secret-like key names, including `api-key`, `x-api-key`, quoted values, and `Authorization: Bearer ...`.
+- `real_gemini_guarded_smoke` default cases cover FAQ deposit/how-to, FAQ withdrawal/how-to, Spanish deposit missing SOP safety, explicit human, balance fact-like, order-status fact-like, and file-without-text. It inserts fake chats, uses `process_inbound_event_id`, reads diagnostics by inbound event, marks pending outbounds skipped, and never sends LiveChat.
 - Added `llm_router_mode=faq_authoritative`.
 - Ordinary text messages in this mode call the LLM router before deterministic keyword routing.
 - The LLM router payload carries `deterministic_rewrite_result=None`, `deterministic_intent_result=None`, and `deterministic_route=None`.

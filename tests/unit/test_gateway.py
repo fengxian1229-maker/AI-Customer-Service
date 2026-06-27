@@ -725,7 +725,7 @@ def test_gateway_service_router_checkpoint_metadata_preserves_router_and_rag_sum
 
 def test_gateway_service_redacts_secret_values_from_error_metadata():
     service = GatewayService()
-    error = RuntimeError("api_key=abc123 password: p@ss Bearer xyz token=tok123")
+    error = RuntimeError("api-key=\"abc123\" x-api-key: xyz Authorization: Bearer qqq password='p@ss'")
 
     router_state = service._router_fallback_state(
         {"route": "faq", "intent_result": {"intent": "faq_general"}},
@@ -747,11 +747,12 @@ def test_gateway_service_redacts_secret_values_from_error_metadata():
     combined = str({"router": router_state["llm_router_result"], "shadow": shadow_error, "checkpoint": checkpoint})
     assert "abc123" not in combined
     assert "p@ss" not in combined
-    assert "xyz" not in combined
-    assert "tok123" not in combined
-    assert "api_key=[redacted]" in combined
+    assert " xyz" not in combined
+    assert "qqq" not in combined
+    assert "api-key=[redacted]" in combined
+    assert "x-api-key=[redacted]" in combined
+    assert "Authorization: Bearer [redacted]" in combined
     assert "password=[redacted]" in combined
-    assert "Bearer [redacted]" in combined
 
 
 def test_gateway_service_faq_authoritative_renders_multimodal_answer_blocks_to_ordered_outbox_rows():

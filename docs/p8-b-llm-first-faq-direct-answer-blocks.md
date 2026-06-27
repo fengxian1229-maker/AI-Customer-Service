@@ -66,6 +66,19 @@ P8-B.2 locks the real Gemini FAQ smoke to the single inbound event it creates:
 - Default no-send skip still marks pending rows `SKIPPED_MANUAL_SMOKE`, but only where `outbound_messages.inbound_event_id` equals the smoke event id.
 - Gateway LLM error metadata redacts secret values such as `api_key=...`, `password: ...`, `token=...`, and `Bearer ...`, not only key names.
 
+## P8-B.2.1 Smoke Completeness
+
+P8-B.2.1 tightens send-mode diagnostics without changing the default no-send behavior:
+
+- `--send` success requires `pending_before_count > 0`.
+- `sender_result_count` must equal `pending_before_count`.
+- Every sender result must carry this smoke's `inbound_event_id`.
+- Sender statuses must be limited to `SENT` and `SKIPPED_PREVIEW`.
+- `pending_after_count` must be `0`.
+- `SKIPPED_PREVIEW` is allowed for buttons preview, but the warning states `buttons preview was skipped by sender_worker`.
+- If `--sender-limit` leaves rows pending, `smoke_success=false` and warning includes `sender_limit_may_have_left_pending_outbounds`.
+- Router metadata and graph errors are fetched by `(conversation_id, inbound_event_id)` so historical rows for the same chat do not affect the current smoke.
+
 ## FAQ Retrieval
 
 FAQ retrieval query priority is:

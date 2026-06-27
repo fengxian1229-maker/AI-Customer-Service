@@ -753,13 +753,19 @@ class GatewayService:
 
     def _redact_sensitive_text(self, value: str) -> str:
         redacted = re.sub(
-            r"\b(access_token|api_key|secret|password|token)\s*[:=]\s*([^\s,;]+)",
-            lambda match: f"{match.group(1)}=[redacted]",
+            r"\b(Authorization)\s*[:=]\s*Bearer\s+['\"]?([^'\"\s,;]+)['\"]?",
+            lambda match: f"{match.group(1)}: Bearer [redacted]",
             value,
             flags=re.IGNORECASE,
         )
         redacted = re.sub(
-            r"\b(Bearer)\s+([^\s,;]+)",
+            r"\b(access[-_]?token|x-api-key|api[-_]?key|secret|password|token)\s*[:=]\s*['\"]?([^'\"\s,;]+)['\"]?",
+            lambda match: f"{match.group(1)}=[redacted]",
+            redacted,
+            flags=re.IGNORECASE,
+        )
+        redacted = re.sub(
+            r"\b(Bearer)\s+['\"]?([^'\"\s,;]+)['\"]?",
             lambda match: f"{match.group(1)} [redacted]",
             redacted,
             flags=re.IGNORECASE,
