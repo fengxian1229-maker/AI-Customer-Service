@@ -2,7 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from app.services.faq_outbound_plan import build_faq_outbound_plan
+from app.services.faq_outbound_plan import build_faq_outbound_plan, faq_plan_to_outbound_rows
 from app.services.rag import BACKEND_FACT_FALLBACK_ANSWER
 
 
@@ -171,3 +171,58 @@ def test_faq_outbound_plan_module_stays_side_effect_free():
     assert "OutboundMessageRepository" not in module_text
     assert "outbound_messages" not in module_text
     assert "LiveChat" not in module_text
+
+
+def test_faq_plan_to_outbound_rows_maps_plan_messages_without_writing():
+    plan = build_faq_outbound_plan(
+        answer_blocks=[
+            {"type": "image", "asset_key": "deposit_howto", "position": "before"},
+            {"type": "text", "text": "充值说明"},
+        ],
+        **BASE_KWARGS,
+    )
+
+    rows = faq_plan_to_outbound_rows(
+        plan,
+        chat_id="chat-1",
+        thread_id="thread-1",
+        conversation_id="livechat:chat-1",
+        inbound_event_id=11,
+        tenant_id="default",
+        channel_type="livechat",
+    )
+
+    assert rows == [
+        {
+            "tenant_id": "default",
+            "channel_type": "livechat",
+            "chat_id": "chat-1",
+            "thread_id": "thread-1",
+            "conversation_id": "livechat:chat-1",
+            "inbound_event_id": 11,
+            "action_type": "livechat.send_image",
+            "command_type": "livechat.send_image",
+            "message_type": "image",
+            "message_kind": "image",
+            "block_index": 0,
+            "dedup_key": plan["messages"][0]["dedup_key"],
+            "payload_json": plan["messages"][0]["payload"],
+            "status": "PENDING",
+        },
+        {
+            "tenant_id": "default",
+            "channel_type": "livechat",
+            "chat_id": "chat-1",
+            "thread_id": "thread-1",
+            "conversation_id": "livechat:chat-1",
+            "inbound_event_id": 11,
+            "action_type": "livechat.send_text",
+            "command_type": "livechat.send_text",
+            "message_type": "text",
+            "message_kind": "text",
+            "block_index": 1,
+            "dedup_key": plan["messages"][1]["dedup_key"],
+            "payload_json": plan["messages"][1]["payload"],
+            "status": "PENDING",
+        },
+    ]

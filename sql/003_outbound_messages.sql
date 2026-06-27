@@ -12,10 +12,15 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
   last_error TEXT NULL,
   inbound_event_id BIGINT UNSIGNED NULL,
   conversation_id VARCHAR(128) NULL,
+  dedup_key VARCHAR(255) NULL,
+  block_index INT NULL,
+  message_kind VARCHAR(64) NULL,
+  command_type VARCHAR(128) NULL,
   sent_at DATETIME(6) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_inbound_action (inbound_event_id, action_type),
+  UNIQUE KEY uk_outbound_messages_dedup_key (dedup_key),
   KEY idx_status_created (status, created_at),
   KEY idx_chat_thread (chat_id, thread_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

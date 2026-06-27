@@ -14,6 +14,8 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
                     continue
                 if path.name == "012_add_multimodal_knowledge_fields.sql":
                     continue
+                if path.name == "013_add_outbound_message_dedup_fields.sql":
+                    continue
                 statement = path.read_text(encoding="utf-8")
                 await cur.execute(statement)
             await ensure_inbound_events_compat(cur)
@@ -49,10 +51,28 @@ async def ensure_inbound_events_compat(cur) -> None:
 
 
 async def ensure_outbound_messages_compat(cur) -> None:
-    await cur.execute("SHOW INDEX FROM outbound_messages WHERE Key_name = 'uk_inbound_action'")
-    existing = await cur.fetchall()
-    if not existing:
-        await cur.execute("ALTER TABLE outbound_messages ADD UNIQUE KEY uk_inbound_action (inbound_event_id, action_type)")
+    await ensure_columns(
+        cur,
+        "outbound_messages",
+        {
+            "dedup_key": "ALTER TABLE outbound_messages ADD COLUMN dedup_key VARCHAR(255) NULL",
+            "block_index": "ALTER TABLE outbound_messages ADD COLUMN block_index INT NULL",
+            "message_kind": "ALTER TABLE outbound_messages ADD COLUMN message_kind VARCHAR(64) NULL",
+            "command_type": "ALTER TABLE outbound_messages ADD COLUMN command_type VARCHAR(128) NULL",
+        },
+    )
+    await ensure_indexes(
+        cur,
+        "outbound_messages",
+        {
+            "uk_inbound_action": (
+                "CREATE UNIQUE INDEX uk_inbound_action ON outbound_messages (inbound_event_id, action_type)"
+            ),
+            "uk_outbound_messages_dedup_key": (
+                "CREATE UNIQUE INDEX uk_outbound_messages_dedup_key ON outbound_messages (dedup_key)"
+            ),
+        },
+    )
 
 
 async def ensure_conversation_states_compat(cur) -> None:

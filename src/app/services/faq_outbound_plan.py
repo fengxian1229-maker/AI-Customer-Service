@@ -61,6 +61,41 @@ def build_faq_outbound_plan_from_rag_context(
     )
 
 
+def faq_plan_to_outbound_rows(
+    plan: dict[str, Any],
+    *,
+    chat_id: str,
+    thread_id: str | None = None,
+    conversation_id: str,
+    inbound_event_id: int | str,
+    tenant_id: str = "default",
+    channel_type: str = "livechat",
+    status: str = "PENDING",
+) -> list[dict[str, Any]]:
+    rows = []
+    for message in plan.get("messages") or []:
+        message_kind = message["message_kind"]
+        rows.append(
+            {
+                "tenant_id": tenant_id,
+                "channel_type": channel_type,
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "conversation_id": conversation_id,
+                "inbound_event_id": inbound_event_id,
+                "action_type": message["command_type"],
+                "command_type": message["command_type"],
+                "message_type": message_kind,
+                "message_kind": message_kind,
+                "block_index": message["block_index"],
+                "dedup_key": message["dedup_key"],
+                "payload_json": dict(message.get("payload") or {}),
+                "status": status,
+            }
+        )
+    return rows
+
+
 def _message_plan(
     *,
     block: dict[str, Any],

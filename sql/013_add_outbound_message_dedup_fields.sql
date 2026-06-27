@@ -1,0 +1,7 @@
+-- Idempotent outbound multi-message dedup migration is applied by app.db.bootstrap.
+-- The bootstrap layer checks existing columns and indexes for MySQL and SQLite before adding:
+-- dedup_key VARCHAR(255) NULL
+-- block_index INT NULL
+-- message_kind VARCHAR(64) NULL
+-- command_type VARCHAR(128) NULL
+-- UNIQUE KEY uk_outbound_messages_dedup_key (dedup_key)

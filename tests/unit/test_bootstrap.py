@@ -56,6 +56,7 @@ def test_load_sql_files_in_order():
         "010_knowledge_documents.sql",
         "011_graph_checkpoint_metadata.sql",
         "012_add_multimodal_knowledge_fields.sql",
+        "013_add_outbound_message_dedup_fields.sql",
         ]
 
 
@@ -65,6 +66,21 @@ def test_outbound_messages_schema_has_inbound_action_idempotency_key():
     sql = Path("sql/003_outbound_messages.sql").read_text()
 
     assert "UNIQUE KEY uk_inbound_action (inbound_event_id, action_type)" in sql
+
+
+def test_outbound_messages_schema_has_multiblock_dedup_fields():
+    from pathlib import Path
+
+    sql = Path("sql/003_outbound_messages.sql").read_text()
+    migration = Path("sql/013_add_outbound_message_dedup_fields.sql").read_text()
+
+    for ddl in (sql, migration):
+        assert "dedup_key VARCHAR(255) NULL" in ddl
+        assert "block_index INT NULL" in ddl
+        assert "message_kind VARCHAR(64) NULL" in ddl
+        assert "command_type VARCHAR(128) NULL" in ddl
+    assert "UNIQUE KEY uk_outbound_messages_dedup_key (dedup_key)" in sql
+    assert "uk_outbound_messages_dedup_key" in migration
 
 
 def test_conversation_states_schema_has_workflow_stage():

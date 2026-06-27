@@ -156,8 +156,12 @@ class OutboundMessageRepository:
         sql = """
         INSERT INTO outbound_messages (
           chat_id, thread_id, action_type, message_type, payload_json,
-          status, inbound_event_id, conversation_id
-        ) VALUES (%s, %s, %s, %s, CAST(%s AS JSON), %s, %s, %s)
+          status, inbound_event_id, conversation_id,
+          dedup_key, block_index, message_kind, command_type
+        ) VALUES (
+          %s, %s, %s, %s, CAST(%s AS JSON), %s, %s, %s,
+          %s, %s, %s, %s
+        )
         """
         args = (
             message["chat_id"],
@@ -168,6 +172,10 @@ class OutboundMessageRepository:
             message["status"],
             message["inbound_event_id"],
             message["conversation_id"],
+            _outbound_dedup_key(message),
+            message.get("block_index"),
+            message.get("message_kind") or message.get("message_type"),
+            message.get("command_type") or message["action_type"],
         )
         async with conn.cursor() as cur:
             await cur.execute(sql, args)
@@ -181,8 +189,12 @@ class OutboundMessageRepository:
         sql = """
         INSERT INTO outbound_messages (
           chat_id, thread_id, action_type, message_type, payload_json,
-          status, inbound_event_id, conversation_id
-        ) VALUES (%s, %s, %s, %s, CAST(%s AS JSON), %s, %s, %s)
+          status, inbound_event_id, conversation_id,
+          dedup_key, block_index, message_kind, command_type
+        ) VALUES (
+          %s, %s, %s, %s, CAST(%s AS JSON), %s, %s, %s,
+          %s, %s, %s, %s
+        )
         ON DUPLICATE KEY UPDATE id = id
         """
         args = (
@@ -194,6 +206,10 @@ class OutboundMessageRepository:
             message["status"],
             message["inbound_event_id"],
             message["conversation_id"],
+            _outbound_dedup_key(message),
+            message.get("block_index"),
+            message.get("message_kind") or message.get("message_type"),
+            message.get("command_type") or message["action_type"],
         )
         async with conn.cursor() as cur:
             await cur.execute(sql, args)
@@ -209,7 +225,8 @@ class OutboundMessageRepository:
         SELECT m.id, COALESCE(c.tenant_id, 'default') AS tenant_id,
                COALESCE(c.channel_type, 'livechat') AS channel_type,
                m.conversation_id, m.inbound_event_id, m.chat_id, m.thread_id,
-               m.action_type, m.message_type, m.payload_json, m.status
+               m.action_type, m.message_type, m.payload_json, m.status,
+               m.dedup_key, m.block_index, m.message_kind, m.command_type
         FROM outbound_messages m
         LEFT JOIN conversation_states c ON c.conversation_id = m.conversation_id
         WHERE status = 'PENDING'
@@ -1274,6 +1291,16 @@ def json_loads(payload) -> dict:
     if isinstance(payload, str):
         return json.loads(payload)
     return payload
+
+
+def _outbound_dedup_key(message: dict) -> str:
+    if message.get("dedup_key"):
+        return message["dedup_key"]
+    tenant_id = message.get("tenant_id") or "default"
+    conversation_id = message.get("conversation_id") or ""
+    inbound_event_id = message.get("inbound_event_id") or ""
+    action_type = message["action_type"]
+    return f"{tenant_id}:{conversation_id}:{inbound_event_id}:{action_type}"
 
 
 def _sanitize_checkpoint_metadata(metadata: dict) -> dict:

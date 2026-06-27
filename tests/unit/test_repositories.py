@@ -190,9 +190,43 @@ def test_outbound_insert_idempotent_uses_inbound_action_duplicate_key():
     result, cursor = asyncio.run(run_outbound_insert_idempotent(rowcount=1))
 
     assert "ON DUPLICATE KEY UPDATE id = id" in cursor.sql
+    assert "dedup_key" in cursor.sql
+    assert "block_index" in cursor.sql
+    assert "message_kind" in cursor.sql
+    assert "command_type" in cursor.sql
     assert "inbound_event_id" in cursor.sql
     assert "action_type" in cursor.sql
+    assert cursor.args[8] == "default:livechat:chat-1:11:send_event"
+    assert cursor.args[9] is None
+    assert cursor.args[10] == "text"
+    assert cursor.args[11] == "send_event"
     assert result == {"inserted": True, "duplicate": False, "id": 99}
+
+
+def test_outbound_insert_idempotent_accepts_faq_multiblock_dedup_fields():
+    import asyncio
+
+    cursor = FakeCursor(rowcount=1)
+    cursor.lastrowid = 101
+    repository = OutboundMessageRepository(FakePool(cursor))
+    message = {
+        **make_outbound_message(),
+        "action_type": "livechat.send_image",
+        "message_type": "image",
+        "payload_json": {"asset_key": "deposit_howto"},
+        "dedup_key": "default:livechat:chat-1:11:faq_block:0:image:deposit_howto",
+        "block_index": 0,
+        "message_kind": "image",
+        "command_type": "livechat.send_image",
+    }
+
+    result = asyncio.run(repository.insert_idempotent(message))
+
+    assert cursor.args[8] == "default:livechat:chat-1:11:faq_block:0:image:deposit_howto"
+    assert cursor.args[9] == 0
+    assert cursor.args[10] == "image"
+    assert cursor.args[11] == "livechat.send_image"
+    assert result == {"inserted": True, "duplicate": False, "id": 101}
 
 
 def test_outbound_insert_idempotent_reports_duplicate_without_failure():
