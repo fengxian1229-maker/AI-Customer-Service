@@ -697,6 +697,33 @@ def test_graph_checkpoint_run_mark_succeeded_updates_status_and_checkpoint_id():
     assert cursor.args == ("cp-1", 66)
 
 
+def test_graph_checkpoint_run_mark_succeeded_merges_shadow_metadata_json():
+    import asyncio
+
+    cursor = FakeCursor(rowcount=1)
+    repository = GraphCheckpointRunRepository(FakePool(cursor))
+
+    asyncio.run(
+        repository.mark_succeeded(
+            66,
+            latest_checkpoint_id=None,
+            metadata_json={
+                "llm_shadow": {
+                    "rewrite": {"provider": "mock", "status": "ok"},
+                    "intent": {"provider": "mock", "route": "faq", "api_key": "skip-me"},
+                }
+            },
+        )
+    )
+
+    assert "JSON_MERGE_PATCH" in cursor.sql
+    assert "CAST(%s AS JSON)" in cursor.sql
+    assert cursor.args[0] is None
+    assert cursor.args[1] == '{"llm_shadow":{"rewrite":{"provider":"mock","status":"ok"},"intent":{"provider":"mock","route":"faq"}}}'
+    assert "api_key" not in cursor.args[1]
+    assert cursor.args[2] == 66
+
+
 def test_graph_checkpoint_run_mark_failed_writes_error_fields():
     import asyncio
 

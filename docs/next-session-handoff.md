@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that has now hardened this repeatable loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/conversation_messages/outbound_messages -> sender_worker -> LiveChat send_event -> conversation_messages assistant row.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only. P6-B.1 adds shadow output guardrails and a standalone smoke review tool. P7-A.1 adds multimodal FAQ canonical fields to `knowledge_documents`, `question_aliases` lexical ranking, vector-ready metadata, and minimal multimodal seed data without rendering or sending images. P7-A.5 prepares outbound idempotency fields. P7-A.7 fixes the sender pending SQL ambiguity and adds repeatable FAQ single-text closed-loop smoke diagnostics/tests.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only. P6-B.1 adds shadow output guardrails and a standalone smoke review tool. P7-A.1 adds multimodal FAQ canonical fields to `knowledge_documents`, `question_aliases` lexical ranking, vector-ready metadata, and minimal multimodal seed data without rendering or sending images. P7-A.5 prepares outbound idempotency fields. P7-A.7 fixes the sender pending SQL ambiguity and adds repeatable FAQ single-text closed-loop smoke diagnostics/tests. P7-A.8 adds Gateway-path LLM rewrite/intent shadow smoke, shadow error isolation, checkpoint metadata diagnostics, and `llm_shadow_admin`.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -39,11 +39,21 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-- If P7-A.7.1 remains green, run a shadow-only LLM rewrite/intent smoke plan without enabling fallback or final answer generation
-- or start the FAQ multi-outbound batch contract, still without real `send_image` / buttons production sending
+- Start the FAQ multi-outbound batch contract, still without real `send_image` / buttons production sending
+- or add LLM shadow result review / metrics while still not enabling fallback or final answer generation
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
+
+## Latest P7-A.8 Status
+
+- Added Gateway-path LLM rewrite/intent shadow smoke coverage using fake/mock providers and disposable MySQL test DB.
+- Shadow success and shadow error summaries are stored in `graph_checkpoint_runs.metadata_json.llm_shadow`.
+- Shadow failure is isolated: deterministic graph execution continues, FAQ text outbound remains deterministic, inbound is processed, checkpoint run can still be `SUCCEEDED`, and no `graph_run_errors` row is written for shadow-only failures.
+- `gateway_consumer` now reports fallback flags in the `llm` summary while keeping fallback disabled unless explicitly configured.
+- Added read-only `python -m app.workers.llm_shadow_admin latest|summary` diagnostics over project-owned checkpoint metadata.
+- LLM still does not generate final customer replies, does not change real route, does not decide image/buttons, does not call tools, and does not enable fallback.
+- Added `/Users/andy/ai-agent/docs/p7-a8-llm-shadow-gateway-smoke.md`.
 
 ## Latest P7-A.7.1 Status
 
@@ -152,6 +162,14 @@ Recommended next task:
 
 ## Latest Verification Status
 
+- Ran `uv run --group dev pytest tests/unit -q`
+- Result: `328 passed`
+- Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`
+- Result: `10 passed`
+- Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration/test_llm_shadow_gateway_mysql_smoke.py -q`
+- Result: `2 passed`
+- Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration/test_faq_single_text_closed_loop_mysql_smoke.py -q`
+- Result: `2 passed`
 - Ran `uv run --group dev pytest tests/unit -q`
 - Result: `322 passed`
 - Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`

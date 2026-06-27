@@ -179,6 +179,89 @@ def test_faq_smoke_admin_run_command_is_read_only_and_uses_unused_livechat_crede
     assert calls["wait_closed"] is True
 
 
+def test_llm_shadow_admin_parser_accepts_filters():
+    from app.workers.llm_shadow_admin import build_arg_parser
+
+    args = build_arg_parser().parse_args([
+        "summary",
+        "--conversation-id",
+        "livechat:chat-1",
+        "--chat-id",
+        "chat-1",
+        "--limit",
+        "5",
+    ])
+
+    assert args.command == "summary"
+    assert args.conversation_id == "livechat:chat-1"
+    assert args.chat_id == "chat-1"
+    assert args.limit == 5
+
+
+def test_llm_shadow_admin_run_command_reads_checkpoint_metadata_and_sanitizes(monkeypatch):
+    import asyncio
+
+    from app.workers import llm_shadow_admin
+
+    calls = {}
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            calls["settings_kwargs"] = kwargs
+
+    class FakePool:
+        def close(self) -> None:
+            calls["closed"] = True
+
+        async def wait_closed(self) -> None:
+            calls["wait_closed"] = True
+
+    class FakeRepository:
+        def __init__(self, pool) -> None:
+            calls["repository_pool"] = pool
+
+        async def list_runs(self, **kwargs):
+            calls["query_kwargs"] = kwargs
+            return [
+                {
+                    "id": 91,
+                    "conversation_id": "livechat:chat-1",
+                    "graph_thread_id": "livechat:chat-1",
+                    "status": "SUCCEEDED",
+                    "created_at": "2026-06-27 00:00:00.000000",
+                    "updated_at": "2026-06-27 00:00:01.000000",
+                    "metadata_json": {
+                        "llm_shadow": {
+                            "rewrite": {"provider": "mock", "status": "ok", "api_key": "hidden"},
+                            "intent": {"provider": "mock", "status": "error", "error_type": "RuntimeError"},
+                        }
+                    },
+                }
+            ]
+
+    async def fake_create_pool(settings):
+        calls["settings"] = settings
+        return FakePool()
+
+    monkeypatch.setattr(llm_shadow_admin, "Settings", FakeSettings)
+    monkeypatch.setattr(llm_shadow_admin, "create_pool", fake_create_pool)
+    monkeypatch.setattr(llm_shadow_admin, "GraphCheckpointRunRepository", FakeRepository)
+
+    result = asyncio.run(llm_shadow_admin.run_command("summary", chat_id="chat-1", limit=5))
+
+    assert calls["settings_kwargs"] == {
+        "livechat_agent_access_token": "unused-for-llm-shadow-admin",
+        "livechat_account_id": "unused-for-llm-shadow-admin",
+    }
+    assert calls["query_kwargs"] == {"conversation_id": "livechat:chat-1", "limit": 5}
+    assert result["total"] == 1
+    assert result["error_count"] == 1
+    assert result["latest"]["llm_shadow"]["rewrite"] == {"provider": "mock", "status": "ok"}
+    assert "api_key" not in str(result)
+    assert calls["closed"] is True
+    assert calls["wait_closed"] is True
+
+
 def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
     import asyncio
 
@@ -231,6 +314,29 @@ def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
     assert result["processed"] == 1
     assert result["failed"] == 0
     assert result["enqueued"] == 1
+
+
+def test_gateway_llm_summary_reports_shadow_and_fallback_flags():
+    from app.workers.gateway_consumer import _build_llm_summary
+
+    class FakeSettings:
+        llm_provider = "mock"
+        llm_rewrite_shadow_enabled = True
+        llm_intent_shadow_enabled = True
+        llm_rewrite_fallback_enabled = False
+        llm_intent_fallback_enabled = False
+
+    summary = _build_llm_summary(FakeSettings())
+
+    assert summary == {
+        "provider": "mock",
+        "rewrite_shadow_enabled": True,
+        "intent_shadow_enabled": True,
+        "rewrite_fallback_enabled": False,
+        "intent_fallback_enabled": False,
+        "fallback_enabled": False,
+        "shadow_active": True,
+    }
 
 
 def test_setup_langgraph_checkpoints_skips_when_mode_is_off(monkeypatch):

@@ -172,13 +172,9 @@ class GatewayService:
             routed_state = prepare_route_state(graph_state)
             active_state = routed_state
             if self.llm_rewrite_shadow_enabled and self.llm_rewrite_service:
-                routed_state["llm_rewrite_result"] = self._sanitize_value(await self.llm_rewrite_service.rewrite(
-                    self._build_llm_rewrite_shadow_input(routed_state)
-                ))
+                routed_state["llm_rewrite_result"] = await self._run_rewrite_shadow(routed_state)
             if self.llm_intent_shadow_enabled and self.llm_intent_service:
-                routed_state["llm_intent_result"] = self._sanitize_value(await self.llm_intent_service.classify_intent(
-                    self._build_llm_intent_shadow_input(routed_state)
-                ))
+                routed_state["llm_intent_result"] = await self._run_intent_shadow(routed_state)
             if self.rag_service and routed_state.get("route") == "faq":
                 # Conservative lazy-retrieve transition: pre-route with pure deterministic nodes,
                 # then only prefetch DB-backed RAG for FAQ traffic before invoking the full graph.
@@ -189,7 +185,7 @@ class GatewayService:
                 routed_state,
                 config={"configurable": {"thread_id": graph_thread_id}},
             )
-            await self._mark_checkpoint_run_succeeded(checkpoint_run_id)
+            await self._mark_checkpoint_run_succeeded(checkpoint_run_id, result)
             return result
         except Exception as exc:
             await self._mark_checkpoint_run_failed(checkpoint_run_id, exc)
@@ -229,11 +225,15 @@ class GatewayService:
         except Exception:
             return None
 
-    async def _mark_checkpoint_run_succeeded(self, checkpoint_run_id: int | None) -> None:
+    async def _mark_checkpoint_run_succeeded(self, checkpoint_run_id: int | None, graph_state: dict | None = None) -> None:
         if not self.checkpoint_run_repository or checkpoint_run_id is None:
             return
         try:
-            await self.checkpoint_run_repository.mark_succeeded(checkpoint_run_id, latest_checkpoint_id=None)
+            await self.checkpoint_run_repository.mark_succeeded(
+                checkpoint_run_id,
+                latest_checkpoint_id=None,
+                metadata_json=self._build_checkpoint_success_metadata(graph_state or {}),
+            )
         except Exception:
             return
 
@@ -298,6 +298,62 @@ class GatewayService:
         if graph_state.get("rag_context"):
             snapshot["rag_context"] = self._sanitize_rag_context(graph_state["rag_context"])
         return self._sanitize_value(snapshot)
+
+    async def _run_rewrite_shadow(self, graph_state: dict) -> dict:
+        try:
+            result = await self.llm_rewrite_service.rewrite(self._build_llm_rewrite_shadow_input(graph_state))
+            sanitized = self._sanitize_value(result)
+            sanitized.setdefault("mode", "shadow")
+            sanitized.setdefault("status", "ok")
+            return sanitized
+        except Exception as exc:
+            return self._shadow_error_result(exc)
+
+    async def _run_intent_shadow(self, graph_state: dict) -> dict:
+        try:
+            result = await self.llm_intent_service.classify_intent(self._build_llm_intent_shadow_input(graph_state))
+            sanitized = self._sanitize_value(result)
+            sanitized.setdefault("mode", "shadow")
+            sanitized.setdefault("status", "ok")
+            return sanitized
+        except Exception as exc:
+            return self._shadow_error_result(exc)
+
+    def _shadow_error_result(self, exc: Exception) -> dict:
+        return {
+            "mode": "shadow",
+            "status": "error",
+            "error_type": type(exc).__name__,
+        }
+
+    def _build_checkpoint_success_metadata(self, graph_state: dict) -> dict:
+        rewrite = graph_state.get("llm_rewrite_result")
+        intent = graph_state.get("llm_intent_result")
+        if not rewrite and not intent:
+            return {}
+        return self._sanitize_value(
+            {
+                "llm_shadow": {
+                    "rewrite": self._shadow_result_summary(rewrite),
+                    "intent": self._shadow_result_summary(intent),
+                    "deterministic_route": graph_state.get("route"),
+                    "deterministic_intent": (graph_state.get("intent_result") or {}).get("intent"),
+                }
+            }
+        )
+
+    def _shadow_result_summary(self, result: dict | None) -> dict | None:
+        if not result:
+            return None
+        return {
+            "provider": result.get("provider"),
+            "mode": result.get("mode"),
+            "status": result.get("status") or "ok",
+            "intent": result.get("intent"),
+            "route": result.get("route"),
+            "confidence": result.get("confidence"),
+            "error_type": result.get("error_type"),
+        }
 
     def _sanitize_rag_context(self, rag_context: dict) -> dict:
         documents = []

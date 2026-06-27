@@ -99,7 +99,10 @@ def _build_llm_summary(settings) -> dict:
         "provider": provider,
         "rewrite_shadow_enabled": bool(getattr(settings, "llm_rewrite_shadow_enabled", False)),
         "intent_shadow_enabled": bool(getattr(settings, "llm_intent_shadow_enabled", False)),
+        "rewrite_fallback_enabled": bool(getattr(settings, "llm_rewrite_fallback_enabled", False)),
+        "intent_fallback_enabled": bool(getattr(settings, "llm_intent_fallback_enabled", False)),
     }
+    summary["fallback_enabled"] = bool(summary["rewrite_fallback_enabled"] or summary["intent_fallback_enabled"])
     summary["shadow_active"] = bool(
         provider != "off"
         and (summary["rewrite_shadow_enabled"] or summary["intent_shadow_enabled"])

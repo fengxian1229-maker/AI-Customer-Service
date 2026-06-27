@@ -140,6 +140,9 @@ async def _test_faq_single_text_closed_loop_mysql_smoke_with_fake_sender() -> No
             "provider": "off",
             "rewrite_shadow_enabled": False,
             "intent_shadow_enabled": False,
+            "rewrite_fallback_enabled": False,
+            "intent_fallback_enabled": False,
+            "fallback_enabled": False,
             "shadow_active": False,
         }
 

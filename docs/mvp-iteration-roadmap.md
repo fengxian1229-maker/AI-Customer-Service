@@ -82,6 +82,12 @@ P7-A.1：Multimodal FAQ Canonical Data Layer, Vector-ready
 P7-A.7：FAQ single-text closed-loop smoke hardening + sender pending SQL ambiguity fix
 ```
 
+当前 P7-A.8 已完成：
+
+```text
+P7-A.8：LLM rewrite/intent shadow smoke in Gateway path
+```
+
 说明：
 
 ```text
@@ -113,6 +119,13 @@ tests/integration/test_mysql_checkpoint_persistence.py     1 passed
 tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py 1 passed
 tests/integration/test_checkpoint_admin_mysql_smoke.py    1 passed
 tests/integration -m mysql                                6 passed
+```
+
+最新本机验证结果（2026-06-27）：
+
+```text
+tests/integration/test_llm_shadow_gateway_mysql_smoke.py 2 passed
+tests/integration -m mysql                               10 passed
 ```
 
 P5-C 新增只读调试工具：
@@ -205,6 +218,17 @@ P7-A.7 固化 FAQ 单文本闭环 smoke：
 5. 新增 smoke 文档，记录 polling_receiver -> gateway_consumer -> sender_worker -> DB 诊断步骤
 ```
 
+P7-A.8 固化 Gateway 主链路 LLM shadow smoke：
+
+```text
+1. LLM rewrite / intent 仍只作为 shadow metadata，不覆盖 deterministic rewrite / intent / route
+2. fallback 仍保持 false，不启用 LLM final answer generation
+3. shadow success / error 摘要写入 graph_checkpoint_runs.metadata_json.llm_shadow
+4. shadow 异常只记录 sanitized shadow error，不写 graph_run_errors，不阻断 deterministic FAQ 单文本 outbound
+5. 新增 llm_shadow_admin 只读诊断 CLI，仅查询项目自有 checkpoint metadata，不读 LangGraph saver 内部表
+6. 新增 MySQL integration smoke，使用 mock/fake provider 走 gateway_consumer 主链路，不调用真实 Gemini
+```
+
 当前 RAG 仍明确不做：
 
 ```text
@@ -221,8 +245,8 @@ buttons/rich message
 当前 P7-A 后续候选：
 
 ```text
-1. LLM rewrite/intent shadow smoke，但仍不启用 fallback 或 final answer generation
-2. FAQ multi-outbound batch contract，但仍不真实发送 image/buttons
+1. FAQ multi-outbound batch contract，但仍不真实发送 image/buttons
+2. LLM shadow result review / metrics，但仍不启用 fallback 或 final answer generation
 ```
 
 当前知识库运维入口仅包含：

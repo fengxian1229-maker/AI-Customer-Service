@@ -391,5 +391,8 @@ def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monke
         "location": "global",
         "rewrite_shadow_enabled": True,
         "intent_shadow_enabled": True,
+        "rewrite_fallback_enabled": False,
+        "intent_fallback_enabled": False,
+        "fallback_enabled": False,
         "shadow_active": True,
     }

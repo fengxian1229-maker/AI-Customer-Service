@@ -1057,19 +1057,32 @@ class GraphCheckpointRunRepository:
                 await cur.execute(sql, args)
                 return cur.lastrowid
 
-    async def mark_succeeded(self, run_id: int, latest_checkpoint_id: str | None = None) -> None:
-        sql = """
+    async def mark_succeeded(
+        self,
+        run_id: int,
+        latest_checkpoint_id: str | None = None,
+        metadata_json: dict | None = None,
+    ) -> None:
+        metadata_sql = ""
+        args: tuple
+        if metadata_json:
+            metadata_sql = """,
+            metadata_json = JSON_MERGE_PATCH(COALESCE(metadata_json, JSON_OBJECT()), CAST(%s AS JSON))"""
+            args = (latest_checkpoint_id, json_dumps(_sanitize_checkpoint_metadata(metadata_json)), run_id)
+        else:
+            args = (latest_checkpoint_id, run_id)
+        sql = f"""
         UPDATE graph_checkpoint_runs
         SET status = 'SUCCEEDED',
             latest_checkpoint_id = %s,
             error_type = NULL,
-            error_message = NULL,
+            error_message = NULL{metadata_sql},
             updated_at = CURRENT_TIMESTAMP
         WHERE id = %s
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql, (latest_checkpoint_id, run_id))
+                await cur.execute(sql, args)
 
     async def mark_failed(self, run_id: int, error: Exception | str) -> None:
         error_type = type(error).__name__ if isinstance(error, Exception) else "RuntimeError"
@@ -1552,16 +1565,23 @@ def _normalize_smoke_row(row: dict) -> dict:
 
 def _sanitize_checkpoint_metadata(metadata: dict) -> dict:
     sensitive_tokens = ("token", "access_token", "secret", "api_key", "password")
-    sanitized = {}
-    for key, value in metadata.items():
-        lowered = str(key).lower()
-        if any(token in lowered for token in sensitive_tokens):
-            continue
-        if isinstance(value, str):
-            sanitized[key] = value[:500]
-        else:
-            sanitized[key] = value
-    return sanitized
+    return _sanitize_metadata_value(metadata, sensitive_tokens)
+
+
+def _sanitize_metadata_value(value, sensitive_tokens: tuple[str, ...]):
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(token in lowered for token in sensitive_tokens):
+                continue
+            sanitized[key] = _sanitize_metadata_value(item, sensitive_tokens)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_metadata_value(item, sensitive_tokens) for item in value[:20]]
+    if isinstance(value, str):
+        return value[:500]
+    return value
 
 
 def build_external_command_dedup_key(

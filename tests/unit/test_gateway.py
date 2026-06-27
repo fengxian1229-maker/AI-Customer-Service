@@ -138,10 +138,10 @@ class FakeCheckpointRunRepository:
         self.inserted.append(record)
         return 91
 
-    async def mark_succeeded(self, run_id: int, latest_checkpoint_id: str | None = None) -> None:
+    async def mark_succeeded(self, run_id: int, latest_checkpoint_id: str | None = None, metadata_json: dict | None = None) -> None:
         if self.fail_on_mark:
             raise RuntimeError("checkpoint metadata success failed")
-        self.succeeded.append((run_id, latest_checkpoint_id))
+        self.succeeded.append((run_id, latest_checkpoint_id, metadata_json))
 
     async def mark_failed(self, run_id: int, error) -> None:
         if self.fail_on_mark_failed:
@@ -212,6 +212,14 @@ class FakeLLMIntentService:
     async def classify_intent(self, payload: dict) -> dict:
         self.calls.append(payload)
         return self.result
+
+
+class ExplodingLLMService:
+    async def rewrite(self, payload: dict) -> dict:
+        raise RuntimeError("shadow failed with api_key=hidden")
+
+    async def classify_intent(self, payload: dict) -> dict:
+        raise RuntimeError("shadow failed with password=hidden")
 
 
 def test_gateway_service_processes_message_created():
@@ -617,7 +625,7 @@ def test_gateway_service_backend_fact_shadow_does_not_query_knowledge_repository
     assert result["graph_state"]["llm_intent_result"] is not None
 
 
-def test_gateway_service_guardrail_failure_records_error_and_skips_side_effects():
+def test_gateway_service_shadow_guardrail_failure_records_shadow_error_and_keeps_side_effects():
     inbound_repository = FakeInboundRepository()
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
@@ -641,16 +649,75 @@ def test_gateway_service_guardrail_failure_records_error_and_skips_side_effects(
         workflow_graph=RecordingGraph(),
     )
 
-    with pytest.raises(ValueError, match="Unsupported llm route: invalid_route"):
-        asyncio.run(service.process_event(23, make_event_with_text("how to deposit")))
+    result = asyncio.run(service.process_event(23, make_event_with_text("how to deposit")))
 
-    assert inbound_repository.processed == []
-    assert conversation_repository.updated == []
-    assert message_repository.inserted == []
-    assert outbound_repository.inserted == []
+    assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["llm_rewrite_result"] == {
+        "mode": "shadow",
+        "status": "error",
+        "error_type": "ValueError",
+    }
+    assert inbound_repository.processed == [23]
+    assert conversation_repository.updated
+    assert message_repository.inserted
+    assert outbound_repository.inserted
     assert external_repository.inserted == []
-    assert graph_error_repository.inserted[0]["error_type"] == "ValueError"
-    assert graph_error_repository.inserted[0]["error_message"] == "Unsupported llm route: invalid_route"
+    assert graph_error_repository.inserted == []
+
+
+def test_gateway_service_shadow_failure_does_not_block_deterministic_outbound_or_record_graph_error():
+    graph_error_repository = FakeGraphRunErrorRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        graph_run_error_repository=graph_error_repository,
+        message_repository=FakeConversationMessageRepository(),
+        llm_rewrite_service=ExplodingLLMService(),
+        llm_intent_service=ExplodingLLMService(),
+        llm_rewrite_shadow_enabled=True,
+        llm_intent_shadow_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(24, make_event_with_text("how to deposit")))
+
+    assert result["graph_state"]["route"] == "faq"
+    assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
+    assert result["outbound_messages"][0]["message_type"] == "text"
+    assert result["graph_state"]["llm_rewrite_result"]["mode"] == "shadow"
+    assert result["graph_state"]["llm_rewrite_result"]["status"] == "error"
+    assert result["graph_state"]["llm_rewrite_result"]["error_type"] == "RuntimeError"
+    assert result["graph_state"]["llm_intent_result"]["mode"] == "shadow"
+    assert result["graph_state"]["llm_intent_result"]["status"] == "error"
+    assert "api_key" not in str(result["graph_state"]["llm_rewrite_result"])
+    assert "password" not in str(result["graph_state"]["llm_intent_result"])
+    assert graph_error_repository.inserted == []
+
+
+def test_gateway_service_checkpoint_success_metadata_contains_shadow_summary():
+    checkpoint_repository = FakeCheckpointRunRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_rewrite_service=FakeLLMRewriteService(),
+        llm_intent_service=FakeLLMIntentService({"intent": "human_handoff", "route": "human_handoff", "confidence": 0.91, "reason": "shadow disagreement", "provider": "mock", "mode": "shadow"}),
+        llm_rewrite_shadow_enabled=True,
+        llm_intent_shadow_enabled=True,
+        checkpoint_run_repository=checkpoint_repository,
+    )
+
+    result = asyncio.run(service.process_event(25, make_event_with_text("how to deposit")))
+
+    assert result["graph_state"]["route"] == "faq"
+    assert checkpoint_repository.succeeded[0][0] == 91
+    metadata = checkpoint_repository.succeeded[0][2]
+    assert metadata["llm_shadow"]["rewrite"]["provider"] == "mock"
+    assert metadata["llm_shadow"]["rewrite"]["status"] == "ok"
+    assert metadata["llm_shadow"]["intent"]["provider"] == "mock"
+    assert metadata["llm_shadow"]["intent"]["route"] == "human_handoff"
+    assert metadata["llm_shadow"]["deterministic_route"] == "faq"
 
 
 class RecordingGraph:
@@ -701,7 +768,7 @@ def test_gateway_service_records_checkpoint_run_metadata_without_breaking_main_f
     assert result["outbound_message"]["payload_json"]["text"] == "ok"
     assert checkpoint_repository.inserted[0]["conversation_id"] == "livechat:chat-1"
     assert checkpoint_repository.inserted[0]["checkpoint_mode"] == "off"
-    assert checkpoint_repository.succeeded == [(91, None)]
+    assert checkpoint_repository.succeeded[0][0:2] == (91, None)
 
 
 def test_gateway_service_marks_checkpoint_run_failed_when_graph_invoke_fails():
