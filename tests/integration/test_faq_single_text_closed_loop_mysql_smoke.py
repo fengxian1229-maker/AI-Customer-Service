@@ -142,6 +142,9 @@ async def _test_faq_single_text_closed_loop_mysql_smoke_with_fake_sender() -> No
             "intent_shadow_enabled": False,
             "rewrite_fallback_enabled": False,
             "intent_fallback_enabled": False,
+            "router_mode": "shadow",
+            "router_min_confidence": 0.75,
+            "router_fallback_to_deterministic": True,
             "fallback_enabled": False,
             "shadow_active": False,
         }

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     llm_intent_shadow_enabled: bool = False
     llm_intent_fallback_enabled: bool = False
     llm_intent_min_confidence: float = 0.75
+    llm_router_mode: str = "shadow"
+    llm_router_min_confidence: float = 0.75
+    llm_router_fallback_to_deterministic: bool = True
     gemini_model: str = "gemini-3.1-flash-lite"
     gemini_project: str = "project-gemini-0306"
     gemini_location: str = "global"

@@ -153,6 +153,26 @@ def validate_intent_output(payload: dict[str, Any], output: dict[str, Any]) -> d
     return validated
 
 
+def validate_router_decision_output(payload: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
+    del payload
+    return {
+        "rewritten_question": _require_str(output, "rewritten_question", "router decision"),
+        "normalized_query": _optional_str(output.get("normalized_query")),
+        "language": str(output.get("language") or "unknown"),
+        "intent": validate_llm_intent(_require_str(output, "intent", "router decision")),
+        "route": validate_llm_route(_require_str(output, "route", "router decision")),
+        "confidence": normalize_confidence(output.get("confidence")),
+        "sop_name": _optional_str(output.get("sop_name")),
+        "faq_query": _optional_str(output.get("faq_query")),
+        "risk_level": _optional_str(output.get("risk_level")),
+        "requires_human": bool(output.get("requires_human", False)),
+        "requires_backend": bool(output.get("requires_backend", False)),
+        "missing_slots": _string_list(output.get("missing_slots")),
+        "preserved_entities": _string_list(output.get("preserved_entities")),
+        "reason": _require_str(output, "reason", "router decision"),
+    }
+
+
 def _require_str(output: dict[str, Any], field: str, output_name: str) -> str:
     value = output.get(field)
     if value is None:

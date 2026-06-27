@@ -88,6 +88,12 @@ P7-A.7：FAQ single-text closed-loop smoke hardening + sender pending SQL ambigu
 P7-A.8：LLM rewrite/intent shadow smoke in Gateway path
 ```
 
+当前 P8-A 已完成：
+
+```text
+P8-A：LLM guarded authoritative rewrite/router
+```
+
 说明：
 
 ```text
@@ -125,7 +131,8 @@ tests/integration -m mysql                                6 passed
 
 ```text
 tests/integration/test_llm_shadow_gateway_mysql_smoke.py 2 passed
-tests/integration -m mysql                               10 passed
+tests/integration/test_llm_guarded_authoritative_router_mysql_smoke.py 1 passed
+tests/integration -m mysql                               11 passed
 ```
 
 P5-C 新增只读调试工具：
@@ -229,6 +236,19 @@ P7-A.8 固化 Gateway 主链路 LLM shadow smoke：
 6. 新增 MySQL integration smoke，使用 mock/fake provider 走 gateway_consumer 主链路，不调用真实 Gemini
 ```
 
+P8-A 固化 guarded authoritative rewrite/router：
+
+```text
+1. 新增 llm_router_mode=deterministic|shadow|guarded_authoritative，默认 shadow
+2. guarded_authoritative 只允许 LLM 接管 rewritten_question / rewrite_result / intent_result / route
+3. LLM router 输出必须通过 schema 校验、route/intent 白名单、confidence 阈值和 hard guards
+4. active_workflow、explicit human、file-without-text、FAQ 倾向 backend/account/order/payment/balance/status fact-like 请求会走 deterministic fallback
+5. low confidence、invalid schema/route/intent、provider exception、unsafe FAQ/backend 决策不会写 graph_run_errors
+6. accepted/fallback 摘要写入 graph_checkpoint_runs.metadata_json.llm_router
+7. llm_shadow_admin 继续保持只读，并可查看 llm_router 摘要和 fallback 计数
+8. 仍不允许 LLM 生成最终客服回复、调用工具、生成 external_commands、决定 FAQ image/buttons
+```
+
 当前 RAG 仍明确不做：
 
 ```text
@@ -245,8 +265,9 @@ buttons/rich message
 当前 P7-A 后续候选：
 
 ```text
-1. FAQ multi-outbound batch contract，但仍不真实发送 image/buttons
-2. LLM shadow result review / metrics，但仍不启用 fallback 或 final answer generation
+1. 小范围真实 Gemini guarded-authoritative router smoke review，仍不启用 final answer generation
+2. FAQ multi-outbound batch contract，但仍不真实发送 image/buttons
+3. LLM/router shadow result review / metrics
 ```
 
 当前知识库运维入口仅包含：

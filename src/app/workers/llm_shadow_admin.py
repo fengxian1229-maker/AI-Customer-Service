@@ -45,31 +45,48 @@ async def run_command(
 def _shadow_entry_from_checkpoint(row: dict) -> dict | None:
     metadata = row.get("metadata_json") or {}
     shadow = metadata.get("llm_shadow")
-    if not shadow:
+    router = metadata.get("llm_router")
+    if not shadow and not router:
         return None
-    return {
+    entry = {
         "checkpoint_run_id": row.get("id"),
         "conversation_id": row.get("conversation_id"),
         "graph_thread_id": row.get("graph_thread_id"),
         "status": row.get("status"),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
-        "llm_shadow": _sanitize_shadow(shadow),
     }
+    if shadow:
+        entry["llm_shadow"] = _sanitize_shadow(shadow)
+    if router:
+        entry["llm_router"] = _sanitize_shadow(router)
+    return entry
 
 
 def _build_summary(entries: list[dict]) -> dict:
-    rewrite_results = [entry["llm_shadow"].get("rewrite") for entry in entries if entry["llm_shadow"].get("rewrite")]
-    intent_results = [entry["llm_shadow"].get("intent") for entry in entries if entry["llm_shadow"].get("intent")]
+    rewrite_results = [
+        entry["llm_shadow"].get("rewrite")
+        for entry in entries
+        if entry.get("llm_shadow") and entry["llm_shadow"].get("rewrite")
+    ]
+    intent_results = [
+        entry["llm_shadow"].get("intent")
+        for entry in entries
+        if entry.get("llm_shadow") and entry["llm_shadow"].get("intent")
+    ]
+    router_results = [entry["llm_router"] for entry in entries if entry.get("llm_router")]
     errors = [
         result
-        for result in [*rewrite_results, *intent_results]
+        for result in [*rewrite_results, *intent_results, *router_results]
         if result.get("status") == "error"
     ]
+    router_fallbacks = [result for result in router_results if result.get("status") == "fallback"]
     return {
         "total": len(entries),
         "rewrite_count": len(rewrite_results),
         "intent_count": len(intent_results),
+        "router_count": len(router_results),
+        "router_fallback_count": len(router_fallbacks),
         "error_count": len(errors),
         "latest": entries[0] if entries else None,
     }

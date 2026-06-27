@@ -37,6 +37,7 @@ def build_graph_state_from_event(
         "workflow_stage": conversation.get("workflow_stage"),
         "slot_memory": dict(conversation.get("slot_memory") or {}),
         "llm_rewrite_result": None,
+        "llm_router_result": None,
         "intent_result": None,
         "llm_intent_result": None,
         "route": None,
@@ -52,6 +53,8 @@ def build_graph_state_from_event(
 
 
 def rewrite_question_node(state: GraphState) -> GraphState:
+    if state.get("rewrite_source") == "llm_guarded_authoritative" and state.get("rewritten_question"):
+        return state
     raw = normalize_text(state.get("raw_user_input"))
     identity = extract_identity(raw)
     return {
@@ -77,6 +80,10 @@ def prepare_route_state(state: GraphState) -> GraphState:
 
 
 def intent_router_node(state: GraphState) -> GraphState:
+    if state.get("route_source") == "llm_guarded_authoritative" and state.get("route"):
+        return state
+    if (state.get("llm_router_result") or {}).get("hard_guard") == "backend_fact" and state.get("route"):
+        return state
     active = state.get("active_workflow")
     stage = state.get("workflow_stage")
     text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))

@@ -1,6 +1,8 @@
 from app.llm.contracts import (
     LLMIntentShadowInput,
     LLMIntentShadowOutput,
+    LLMRouterDecisionOutput,
+    LLMRouterInput,
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
 )
@@ -47,6 +49,29 @@ class MockLLMProvider:
             "risk_level": "elevated" if _risk_flags(text) else None,
             "provider": self.provider_name,
             "mode": "shadow",
+        }
+
+    async def route(self, payload: LLMRouterInput) -> LLMRouterDecisionOutput:
+        deterministic = payload.get("deterministic_intent_result") or {}
+        rewrite = payload.get("deterministic_rewrite_result") or {}
+        text = normalize_text(payload.get("raw_user_input"))
+        return {
+            "rewritten_question": rewrite.get("rewritten_question") or text,
+            "normalized_query": rewrite.get("rewritten_question") or text,
+            "language": rewrite.get("language") or "unknown",
+            "intent": deterministic.get("intent") or "faq_general",
+            "route": deterministic.get("route") or payload.get("deterministic_route") or "faq",
+            "confidence": 0.84,
+            "sop_name": deterministic.get("sop_name"),
+            "faq_query": deterministic.get("faq_query"),
+            "risk_level": "elevated" if _risk_flags(text) else None,
+            "requires_human": (deterministic.get("route") == "human_handoff"),
+            "requires_backend": bool(_risk_flags(text)),
+            "missing_slots": [],
+            "preserved_entities": [],
+            "reason": "Mock guarded router mirrors deterministic decision for offline validation.",
+            "provider": self.provider_name,
+            "mode": "guarded_authoritative",
         }
 
 

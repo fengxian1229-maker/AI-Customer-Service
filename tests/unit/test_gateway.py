@@ -214,12 +214,45 @@ class FakeLLMIntentService:
         return self.result
 
 
+class FakeLLMRouterService:
+    def __init__(self, result: dict | None = None, error: Exception | None = None) -> None:
+        self.result = result or {
+            "rewritten_question": "how to deposit",
+            "normalized_query": "how to deposit",
+            "language": "en",
+            "intent": "deposit_howto",
+            "route": "faq",
+            "confidence": 0.95,
+            "sop_name": None,
+            "faq_query": "how to deposit",
+            "risk_level": None,
+            "requires_human": False,
+            "requires_backend": False,
+            "missing_slots": [],
+            "preserved_entities": [],
+            "reason": "authoritative route",
+            "provider": "mock",
+            "mode": "guarded_authoritative",
+        }
+        self.error = error
+        self.calls = []
+
+    async def route(self, payload: dict) -> dict:
+        self.calls.append(payload)
+        if self.error:
+            raise self.error
+        return self.result
+
+
 class ExplodingLLMService:
     async def rewrite(self, payload: dict) -> dict:
         raise RuntimeError("shadow failed with api_key=hidden")
 
     async def classify_intent(self, payload: dict) -> dict:
         raise RuntimeError("shadow failed with password=hidden")
+
+    async def route(self, payload: dict) -> dict:
+        raise RuntimeError("router failed with api_key=hidden")
 
 
 def test_gateway_service_processes_message_created():
@@ -463,6 +496,162 @@ def test_gateway_service_without_rag_service_keeps_static_fallback_for_faq():
     assert result["graph_state"]["rag_result"]["matched"] is True
     assert result["external_commands"] == []
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
+
+
+def test_gateway_service_guarded_authoritative_uses_llm_faq_route_without_generating_reply_or_commands():
+    router_service = FakeLLMRouterService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="guarded_authoritative",
+    )
+
+    result = asyncio.run(service.process_event(26, make_event_with_text("mi deposito no llegó")))
+
+    assert len(router_service.calls) == 1
+    assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["rewrite_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
+    assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
+    assert result["outbound_messages"][0]["message_type"] == "text"
+    assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
+    assert "response_text" not in result["graph_state"]["llm_router_result"]
+    assert "commands" not in result["graph_state"]["llm_router_result"]
+
+
+def test_gateway_service_guarded_authoritative_uses_llm_sop_route():
+    router_service = FakeLLMRouterService(
+        {
+            "rewritten_question": "存款订单 D123456 没到账",
+            "normalized_query": "存款订单 D123456 没到账",
+            "language": "zh",
+            "intent": "deposit_missing",
+            "route": "sop",
+            "confidence": 0.95,
+            "sop_name": "deposit_missing",
+            "faq_query": None,
+            "risk_level": "elevated",
+            "requires_human": False,
+            "requires_backend": True,
+            "missing_slots": [],
+            "preserved_entities": ["D123456"],
+            "reason": "requires SOP",
+            "provider": "mock",
+            "mode": "guarded_authoritative",
+        }
+    )
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="guarded_authoritative",
+    )
+
+    result = asyncio.run(service.process_event(27, make_event_with_text("怎么存款？")))
+
+    assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
+    assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
+
+
+def test_gateway_service_guarded_authoritative_falls_back_for_low_confidence_invalid_route_and_exception():
+    for router_service, reason in [
+        (FakeLLMRouterService({**FakeLLMRouterService().result, "confidence": 0.2}), "low_confidence"),
+        (FakeLLMRouterService({**FakeLLMRouterService().result, "route": "bad_route"}), "validation_error"),
+        (FakeLLMRouterService(error=RuntimeError("api_key=hidden")), "exception"),
+    ]:
+        graph_error_repository = FakeGraphRunErrorRepository()
+        service = GatewayService(
+            inbound_repository=FakeInboundRepository(),
+            conversation_repository=FakeConversationRepository(),
+            outbound_repository=FakeOutboundRepository(),
+            graph_run_error_repository=graph_error_repository,
+            message_repository=FakeConversationMessageRepository(),
+            llm_intent_service=router_service,
+            llm_router_mode="guarded_authoritative",
+        )
+
+        result = asyncio.run(service.process_event(28, make_event_with_text("how to deposit")))
+
+        assert result["graph_state"]["route"] == "faq"
+        assert result["graph_state"]["route_source"] == "deterministic"
+        assert result["graph_state"]["llm_router_result"]["status"] == "fallback"
+        assert result["graph_state"]["llm_router_result"]["fallback_reason"] == reason
+        assert "api_key" not in str(result["graph_state"]["llm_router_result"])
+        assert graph_error_repository.inserted == []
+
+
+def test_gateway_service_guarded_authoritative_hard_guards_active_workflow_human_and_backend_fact():
+    class ActiveWorkflowConversationRepository(FakeConversationRepository):
+        async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
+            conversation = await super().get_or_create(chat_id, thread_id)
+            conversation["active_workflow"] = "deposit_missing"
+            conversation["workflow_stage"] = "collecting_slots"
+            return conversation
+
+    faq_router = FakeLLMRouterService()
+    active_service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=ActiveWorkflowConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=faq_router,
+        llm_router_mode="guarded_authoritative",
+    )
+    active_result = asyncio.run(active_service.process_event(29, make_event_with_text("发了")))
+    assert active_result["graph_state"]["route"] == "sop"
+    assert active_result["graph_state"]["llm_router_result"]["fallback_reason"] == "hard_guard"
+    assert faq_router.calls == []
+
+    human_service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=FakeLLMRouterService(),
+        llm_router_mode="guarded_authoritative",
+    )
+    human_result = asyncio.run(human_service.process_event(30, make_event_with_text("I want human agent")))
+    assert human_result["graph_state"]["route"] == "human_handoff"
+    assert human_result["graph_state"]["llm_router_result"]["fallback_reason"] == "hard_guard"
+
+    backend_service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=FakeLLMRouterService(),
+        llm_router_mode="guarded_authoritative",
+    )
+    backend_result = asyncio.run(backend_service.process_event(31, make_event_with_text("withdrawal status and balance")))
+    assert backend_result["graph_state"]["route"] != "faq"
+    assert backend_result["graph_state"]["llm_router_result"]["fallback_reason"] == "hard_guard"
+
+
+def test_gateway_service_deterministic_router_mode_does_not_call_llm():
+    router_service = FakeLLMRouterService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="deterministic",
+    )
+
+    result = asyncio.run(service.process_event(32, make_event_with_text("how to deposit")))
+
+    assert router_service.calls == []
+    assert result["graph_state"]["route_source"] == "deterministic"
+    assert result["graph_state"].get("llm_router_result") is None
 
 
 def test_gateway_service_rewrite_shadow_records_result_without_overriding_deterministic_fields():

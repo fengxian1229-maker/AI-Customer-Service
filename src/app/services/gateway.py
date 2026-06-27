@@ -1,12 +1,14 @@
 from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
 from app.graph.builder import build_workflow_graph
 from app.graph.nodes import build_graph_state_from_event, prepare_route_state
-from app.llm.contracts import LLMIntentShadowInput, LLMRewriteShadowInput
+from app.llm.contracts import LLMIntentShadowInput, LLMRewriteShadowInput, LLMRouterInput
+from app.llm.guardrails import validate_router_decision_output
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.message_history import build_customer_message_from_inbound
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
 from app.workflows.command_contracts import CommandType
+from app.workflows.slot_extractors import is_explicit_human_request, normalize_text
 
 
 EXTERNAL_COMMAND_TYPES = {
@@ -17,6 +19,26 @@ EXTERNAL_COMMAND_TYPES = {
     str(CommandType.HUMAN_HANDOFF_REQUESTED),
     str(CommandType.RAG_PLACEHOLDER),
 }
+
+LLM_ROUTER_MODES = {"deterministic", "shadow", "guarded_authoritative"}
+ACTIVE_WORKFLOW_GUARD_STAGES = {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}
+BACKEND_FACT_GUARD_TOKENS = (
+    "backend",
+    "account",
+    "order",
+    "payment",
+    "balance",
+    "status",
+    "withdrawal status",
+    "order status",
+    "提款状态",
+    "订单",
+    "余额",
+    "支付",
+    "付款",
+    "未到账",
+    "没到账",
+)
 
 
 def should_enqueue_reply(event: InboundEvent) -> bool:
@@ -54,6 +76,9 @@ class GatewayService:
         llm_intent_shadow_enabled: bool = False,
         llm_intent_fallback_enabled: bool = False,
         llm_intent_min_confidence: float = 0.75,
+        llm_router_mode: str = "shadow",
+        llm_router_min_confidence: float = 0.75,
+        llm_router_fallback_to_deterministic: bool = True,
         recent_message_limit: int = 10,
     ) -> None:
         self.inbound_repository = inbound_repository
@@ -79,6 +104,10 @@ class GatewayService:
         self.llm_intent_shadow_enabled = llm_intent_shadow_enabled
         self.llm_intent_fallback_enabled = llm_intent_fallback_enabled
         self.llm_intent_min_confidence = llm_intent_min_confidence
+        normalized_router_mode = (llm_router_mode or "shadow").strip().lower()
+        self.llm_router_mode = normalized_router_mode if normalized_router_mode in LLM_ROUTER_MODES else "shadow"
+        self.llm_router_min_confidence = float(llm_router_min_confidence)
+        self.llm_router_fallback_to_deterministic = bool(llm_router_fallback_to_deterministic)
         self.recent_message_limit = recent_message_limit
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
@@ -169,7 +198,7 @@ class GatewayService:
         )
         active_state = graph_state
         try:
-            routed_state = prepare_route_state(graph_state)
+            routed_state = await self._prepare_route_state(graph_state)
             active_state = routed_state
             if self.llm_rewrite_shadow_enabled and self.llm_rewrite_service:
                 routed_state["llm_rewrite_result"] = await self._run_rewrite_shadow(routed_state)
@@ -293,6 +322,7 @@ class GatewayService:
             "intent_result": graph_state.get("intent_result"),
             "llm_rewrite_result": graph_state.get("llm_rewrite_result"),
             "llm_intent_result": graph_state.get("llm_intent_result"),
+            "llm_router_result": graph_state.get("llm_router_result"),
             "rewrite_result": graph_state.get("rewrite_result"),
         }
         if graph_state.get("rag_context"):
@@ -319,6 +349,150 @@ class GatewayService:
         except Exception as exc:
             return self._shadow_error_result(exc)
 
+    async def _prepare_route_state(self, graph_state: dict) -> dict:
+        deterministic_state = prepare_route_state(graph_state)
+        if self.llm_router_mode != "guarded_authoritative":
+            return deterministic_state
+        fallback_reason = self._router_hard_guard_reason(deterministic_state)
+        if fallback_reason:
+            return self._router_fallback_state(deterministic_state, "hard_guard", hard_guard=fallback_reason)
+        if not self.llm_intent_service or not hasattr(self.llm_intent_service, "route"):
+            return self._router_fallback_state(deterministic_state, "missing_provider")
+
+        payload = self._build_llm_router_input(deterministic_state)
+        try:
+            raw_result = await self.llm_intent_service.route(payload)
+            sanitized_raw = self._sanitize_value(raw_result or {})
+            decision = validate_router_decision_output(payload, sanitized_raw)
+        except Exception as exc:
+            return self._router_fallback_state(deterministic_state, "exception" if not isinstance(exc, ValueError) else "validation_error", exc=exc)
+
+        provider = sanitized_raw.get("provider")
+        mode = sanitized_raw.get("mode") or "guarded_authoritative"
+        if decision["confidence"] < self.llm_router_min_confidence:
+            return self._router_fallback_state(deterministic_state, "low_confidence", decision=decision, provider=provider, mode=mode)
+        if decision["route"] == "faq" and (decision["requires_backend"] or self._contains_backend_fact_signal(deterministic_state)):
+            return self._router_fallback_state(deterministic_state, "backend_fact_guard", decision=decision, provider=provider, mode=mode)
+        if decision["requires_human"] and decision["route"] != "human_handoff":
+            return self._router_fallback_state(deterministic_state, "human_guard", decision=decision, provider=provider, mode=mode)
+
+        return {
+            **deterministic_state,
+            "rewritten_question": decision["rewritten_question"],
+            "rewrite_result": {
+                "rewritten_question": decision["rewritten_question"],
+                "normalized_query": decision.get("normalized_query"),
+                "language": decision.get("language"),
+                "preserved_entities": decision.get("preserved_entities") or [],
+                "source": "llm_guarded_authoritative",
+            },
+            "rewrite_source": "llm_guarded_authoritative",
+            "intent_result": {
+                "intent": decision["intent"],
+                "route": decision["route"],
+                "confidence": decision["confidence"],
+                "reason": decision["reason"],
+                "sop_name": decision.get("sop_name"),
+                "faq_query": decision.get("faq_query"),
+                "risk_level": decision.get("risk_level"),
+            },
+            "route": decision["route"],
+            "route_source": "llm_guarded_authoritative",
+            "llm_router_result": self._router_result_summary(
+                status="accepted",
+                decision=decision,
+                provider=provider,
+                mode=mode,
+            ),
+        }
+
+    def _router_hard_guard_reason(self, graph_state: dict) -> str | None:
+        if graph_state.get("active_workflow") and graph_state.get("workflow_stage") in ACTIVE_WORKFLOW_GUARD_STAGES:
+            return "active_workflow"
+        if graph_state.get("event_type") == "FILE_RECEIVED" and not normalize_text(graph_state.get("raw_user_input")):
+            return "file_without_text"
+        if is_explicit_human_request(graph_state.get("raw_user_input")):
+            return "explicit_human_request"
+        if graph_state.get("route") == "faq" and self._contains_backend_fact_signal(graph_state):
+            return "backend_fact"
+        return None
+
+    def _contains_backend_fact_signal(self, graph_state: dict) -> bool:
+        text = normalize_text(graph_state.get("rewritten_question") or graph_state.get("raw_user_input")).lower()
+        return any(token in text for token in BACKEND_FACT_GUARD_TOKENS)
+
+    def _router_fallback_state(
+        self,
+        deterministic_state: dict,
+        fallback_reason: str,
+        decision: dict | None = None,
+        provider: str | None = None,
+        mode: str | None = None,
+        exc: Exception | None = None,
+        hard_guard: str | None = None,
+    ) -> dict:
+        state = dict(deterministic_state)
+        if hard_guard == "backend_fact" and state.get("route") == "faq":
+            state.update(
+                {
+                    "intent_result": {
+                        "intent": "backend_fact_like",
+                        "route": "human_handoff",
+                        "confidence": 0.8,
+                        "reason": "Backend/account/order/payment fact-like requests require human or SOP handling.",
+                        "risk_level": "elevated",
+                    },
+                    "route": "human_handoff",
+                    "route_source": "deterministic",
+                }
+            )
+        state["llm_router_result"] = self._router_result_summary(
+            status="fallback",
+            decision=decision,
+            provider=provider,
+            mode=mode or "guarded_authoritative",
+            fallback_reason=fallback_reason,
+            error_type=type(exc).__name__ if exc else None,
+            hard_guard=hard_guard,
+            fallback_to_deterministic=self.llm_router_fallback_to_deterministic,
+        )
+        return state
+
+    def _router_result_summary(
+        self,
+        status: str,
+        decision: dict | None = None,
+        provider: str | None = None,
+        mode: str | None = None,
+        fallback_reason: str | None = None,
+        error_type: str | None = None,
+        hard_guard: str | None = None,
+        fallback_to_deterministic: bool | None = None,
+    ) -> dict:
+        decision = decision or {}
+        summary = {
+            "provider": provider,
+            "mode": mode or "guarded_authoritative",
+            "status": status,
+            "intent": decision.get("intent"),
+            "route": decision.get("route"),
+            "confidence": decision.get("confidence"),
+            "reason": decision.get("reason"),
+            "sop_name": decision.get("sop_name"),
+            "faq_query": decision.get("faq_query"),
+            "requires_human": decision.get("requires_human"),
+            "requires_backend": decision.get("requires_backend"),
+        }
+        if fallback_reason:
+            summary["fallback_reason"] = fallback_reason
+        if error_type:
+            summary["error_type"] = error_type
+        if hard_guard:
+            summary["hard_guard"] = hard_guard
+        if fallback_to_deterministic is not None:
+            summary["fallback_to_deterministic"] = fallback_to_deterministic
+        return self._sanitize_value({key: value for key, value in summary.items() if value is not None})
+
     def _shadow_error_result(self, exc: Exception) -> dict:
         return {
             "mode": "shadow",
@@ -329,18 +503,33 @@ class GatewayService:
     def _build_checkpoint_success_metadata(self, graph_state: dict) -> dict:
         rewrite = graph_state.get("llm_rewrite_result")
         intent = graph_state.get("llm_intent_result")
-        if not rewrite and not intent:
+        router = graph_state.get("llm_router_result")
+        if not rewrite and not intent and not router:
             return {}
-        return self._sanitize_value(
-            {
-                "llm_shadow": {
-                    "rewrite": self._shadow_result_summary(rewrite),
-                    "intent": self._shadow_result_summary(intent),
-                    "deterministic_route": graph_state.get("route"),
-                    "deterministic_intent": (graph_state.get("intent_result") or {}).get("intent"),
-                }
+        metadata = {}
+        if rewrite or intent:
+            metadata["llm_shadow"] = {
+                "rewrite": self._shadow_result_summary(rewrite),
+                "intent": self._shadow_result_summary(intent),
+                "deterministic_route": graph_state.get("route"),
+                "deterministic_intent": (graph_state.get("intent_result") or {}).get("intent"),
             }
-        )
+        if router:
+            metadata["llm_router"] = self._router_checkpoint_summary(router, graph_state)
+        return self._sanitize_value(metadata)
+
+    def _router_checkpoint_summary(self, router: dict, graph_state: dict) -> dict:
+        return {
+            **self._shadow_result_summary(router),
+            "fallback_reason": router.get("fallback_reason"),
+            "hard_guard": router.get("hard_guard"),
+            "requires_human": router.get("requires_human"),
+            "requires_backend": router.get("requires_backend"),
+            "fallback_to_deterministic": router.get("fallback_to_deterministic"),
+            "final_route": graph_state.get("route"),
+            "final_intent": (graph_state.get("intent_result") or {}).get("intent"),
+            "route_source": graph_state.get("route_source"),
+        }
 
     def _shadow_result_summary(self, result: dict | None) -> dict | None:
         if not result:
@@ -421,6 +610,21 @@ class GatewayService:
             "deterministic_route": graph_state.get("route"),
             "active_workflow": graph_state.get("active_workflow"),
             "workflow_stage": graph_state.get("workflow_stage"),
+            "attachments_summary": self._attachments_summary(graph_state),
+        }
+
+    def _build_llm_router_input(self, graph_state: dict) -> LLMRouterInput:
+        return {
+            "tenant_id": graph_state.get("tenant_id"),
+            "conversation_id": graph_state.get("conversation_id"),
+            "raw_user_input": graph_state.get("raw_user_input"),
+            "deterministic_rewrite_result": graph_state.get("rewrite_result"),
+            "deterministic_intent_result": graph_state.get("intent_result"),
+            "deterministic_route": graph_state.get("route"),
+            "recent_messages": list(graph_state.get("recent_messages") or []),
+            "active_workflow": graph_state.get("active_workflow"),
+            "workflow_stage": graph_state.get("workflow_stage"),
+            "slot_memory": dict(graph_state.get("slot_memory") or {}),
             "attachments_summary": self._attachments_summary(graph_state),
         }
 

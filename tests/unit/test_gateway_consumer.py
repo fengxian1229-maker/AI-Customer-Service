@@ -354,6 +354,9 @@ def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monke
         llm_intent_shadow_enabled = True
         llm_intent_fallback_enabled = False
         llm_intent_min_confidence = 0.75
+        llm_router_mode = "guarded_authoritative"
+        llm_router_min_confidence = 0.82
+        llm_router_fallback_to_deterministic = True
 
     monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
     monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
@@ -383,6 +386,9 @@ def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monke
     assert calls["provider_settings"].gemini_project == "project-gemini-0306"
     assert calls["service_kwargs"]["llm_rewrite_service"] is fake_provider
     assert calls["service_kwargs"]["llm_intent_service"] is fake_provider
+    assert calls["service_kwargs"]["llm_router_mode"] == "guarded_authoritative"
+    assert calls["service_kwargs"]["llm_router_min_confidence"] == 0.82
+    assert calls["service_kwargs"]["llm_router_fallback_to_deterministic"] is True
     assert result["llm"] == {
         "provider": "gemini",
         "model": "gemini-3.1-flash-lite",
@@ -393,6 +399,9 @@ def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monke
         "intent_shadow_enabled": True,
         "rewrite_fallback_enabled": False,
         "intent_fallback_enabled": False,
+        "router_mode": "guarded_authoritative",
+        "router_min_confidence": 0.82,
+        "router_fallback_to_deterministic": True,
         "fallback_enabled": False,
         "shadow_active": True,
     }

@@ -43,6 +43,20 @@ class LLMIntentShadowInput(TypedDict, total=False):
     attachments_summary: list[dict[str, Any]]
 
 
+class LLMRouterInput(TypedDict, total=False):
+    tenant_id: str
+    conversation_id: str
+    raw_user_input: str
+    deterministic_rewrite_result: dict[str, Any] | None
+    deterministic_intent_result: dict[str, Any] | None
+    deterministic_route: str | None
+    recent_messages: list[dict[str, Any]]
+    active_workflow: str | None
+    workflow_stage: str | None
+    slot_memory: dict[str, Any]
+    attachments_summary: list[dict[str, Any]]
+
+
 class LLMIntentShadowOutput(TypedDict, total=False):
     intent: str
     route: str
@@ -51,6 +65,25 @@ class LLMIntentShadowOutput(TypedDict, total=False):
     sop_name: str | None
     faq_query: str | None
     risk_level: str | None
+    provider: str
+    mode: str
+
+
+class LLMRouterDecisionOutput(TypedDict, total=False):
+    rewritten_question: str
+    normalized_query: str | None
+    language: str
+    intent: str
+    route: str
+    confidence: float
+    sop_name: str | None
+    faq_query: str | None
+    risk_level: str | None
+    requires_human: bool
+    requires_backend: bool
+    missing_slots: list[str]
+    preserved_entities: list[str]
+    reason: str
     provider: str
     mode: str
 
@@ -78,3 +111,22 @@ class LLMIntentShadowSchema(BaseModel):
     sop_name: str | None = None
     faq_query: str | None = None
     risk_level: str | None = None
+
+
+class LLMRouterDecisionSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rewritten_question: str
+    normalized_query: str | None = None
+    language: str = "unknown"
+    intent: str
+    route: str
+    confidence: float = 0.0
+    sop_name: str | None = None
+    faq_query: str | None = None
+    risk_level: str | None = None
+    requires_human: bool = False
+    requires_backend: bool = False
+    missing_slots: list[str] = Field(default_factory=list)
+    preserved_entities: list[str] = Field(default_factory=list)
+    reason: str

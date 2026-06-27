@@ -40,6 +40,7 @@ async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off"
                 getattr(settings, "llm_rewrite_fallback_enabled", False),
                 getattr(settings, "llm_intent_shadow_enabled", False),
                 getattr(settings, "llm_intent_fallback_enabled", False),
+                getattr(settings, "llm_router_mode", "shadow") != "shadow",
             ]
         ):
             service_kwargs.update(
@@ -51,6 +52,9 @@ async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off"
                     "llm_intent_shadow_enabled": getattr(settings, "llm_intent_shadow_enabled", False),
                     "llm_intent_fallback_enabled": getattr(settings, "llm_intent_fallback_enabled", False),
                     "llm_intent_min_confidence": getattr(settings, "llm_intent_min_confidence", 0.75),
+                    "llm_router_mode": getattr(settings, "llm_router_mode", "shadow"),
+                    "llm_router_min_confidence": getattr(settings, "llm_router_min_confidence", 0.75),
+                    "llm_router_fallback_to_deterministic": getattr(settings, "llm_router_fallback_to_deterministic", True),
                 }
             )
         service = GatewayService(
@@ -101,6 +105,9 @@ def _build_llm_summary(settings) -> dict:
         "intent_shadow_enabled": bool(getattr(settings, "llm_intent_shadow_enabled", False)),
         "rewrite_fallback_enabled": bool(getattr(settings, "llm_rewrite_fallback_enabled", False)),
         "intent_fallback_enabled": bool(getattr(settings, "llm_intent_fallback_enabled", False)),
+        "router_mode": getattr(settings, "llm_router_mode", "shadow"),
+        "router_min_confidence": getattr(settings, "llm_router_min_confidence", 0.75),
+        "router_fallback_to_deterministic": bool(getattr(settings, "llm_router_fallback_to_deterministic", True)),
     }
     summary["fallback_enabled"] = bool(summary["rewrite_fallback_enabled"] or summary["intent_fallback_enabled"])
     summary["shadow_active"] = bool(

@@ -12,6 +12,7 @@ class GraphState(TypedDict, total=False):
     rewritten_question: str | None
     rewrite_result: dict[str, Any] | None
     llm_rewrite_result: dict[str, Any] | None
+    llm_router_result: dict[str, Any] | None
     event_type: str
     attachments: list[dict[str, Any]]
 

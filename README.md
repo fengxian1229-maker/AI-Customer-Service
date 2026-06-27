@@ -45,7 +45,7 @@ Checkpoint modes:
 
 P3-B adds a checkpoint provider boundary and read-only graph debug helpers. P5-A adds durable checkpoint design, a checkpoint metadata schema, and a provider boundary that explicitly recognizes `off`, `memory`, and planned `mysql` modes. P5-A.1 wires checkpoint run metadata through `gateway_consumer -> GatewayService` using `GraphCheckpointRunRepository`. P5-B adds `langgraph-checkpoint-mysql[pymysql]`, a real `PyMySQLSaver` provider path for `LANGGRAPH_CHECKPOINT_MODE=mysql`, and an explicit setup worker for saver-managed internal tables.
 
-P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts. P5-C adds a read-only checkpoint admin CLI for `graph_checkpoint_runs` and `graph_run_errors`; it is for debugging only and does not modify LangGraph saver tables. P5-D now tightens RAG retrieval so only FAQ traffic prefetches DB-backed `rag_context` before the full graph invoke. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow, both default-off and non-authoritative. P6-B adds a real Gemini Vertex AI shadow provider through `langchain-google-genai` `ChatGoogleGenerativeAI`. P6-B.1 adds Gemini shadow output guardrails and a standalone smoke review worker. P7-A.1 adds a multimodal, vector-ready FAQ canonical data layer on `knowledge_documents` with `question_aliases`, `answer_blocks`, and `metadata_json`; retrieval is still lexical and Gateway output remains single text. P7-A.3 adds a read-only FAQ `answer_blocks` renderer preview helper; it is pure, does not write outbox rows, and does not send images. P7-A.4 adds a read-only FAQ multi-outbound dry-run planner; it returns future outbound plan structures without writing or sending them. P7-A.5 prepares `outbound_messages` for future multi-outbound idempotency with nullable `dedup_key`, `block_index`, `message_kind`, and `command_type` fields while keeping the current single-text path unchanged. P7-A.7 hardens the FAQ single-text closed-loop smoke path with a sender pending SQL ambiguity regression fix, fake-sender MySQL smoke coverage, and a read-only `faq_smoke_admin` diagnostics CLI. P7-A.8 hardens LLM rewrite/intent shadow inside the Gateway path: shadow success/error summaries are recorded in checkpoint metadata, shadow failures do not block deterministic FAQ single-text output, and `llm_shadow_admin` provides read-only diagnostics.
+P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts. P5-C adds a read-only checkpoint admin CLI for `graph_checkpoint_runs` and `graph_run_errors`; it is for debugging only and does not modify LangGraph saver tables. P5-D now tightens RAG retrieval so only FAQ traffic prefetches DB-backed `rag_context` before the full graph invoke. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow, both default-off and non-authoritative. P6-B adds a real Gemini Vertex AI shadow provider through `langchain-google-genai` `ChatGoogleGenerativeAI`. P6-B.1 adds Gemini shadow output guardrails and a standalone smoke review worker. P7-A.1 adds a multimodal, vector-ready FAQ canonical data layer on `knowledge_documents` with `question_aliases`, `answer_blocks`, and `metadata_json`; retrieval is still lexical and Gateway output remains single text. P7-A.3 adds a read-only FAQ `answer_blocks` renderer preview helper; it is pure, does not write outbox rows, and does not send images. P7-A.4 adds a read-only FAQ multi-outbound dry-run planner; it returns future outbound plan structures without writing or sending them. P7-A.5 prepares `outbound_messages` for future multi-outbound idempotency with nullable `dedup_key`, `block_index`, `message_kind`, and `command_type` fields while keeping the current single-text path unchanged. P7-A.7 hardens the FAQ single-text closed-loop smoke path with a sender pending SQL ambiguity regression fix, fake-sender MySQL smoke coverage, and a read-only `faq_smoke_admin` diagnostics CLI. P7-A.8 hardens LLM rewrite/intent shadow inside the Gateway path: shadow success/error summaries are recorded in checkpoint metadata, shadow failures do not block deterministic FAQ single-text output, and `llm_shadow_admin` provides read-only diagnostics. P8-A adds an optional `guarded_authoritative` LLM router mode for rewrite/router decisions only, guarded by schema validation, route/intent whitelists, confidence thresholds, hard guards, and deterministic fallback.
 
 Current RAG limits:
 
@@ -79,6 +79,10 @@ Current LLM boundary:
 - Gemini rewrite shadow records only `llm_rewrite_result` and never overrides deterministic `rewritten_question` or `rewrite_result`.
 - Gemini intent shadow records only `llm_intent_result` and never overrides deterministic `intent_result` or `route`.
 - Gemini shadow output is normalized by code-side guardrails for route, intent, confidence, and risk flags.
+- `llm_router_mode` supports `deterministic`, `shadow`, and `guarded_authoritative`; default is still `shadow`.
+- In `guarded_authoritative`, accepted LLM router decisions may set `rewritten_question`, `rewrite_result`, `intent_result`, and `route` before graph invoke.
+- Router decisions are recorded in `graph_checkpoint_runs.metadata_json.llm_router` with accepted/fallback status.
+- Router hard guards keep active workflows, explicit human requests, file-without-text events, and FAQ-leaning backend/account/order/payment/balance/status fact-like requests on deterministic safety paths.
 - Gateway-path shadow result/error summaries are stored in `graph_checkpoint_runs.metadata_json.llm_shadow`.
 - Shadow failures are isolated from deterministic graph execution and do not create `graph_run_errors`.
 - Gemini is not used for final customer reply generation.
@@ -213,6 +217,17 @@ PYTHONPATH=src uv run --group dev python -m app.workers.llm_shadow_admin summary
 
 See [docs/p7-a8-llm-shadow-gateway-smoke.md](/Users/andy/ai-agent/docs/p7-a8-llm-shadow-gateway-smoke.md). The admin reads project-owned metadata only and never reads LangGraph saver internal tables.
 
+Enable guarded authoritative router mode for controlled smoke only:
+
+```env
+LLM_PROVIDER=gemini
+LLM_ROUTER_MODE=guarded_authoritative
+LLM_ROUTER_MIN_CONFIDENCE=0.75
+LLM_ROUTER_FALLBACK_TO_DETERMINISTIC=true
+```
+
+See [docs/p8-a-llm-guarded-authoritative-router.md](/Users/andy/ai-agent/docs/p8-a-llm-guarded-authoritative-router.md). This mode still does not generate final customer replies, call tools, create external commands, or decide FAQ image/buttons output.
+
 Run Tests
 ---------
 
@@ -248,6 +263,9 @@ MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test'
 PYTHONPATH=src uv run --group dev pytest tests/integration/test_llm_shadow_gateway_mysql_smoke.py -q
 
 MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration/test_llm_guarded_authoritative_router_mysql_smoke.py -q
+
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
 PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
 ```
 
@@ -262,7 +280,8 @@ Notes for local MySQL integration:
   - `tests/integration/test_checkpoint_admin_mysql_smoke.py -q` -> `1 passed`
   - `tests/integration/test_faq_single_text_closed_loop_mysql_smoke.py -q` -> `2 passed`
   - `tests/integration/test_llm_shadow_gateway_mysql_smoke.py -q` -> `2 passed`
-  - `tests/integration -m mysql -q` -> `10 passed`
+  - `tests/integration/test_llm_guarded_authoritative_router_mysql_smoke.py -q` -> `1 passed`
+  - `tests/integration -m mysql -q` -> `11 passed`
 
 Bootstrap Database
 ------------------

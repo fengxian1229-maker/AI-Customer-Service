@@ -234,7 +234,13 @@ def test_llm_shadow_admin_run_command_reads_checkpoint_metadata_and_sanitizes(mo
                         "llm_shadow": {
                             "rewrite": {"provider": "mock", "status": "ok", "api_key": "hidden"},
                             "intent": {"provider": "mock", "status": "error", "error_type": "RuntimeError"},
-                        }
+                        },
+                        "llm_router": {
+                            "provider": "mock",
+                            "status": "fallback",
+                            "fallback_reason": "low_confidence",
+                            "api_key": "hidden",
+                        },
                     },
                 }
             ]
@@ -256,7 +262,14 @@ def test_llm_shadow_admin_run_command_reads_checkpoint_metadata_and_sanitizes(mo
     assert calls["query_kwargs"] == {"conversation_id": "livechat:chat-1", "limit": 5}
     assert result["total"] == 1
     assert result["error_count"] == 1
+    assert result["router_count"] == 1
+    assert result["router_fallback_count"] == 1
     assert result["latest"]["llm_shadow"]["rewrite"] == {"provider": "mock", "status": "ok"}
+    assert result["latest"]["llm_router"] == {
+        "provider": "mock",
+        "status": "fallback",
+        "fallback_reason": "low_confidence",
+    }
     assert "api_key" not in str(result)
     assert calls["closed"] is True
     assert calls["wait_closed"] is True
@@ -334,6 +347,9 @@ def test_gateway_llm_summary_reports_shadow_and_fallback_flags():
         "intent_shadow_enabled": True,
         "rewrite_fallback_enabled": False,
         "intent_fallback_enabled": False,
+        "router_mode": "shadow",
+        "router_min_confidence": 0.75,
+        "router_fallback_to_deterministic": True,
         "fallback_enabled": False,
         "shadow_active": True,
     }

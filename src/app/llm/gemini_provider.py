@@ -4,11 +4,14 @@ from app.llm.contracts import (
     LLMIntentShadowInput,
     LLMIntentShadowOutput,
     LLMIntentShadowSchema,
+    LLMRouterDecisionOutput,
+    LLMRouterDecisionSchema,
+    LLMRouterInput,
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
     LLMRewriteShadowSchema,
 )
-from app.llm.guardrails import validate_intent_output, validate_rewrite_output
+from app.llm.guardrails import validate_intent_output, validate_rewrite_output, validate_router_decision_output
 from app.llm.gemini_model import build_gemini_chat_model
 
 REWRITE_SYSTEM_PROMPT = """You are a rewrite shadow model for an AI customer service routing system.
@@ -26,6 +29,19 @@ You may suggest a candidate route, confidence, and short reason, but you do not 
 Do not answer the customer.
 Do not promise that anything was processed.
 Do not generate tool calls or external commands.
+Return only structured JSON matching the schema."""
+
+ROUTER_SYSTEM_PROMPT = """You are a guarded authoritative router for an AI customer service system.
+You only rewrite the user's question and choose a route/intent.
+You must not answer the customer.
+You must not generate final customer replies.
+You must not generate tool calls or external commands.
+You must not decide real order, balance, payment, deposit, withdrawal, or account facts.
+You must not promise that anything was processed, credited, successful, or failed.
+Preserve user-provided order IDs, usernames, phone numbers, amounts, dates, and attachment information.
+Order, balance, payment, deposit status, withdrawal status, and account-specific fact questions should prefer SOP/human/backend handling, not FAQ.
+If the customer explicitly asks for a human, route must be human_handoff.
+If the conversation is in an active workflow, continue SOP and do not switch to FAQ.
 Return only structured JSON matching the schema."""
 
 
@@ -79,6 +95,19 @@ class GeminiLLMProvider:
             "risk_level": result.get("risk_level"),
             "provider": self.provider_name,
             "mode": "shadow",
+        }
+
+    async def route(self, payload: LLMRouterInput) -> LLMRouterDecisionOutput:
+        structured_model = self.model.with_structured_output(
+            schema=LLMRouterDecisionSchema,
+            method="json_schema",
+        )
+        response = await structured_model.ainvoke(_build_chat_messages(ROUTER_SYSTEM_PROMPT, payload))
+        result = validate_router_decision_output(payload, _model_dump(response))
+        return {
+            **result,
+            "provider": self.provider_name,
+            "mode": "guarded_authoritative",
         }
 
 
