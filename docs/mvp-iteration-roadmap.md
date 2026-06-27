@@ -272,6 +272,9 @@ P8-B 固化 LLM-first FAQ route + answer_blocks outbound smoke：
 18. P8-B.2.1 将 router metadata / graph_run_errors 查询限定到 conversation_id + inbound_event_id
 19. P8-B.2.1 扩展 api-key / x-api-key / Authorization Bearer / quoted secret value 脱敏
 20. P8-A.2 新增 real_gemini_guarded_smoke dry-run-only CLI，用真实 Gemini 跑 guarded_authoritative 小样本安全 review
+21. P8-A.2.1 调整 guarded smoke evaluator，允许显式白名单 external command types
+22. P8-A.2.1 将 guarded smoke 本次 PENDING external_commands 标记 SKIPPED_MANUAL_SMOKE，不执行外部命令
+23. P8-A.2.1 修复 unknown --case / unsupported --case-set / --limit 0 空选择误报成功
 ```
 
 当前 RAG 仍明确不做：

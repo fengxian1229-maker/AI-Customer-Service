@@ -396,6 +396,28 @@ class ExternalCommandRepository:
             row["payload_json"] = json_loads(row["payload_json"])
         return rows
 
+    async def mark_pending_by_inbound_event_skipped(
+        self,
+        inbound_event_id: int,
+        status: str = "SKIPPED_MANUAL_SMOKE",
+        error: str = "manual guarded smoke dry-run; external command not executed",
+    ) -> int:
+        sql = """
+        UPDATE external_commands
+        SET status = %s,
+            last_error = %s,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE inbound_event_id = %s
+          AND status = 'PENDING'
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (status, error, inbound_event_id))
+                return cur.rowcount
+
     async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int) -> list[dict]:
         async with self.pool.acquire() as conn:
             await conn.begin()

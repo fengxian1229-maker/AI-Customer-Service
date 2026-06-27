@@ -8,13 +8,19 @@ import aiomysql
 
 from app.core.settings import Settings
 from app.db.mysql import create_pool
-from app.db.repositories import InboundEventRepository, KnowledgeDocumentRepository, OutboundMessageRepository
+from app.db.repositories import (
+    ExternalCommandRepository,
+    InboundEventRepository,
+    KnowledgeDocumentRepository,
+    OutboundMessageRepository,
+)
 from app.schemas.events import InboundEvent
 from app.workers import gateway_consumer
 from app.workers.seed_knowledge import seed_repository
 
 
 DEFAULT_SKIP_ERROR = "manual guarded smoke dry-run; not sent"
+DEFAULT_EXTERNAL_COMMAND_SKIP_ERROR = "manual guarded smoke dry-run; external command not executed"
 
 DEFAULT_CASES = [
     {
@@ -36,35 +42,48 @@ DEFAULT_CASES = [
         "input_text": "mi deposito no llegó",
         "event_type": "message",
         "standard_event_type": "MESSAGE_CREATED",
-        "expected": {"allow_routes": {"sop", "human_handoff"}, "forbid_routes": {"faq"}},
+        "expected": {"allow_routes": {"sop", "human_handoff"}, "forbid_routes": {"faq"}, "external_commands": 0},
     },
     {
         "case_id": "explicit_human_en",
         "input_text": "I want a human agent",
         "event_type": "message",
         "standard_event_type": "MESSAGE_CREATED",
-        "expected": {"allow_routes": {"human_handoff"}, "forbid_routes": {"faq"}},
+        "expected": {
+            "allow_routes": {"human_handoff"},
+            "forbid_routes": {"faq"},
+            "allow_external_commands": True,
+            "allow_external_command_types": {"human_handoff.requested"},
+        },
     },
     {
         "case_id": "backend_fact_balance_en",
         "input_text": "what is my balance?",
         "event_type": "message",
         "standard_event_type": "MESSAGE_CREATED",
-        "expected": {"forbid_routes": {"faq"}},
+        "expected": {
+            "forbid_routes": {"faq"},
+            "allow_external_commands": True,
+            "allow_external_command_types": {"human_handoff.requested", "backend.query"},
+        },
     },
     {
         "case_id": "backend_fact_order_status_zh",
         "input_text": "我的订单现在是什么状态？",
         "event_type": "message",
         "standard_event_type": "MESSAGE_CREATED",
-        "expected": {"forbid_routes": {"faq"}},
+        "expected": {
+            "forbid_routes": {"faq"},
+            "allow_external_commands": True,
+            "allow_external_command_types": {"human_handoff.requested", "backend.query"},
+        },
     },
     {
         "case_id": "file_without_text",
         "input_text": "",
         "event_type": "file",
         "standard_event_type": "FILE_RECEIVED",
-        "expected": {"forbid_routes": {"faq"}, "router_must_not_accept": True},
+        "expected": {"forbid_routes": {"faq"}, "router_must_not_accept": True, "external_commands": 0},
     },
 ]
 
@@ -93,6 +112,13 @@ async def run(argv: list[str] | None = None) -> dict:
         "cases": [],
         "smoke_success": False,
     }
+    cases, selection_error = _select_cases(args)
+    if selection_error:
+        return {
+            **base_summary,
+            "error": selection_error,
+        }
+
     try:
         settings = Settings(
             livechat_agent_access_token="unused-for-real-gemini-guarded-smoke",
@@ -120,7 +146,6 @@ async def run(argv: list[str] | None = None) -> dict:
             },
         }
 
-    cases = _select_cases(args)
     pool = await create_pool(settings)
     try:
         seed_result = None
@@ -149,13 +174,19 @@ async def run(argv: list[str] | None = None) -> dict:
         await pool.wait_closed()
 
 
-def _select_cases(args) -> list[dict]:
+def _select_cases(args) -> tuple[list[dict], dict | None]:
     if args.case_set != "default":
-        raise ValueError("only default case-set is currently supported")
+        return [], {"code": "unsupported_case_set", "message": f"unsupported case-set: {args.case_set}"}
+    if args.limit is not None and args.limit <= 0:
+        return [], {"code": "empty_case_selection", "message": "--limit must be greater than 0"}
     cases = [case for case in DEFAULT_CASES if not args.case or case["case_id"] == args.case]
+    if args.case and not cases:
+        return [], {"code": "unknown_case", "message": f"unknown case: {args.case}"}
     if args.limit is not None:
         cases = cases[: args.limit]
-    return cases
+    if not cases:
+        return [], {"code": "empty_case_selection", "message": "case selection is empty"}
+    return cases, None
 
 
 async def _run_case(pool, settings, args, case: dict) -> dict:
@@ -176,9 +207,13 @@ async def _run_case(pool, settings, args, case: dict) -> dict:
         inbound_event_id,
         error=DEFAULT_SKIP_ERROR,
     )
+    skipped_external_command_count = await ExternalCommandRepository(pool).mark_pending_by_inbound_event_skipped(
+        inbound_event_id,
+        error=DEFAULT_EXTERNAL_COMMAND_SKIP_ERROR,
+    )
     final_route = _actual_final_route(gateway_result, llm_router)
     final_intent = _actual_final_intent(gateway_result, llm_router)
-    evaluation = evaluate_case_result(case, final_route, _route_source(gateway_result, llm_router), llm_router, len(external_commands))
+    evaluation = evaluate_case_result(case, final_route, _route_source(gateway_result, llm_router), llm_router, external_commands)
     if graph_run_errors:
         evaluation = {"pass": False, "failure_reason": "graph_run_errors_present"}
     return {
@@ -194,6 +229,8 @@ async def _run_case(pool, settings, args, case: dict) -> dict:
         "llm_router": llm_router,
         "outbound_count": len(outbound_messages),
         "external_command_count": len(external_commands),
+        "skipped_external_command_count": skipped_external_command_count,
+        "external_commands": external_commands,
         "graph_run_errors": graph_run_errors,
         "skipped_unsent_count": skipped_unsent_count,
         "pass": evaluation["pass"],
@@ -206,11 +243,21 @@ def evaluate_case_result(
     actual_final_route: str | None,
     route_source: str | None,
     llm_router: dict | None,
-    external_command_count: int,
+    external_commands: list[dict],
 ) -> dict:
     expected = case.get("expected") or {}
-    if external_command_count != expected.get("external_commands", 0):
-        return {"pass": False, "failure_reason": "external_commands_generated"}
+    external_command_count = len(external_commands)
+    if expected.get("external_commands") is not None:
+        if external_command_count != expected["external_commands"]:
+            return {"pass": False, "failure_reason": "external_command_count_mismatch"}
+    elif expected.get("allow_external_commands"):
+        allowed_types = expected.get("allow_external_command_types") or set()
+        for command in external_commands:
+            command_type = command.get("command_type")
+            if command_type not in allowed_types:
+                return {"pass": False, "failure_reason": f"external_command_type_not_allowed:{command_type}"}
+    elif external_command_count:
+        return {"pass": False, "failure_reason": "external_command_count_mismatch"}
     if actual_final_route in (expected.get("forbid_routes") or set()):
         return {"pass": False, "failure_reason": f"forbidden_route:{actual_final_route}"}
     allow_routes = expected.get("allow_routes")

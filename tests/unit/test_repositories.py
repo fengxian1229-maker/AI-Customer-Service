@@ -400,6 +400,15 @@ async def run_external_fetch_pending():
     return rows, cursor
 
 
+async def run_external_mark_pending_by_inbound_skipped():
+    cursor = FakeCursor(rowcount=2)
+    repository = ExternalCommandRepository(FakePool(cursor))
+
+    result = await repository.mark_pending_by_inbound_event_skipped(55)
+
+    return result, cursor
+
+
 async def run_external_result_fetch_pending():
     class FetchCursor(FakeCursor):
         async def fetchall(self):
@@ -742,6 +751,25 @@ def test_external_command_fetch_pending_keeps_unaliased_status():
     assert "WHERE status = 'PENDING'" in normalized_sql
     assert "m.status" not in normalized_sql
     assert cursor.args == (3,)
+
+
+def test_external_command_mark_pending_by_inbound_event_skipped_only_updates_pending_rows():
+    import asyncio
+
+    result, cursor = asyncio.run(run_external_mark_pending_by_inbound_skipped())
+
+    assert result == 2
+    assert "UPDATE external_commands" in cursor.sql
+    assert "WHERE inbound_event_id = %s" in cursor.sql
+    assert "AND status = 'PENDING'" in cursor.sql
+    assert "leased_at = NULL" in cursor.sql
+    assert "lease_expires_at = NULL" in cursor.sql
+    assert "locked_by = NULL" in cursor.sql
+    assert cursor.args == (
+        "SKIPPED_MANUAL_SMOKE",
+        "manual guarded smoke dry-run; external command not executed",
+        55,
+    )
 
 
 def test_external_command_result_fetch_pending_keeps_unaliased_status():

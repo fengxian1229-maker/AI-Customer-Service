@@ -710,6 +710,13 @@ def test_real_gemini_guarded_smoke_runs_cases_with_unique_fake_threads_and_scope
             calls["skipped"].append(inbound_event_id)
             return 1
 
+    class FakeExternalCommandRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def mark_pending_by_inbound_event_skipped(self, inbound_event_id: int, error: str):
+            return 0
+
     async def fake_create_pool(settings):
         return FakePool()
 
@@ -742,6 +749,7 @@ def test_real_gemini_guarded_smoke_runs_cases_with_unique_fake_threads_and_scope
     monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_external_commands", fake_fetch_external_commands)
     monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_graph_run_errors", fake_fetch_graph_run_errors)
     monkeypatch.setattr(real_gemini_guarded_smoke, "OutboundMessageRepository", FakeOutboundRepository)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "ExternalCommandRepository", FakeExternalCommandRepository)
 
     result = asyncio.run(real_gemini_guarded_smoke.run(["--case", "faq_deposit_howto_zh"]))
 
@@ -762,11 +770,54 @@ def test_real_gemini_guarded_smoke_evaluator_blocks_non_faq_safety_cases():
 
     cases = {case["case_id"]: case for case in DEFAULT_CASES}
 
-    assert evaluate_case_result(cases["faq_deposit_howto_zh"], "faq", "llm_guarded_authoritative", None, 0)["pass"] is True
-    assert evaluate_case_result(cases["sop_deposit_missing_es"], "faq", "llm_guarded_authoritative", None, 0)["pass"] is False
-    assert evaluate_case_result(cases["explicit_human_en"], "faq", "llm_guarded_authoritative", None, 0)["pass"] is False
-    assert evaluate_case_result(cases["backend_fact_balance_en"], "faq", "llm_guarded_authoritative", None, 0)["pass"] is False
-    assert evaluate_case_result(cases["file_without_text"], "faq", "llm_guarded_authoritative", {"status": "accepted"}, 0)["pass"] is False
+    assert evaluate_case_result(cases["faq_deposit_howto_zh"], "faq", "llm_guarded_authoritative", None, [])["pass"] is True
+    assert evaluate_case_result(cases["sop_deposit_missing_es"], "faq", "llm_guarded_authoritative", None, [])["pass"] is False
+    assert evaluate_case_result(cases["explicit_human_en"], "faq", "llm_guarded_authoritative", None, [])["pass"] is False
+    assert evaluate_case_result(cases["backend_fact_balance_en"], "faq", "llm_guarded_authoritative", None, [])["pass"] is False
+    assert evaluate_case_result(cases["file_without_text"], "faq", "llm_guarded_authoritative", {"status": "accepted"}, [])["pass"] is False
+
+
+def test_real_gemini_guarded_smoke_evaluator_allows_declared_external_commands():
+    from app.workers.real_gemini_guarded_smoke import DEFAULT_CASES, evaluate_case_result
+
+    cases = {case["case_id"]: case for case in DEFAULT_CASES}
+
+    explicit_human = evaluate_case_result(
+        cases["explicit_human_en"],
+        "human_handoff",
+        "deterministic",
+        None,
+        [{"command_type": "human_handoff.requested"}],
+    )
+    backend_fact = evaluate_case_result(
+        cases["backend_fact_balance_en"],
+        "human_handoff",
+        "deterministic",
+        None,
+        [{"command_type": "human_handoff.requested"}],
+    )
+    faq_with_command = evaluate_case_result(
+        cases["faq_deposit_howto_zh"],
+        "faq",
+        "llm_guarded_authoritative",
+        None,
+        [{"command_type": "human_handoff.requested"}],
+    )
+    bad_type = evaluate_case_result(
+        cases["explicit_human_en"],
+        "human_handoff",
+        "deterministic",
+        None,
+        [{"command_type": "telegram.send_case_card"}],
+    )
+
+    assert explicit_human["pass"] is True
+    assert backend_fact["pass"] is True
+    assert faq_with_command == {"pass": False, "failure_reason": "external_command_count_mismatch"}
+    assert bad_type == {
+        "pass": False,
+        "failure_reason": "external_command_type_not_allowed:telegram.send_case_card",
+    }
 
 
 def test_real_gemini_guarded_smoke_failure_sets_summary_failure(monkeypatch):
@@ -810,6 +861,13 @@ def test_real_gemini_guarded_smoke_failure_sets_summary_failure(monkeypatch):
         async def mark_pending_by_inbound_event_skipped(self, inbound_event_id: int, error: str):
             return 0
 
+    class FakeExternalCommandRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def mark_pending_by_inbound_event_skipped(self, inbound_event_id: int, error: str):
+            return 0
+
     monkeypatch.setattr(real_gemini_guarded_smoke, "Settings", FakeSettings)
     monkeypatch.setattr(real_gemini_guarded_smoke, "create_pool", fake_create_pool)
     monkeypatch.setattr(real_gemini_guarded_smoke, "_insert_smoke_event", fake_insert_smoke_event)
@@ -819,10 +877,159 @@ def test_real_gemini_guarded_smoke_failure_sets_summary_failure(monkeypatch):
     monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_external_commands", fake_empty)
     monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_graph_run_errors", fake_empty)
     monkeypatch.setattr(real_gemini_guarded_smoke, "OutboundMessageRepository", FakeOutboundRepository)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "ExternalCommandRepository", FakeExternalCommandRepository)
 
     result = asyncio.run(real_gemini_guarded_smoke.run(["--case", "sop_deposit_missing_es"]))
 
     assert result["failed"] == 1
+    assert result["smoke_success"] is False
+
+
+def test_real_gemini_guarded_smoke_skips_outbound_and_external_commands_for_case(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_guarded_smoke
+
+    calls = {"outbound_skipped": [], "external_skipped": []}
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.llm_provider = "gemini"
+            self.llm_router_mode = "guarded_authoritative"
+            self.llm_router_min_confidence = 0.75
+            self.langgraph_checkpoint_mode = "off"
+
+    class FakePool:
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class FakeOutboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def mark_pending_by_inbound_event_skipped(self, inbound_event_id: int, error: str):
+            calls["outbound_skipped"].append((inbound_event_id, error))
+            return 1
+
+    class FakeExternalCommandRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def mark_pending_by_inbound_event_skipped(self, inbound_event_id: int, error: str):
+            calls["external_skipped"].append((inbound_event_id, error))
+            return 2
+
+    async def fake_create_pool(settings):
+        return FakePool()
+
+    async def fake_insert_smoke_event(pool, case, summary):
+        return 55
+
+    async def fake_process_inbound_event_id(pool, inbound_event_id, checkpoint_mode="off", settings=None):
+        return {"processed": 1, "failed": 0, "inbound_event_id": inbound_event_id, "results": [{"graph_state": {"route": "human_handoff"}}], "failures": []}
+
+    async def fake_fetch_latest_router_metadata(pool, conversation_id, inbound_event_id):
+        return {"status": "fallback", "final_route": "human_handoff", "route_source": "deterministic"}
+
+    async def fake_fetch_outbound_messages(pool, conversation_id, inbound_event_id):
+        return [{"id": 1, "inbound_event_id": inbound_event_id, "status": "PENDING"}]
+
+    async def fake_fetch_external_commands(pool, conversation_id, inbound_event_id):
+        return [{"id": 7, "inbound_event_id": inbound_event_id, "status": "PENDING", "command_type": "human_handoff.requested"}]
+
+    async def fake_fetch_graph_run_errors(pool, conversation_id, inbound_event_id):
+        return []
+
+    monkeypatch.setattr(real_gemini_guarded_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "create_pool", fake_create_pool)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_insert_smoke_event", fake_insert_smoke_event)
+    monkeypatch.setattr(real_gemini_guarded_smoke.gateway_consumer, "process_inbound_event_id", fake_process_inbound_event_id)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_latest_router_metadata", fake_fetch_latest_router_metadata)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_outbound_messages", fake_fetch_outbound_messages)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_external_commands", fake_fetch_external_commands)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "_fetch_graph_run_errors", fake_fetch_graph_run_errors)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "OutboundMessageRepository", FakeOutboundRepository)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "ExternalCommandRepository", FakeExternalCommandRepository)
+
+    result = asyncio.run(real_gemini_guarded_smoke.run(["--case", "explicit_human_en"]))
+
+    assert calls["outbound_skipped"] == [(55, "manual guarded smoke dry-run; not sent")]
+    assert calls["external_skipped"] == [(55, "manual guarded smoke dry-run; external command not executed")]
+    assert result["cases"][0]["external_command_count"] == 1
+    assert result["cases"][0]["skipped_external_command_count"] == 2
+    assert result["cases"][0]["external_commands"] == [
+        {"id": 7, "inbound_event_id": 55, "status": "PENDING", "command_type": "human_handoff.requested"}
+    ]
+    assert result["smoke_success"] is True
+
+
+def test_real_gemini_guarded_smoke_rejects_unknown_case_without_writes(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_guarded_smoke
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.llm_provider = "gemini"
+            self.llm_router_mode = "guarded_authoritative"
+
+    async def fail_create_pool(settings):
+        raise AssertionError("selection errors must not create a pool")
+
+    monkeypatch.setattr(real_gemini_guarded_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "create_pool", fail_create_pool)
+
+    result = asyncio.run(real_gemini_guarded_smoke.run(["--case", "typo"]))
+
+    assert result["error"]["code"] == "unknown_case"
+    assert result["total"] == 0
+    assert result["smoke_success"] is False
+
+
+def test_real_gemini_guarded_smoke_rejects_unsupported_case_set_without_pool(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_guarded_smoke
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.llm_provider = "gemini"
+            self.llm_router_mode = "guarded_authoritative"
+
+    async def fail_create_pool(settings):
+        raise AssertionError("selection errors must not create a pool")
+
+    monkeypatch.setattr(real_gemini_guarded_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "create_pool", fail_create_pool)
+
+    result = asyncio.run(real_gemini_guarded_smoke.run(["--case-set", "other"]))
+
+    assert result["error"]["code"] == "unsupported_case_set"
+    assert result["smoke_success"] is False
+
+
+def test_real_gemini_guarded_smoke_rejects_empty_limit_without_pool(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_guarded_smoke
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.llm_provider = "gemini"
+            self.llm_router_mode = "guarded_authoritative"
+
+    async def fail_create_pool(settings):
+        raise AssertionError("selection errors must not create a pool")
+
+    monkeypatch.setattr(real_gemini_guarded_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(real_gemini_guarded_smoke, "create_pool", fail_create_pool)
+
+    result = asyncio.run(real_gemini_guarded_smoke.run(["--limit", "0"]))
+
+    assert result["error"]["code"] == "empty_case_selection"
     assert result["smoke_success"] is False
 
 

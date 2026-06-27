@@ -104,6 +104,14 @@ Default cases:
 
 The CLI always uses generated fake chat/thread ids, calls `gateway_consumer.process_inbound_event_id`, reads diagnostics by `(conversation_id, inbound_event_id)`, marks pending dry-run outbounds as `SKIPPED_MANUAL_SMOKE`, and never sends LiveChat.
 
+P8-A.2.1 tightens dry-run safety:
+
+- `explicit_human_en` may produce `human_handoff.requested`.
+- backend fact-like cases may produce `human_handoff.requested` or `backend.query`.
+- FAQ and file-without-text cases still require zero external commands.
+- pending `external_commands` for this inbound event are marked `SKIPPED_MANUAL_SMOKE` and are never executed.
+- unsupported `--case-set`, unknown `--case`, and non-positive `--limit` return JSON errors before pool creation or inbound insertion.
+
 ```bash
 LLM_PROVIDER=gemini \
 LLM_ROUTER_MODE=guarded_authoritative \
