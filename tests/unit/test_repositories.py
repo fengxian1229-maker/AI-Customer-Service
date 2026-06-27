@@ -475,6 +475,68 @@ async def run_faq_smoke_latest_outbound():
     return rows, cursor
 
 
+async def run_faq_smoke_latest_inbound(**kwargs):
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return []
+
+    cursor = FetchCursor(rowcount=0)
+    repository = FaqSmokeReadRepository(FakePool(cursor))
+    rows = await repository.latest_inbound(**kwargs)
+    return rows, cursor
+
+
+async def run_faq_smoke_latest_checkpoints(**kwargs):
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return []
+
+    cursor = FetchCursor(rowcount=0)
+    repository = FaqSmokeReadRepository(FakePool(cursor))
+    rows = await repository.latest_checkpoints(**kwargs)
+    return rows, cursor
+
+
+async def run_faq_smoke_latest_errors(**kwargs):
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return []
+
+    cursor = FetchCursor(rowcount=0)
+    repository = FaqSmokeReadRepository(FakePool(cursor))
+    rows = await repository.latest_errors(**kwargs)
+    return rows, cursor
+
+
+async def run_faq_smoke_summary_capture(**kwargs):
+    calls = []
+
+    class SummaryRepository(FaqSmokeReadRepository):
+        async def latest_inbound(self, *args, **method_kwargs):
+            calls.append(("latest_inbound", args, method_kwargs))
+            return []
+
+        async def latest_outbound(self, *args, **method_kwargs):
+            calls.append(("latest_outbound", args, method_kwargs))
+            return []
+
+        async def latest_conversation(self, *args, **method_kwargs):
+            calls.append(("latest_conversation", args, method_kwargs))
+            return []
+
+        async def latest_checkpoints(self, *args, **method_kwargs):
+            calls.append(("latest_checkpoints", args, method_kwargs))
+            return []
+
+        async def latest_errors(self, *args, **method_kwargs):
+            calls.append(("latest_errors", args, method_kwargs))
+            return []
+
+    repository = SummaryRepository(FakePool(FakeCursor(rowcount=0)))
+    summary = await repository.summary(**kwargs)
+    return summary, calls
+
+
 async def run_faq_smoke_summary():
     class SummaryRepository(FaqSmokeReadRepository):
         async def latest_inbound(self, *args, **kwargs):
@@ -674,6 +736,77 @@ def test_faq_smoke_latest_outbound_uses_parameterized_filters_and_text_summary()
     assert "payload_json" not in rows[0]
     assert "access_token" not in str(rows[0])
     assert rows[0]["sent_at"] == "2026-06-27 01:02:03.000000"
+
+
+def test_faq_smoke_latest_inbound_maps_livechat_conversation_id_to_chat_id():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_faq_smoke_latest_inbound(conversation_id="livechat:chat-1", limit=5))
+    normalized_sql = " ".join(cursor.sql.split())
+
+    assert rows == []
+    assert "FROM inbound_events" in normalized_sql
+    assert "chat_id = %s" in normalized_sql
+    assert "conversation_id" not in normalized_sql
+    assert cursor.args == ("chat-1", 5)
+
+
+def test_faq_smoke_latest_inbound_prefers_explicit_chat_id_over_conversation_id():
+    import asyncio
+
+    rows, cursor = asyncio.run(
+        run_faq_smoke_latest_inbound(
+            chat_id="chat-2",
+            conversation_id="livechat:chat-1",
+            limit=5,
+        )
+    )
+    normalized_sql = " ".join(cursor.sql.split())
+
+    assert rows == []
+    assert "chat_id = %s" in normalized_sql
+    assert cursor.args == ("chat-2", 5)
+
+
+def test_faq_smoke_latest_checkpoints_maps_chat_id_to_livechat_conversation_id():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_faq_smoke_latest_checkpoints(chat_id="chat-1", limit=5))
+    normalized_sql = " ".join(cursor.sql.split())
+
+    assert rows == []
+    assert "FROM graph_checkpoint_runs" in normalized_sql
+    assert "conversation_id = %s" in normalized_sql
+    assert "chat_id" not in normalized_sql
+    assert cursor.args == ("livechat:chat-1", 5)
+
+
+def test_faq_smoke_latest_errors_maps_chat_id_to_livechat_conversation_id():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_faq_smoke_latest_errors(chat_id="chat-1", limit=5))
+    normalized_sql = " ".join(cursor.sql.split())
+
+    assert rows == []
+    assert "FROM graph_run_errors" in normalized_sql
+    assert "conversation_id = %s" in normalized_sql
+    assert "chat_id" not in normalized_sql
+    assert cursor.args == ("livechat:chat-1", 5)
+
+
+def test_faq_smoke_summary_passes_consistent_chat_scope_to_subqueries():
+    import asyncio
+
+    summary, calls = asyncio.run(run_faq_smoke_summary_capture(chat_id="chat-1", limit=5))
+
+    assert summary["overall"]["ok"] is False
+    assert calls == [
+        ("latest_inbound", ("livechat:chat-1", "chat-1", None, 5), {}),
+        ("latest_outbound", ("livechat:chat-1", "chat-1", None, 5), {}),
+        ("latest_conversation", ("livechat:chat-1", "chat-1", None, 5), {}),
+        ("latest_checkpoints", ("livechat:chat-1", "chat-1", None, 5), {}),
+        ("latest_errors", ("livechat:chat-1", "chat-1", None, 5), {}),
+    ]
 
 
 def test_faq_smoke_summary_marks_ok_when_closed_loop_signals_exist():

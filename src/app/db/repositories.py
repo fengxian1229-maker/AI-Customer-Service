@@ -1201,7 +1201,7 @@ class FaqSmokeReadRepository:
         inbound_event_id: int | None = None,
         limit: int = 20,
     ) -> list[dict]:
-        del conversation_id
+        effective_chat_id = chat_id or _chat_id_from_conversation_id(conversation_id)
         sql = """
         SELECT id, source, raw_action, chat_id, thread_id, event_id,
                standard_event_type, author_id, sender_role, processed,
@@ -1210,7 +1210,7 @@ class FaqSmokeReadRepository:
         """
         where, args = self._build_where(
             {
-                "chat_id": chat_id,
+                "chat_id": effective_chat_id,
                 "id": inbound_event_id,
             }
         )
@@ -1274,7 +1274,7 @@ class FaqSmokeReadRepository:
         inbound_event_id: int | None = None,
         limit: int = 20,
     ) -> list[dict]:
-        del chat_id
+        effective_conversation_id = conversation_id or _conversation_id_from_chat_id(chat_id)
         sql = """
         SELECT id, conversation_id, graph_thread_id, checkpoint_mode, status,
                inbound_event_id, error_type, error_message, created_at, updated_at
@@ -1282,7 +1282,7 @@ class FaqSmokeReadRepository:
         """
         where, args = self._build_where(
             {
-                "conversation_id": conversation_id,
+                "conversation_id": effective_conversation_id,
                 "inbound_event_id": inbound_event_id,
             }
         )
@@ -1295,7 +1295,7 @@ class FaqSmokeReadRepository:
         inbound_event_id: int | None = None,
         limit: int = 20,
     ) -> list[dict]:
-        del chat_id
+        effective_conversation_id = conversation_id or _conversation_id_from_chat_id(chat_id)
         sql = """
         SELECT id, conversation_id, inbound_event_id, graph_thread_id,
                node_name, error_type, error_message, retryable, created_at
@@ -1303,7 +1303,7 @@ class FaqSmokeReadRepository:
         """
         where, args = self._build_where(
             {
-                "conversation_id": conversation_id,
+                "conversation_id": effective_conversation_id,
                 "inbound_event_id": inbound_event_id,
             }
         )
@@ -1316,6 +1316,7 @@ class FaqSmokeReadRepository:
         inbound_event_id: int | None = None,
         limit: int = 20,
     ) -> dict:
+        conversation_id, chat_id = _normalize_smoke_scope(conversation_id, chat_id)
         inbound = await self.latest_inbound(conversation_id, chat_id, inbound_event_id, limit)
         outbound = await self.latest_outbound(conversation_id, chat_id, inbound_event_id, limit)
         conversation = await self.latest_conversation(conversation_id, chat_id, inbound_event_id, limit)
@@ -1519,6 +1520,24 @@ def _extract_payload_text(payload: dict | list | None) -> str | None:
         if isinstance(candidate, str) and candidate:
             return candidate[:500]
     return None
+
+
+def _chat_id_from_conversation_id(conversation_id: str | None) -> str | None:
+    if conversation_id and conversation_id.startswith("livechat:"):
+        return conversation_id.removeprefix("livechat:")
+    return None
+
+
+def _conversation_id_from_chat_id(chat_id: str | None) -> str | None:
+    if chat_id:
+        return f"livechat:{chat_id}"
+    return None
+
+
+def _normalize_smoke_scope(conversation_id: str | None, chat_id: str | None) -> tuple[str | None, str | None]:
+    effective_chat_id = chat_id or _chat_id_from_conversation_id(conversation_id)
+    effective_conversation_id = conversation_id or _conversation_id_from_chat_id(effective_chat_id)
+    return effective_conversation_id, effective_chat_id
 
 
 def _normalize_smoke_row(row: dict) -> dict:

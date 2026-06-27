@@ -46,6 +46,13 @@ python -m app.workers.faq_smoke_admin latest-errors --conversation-id livechat:<
 python -m app.workers.faq_smoke_admin summary --conversation-id livechat:<chat-id> --limit 20
 ```
 
+过滤语义：
+
+- `--chat-id <chat-id>` 会在 checkpoint/errors 查询中自动映射为 `conversation_id=livechat:<chat-id>`。
+- `--conversation-id livechat:<chat-id>` 会在 inbound 查询中自动映射为 `chat_id=<chat-id>`。
+- 同时传 `--chat-id` 和 `--conversation-id` 时，inbound 以显式 `--chat-id` 为准。
+- 真实 smoke 排障时建议优先传 `--conversation-id livechat:<chat-id>` 或 `--chat-id <chat-id>`，避免全局 `summary` 混入历史会话数据。
+
 ## 成功判断
 
 `polling_receiver` 成功时，`inbound_events` 有新的 LiveChat 用户消息，`processed=0`、`ignored=0`。`ignored_self` 或 `ignored_agent` 是机器人/客服自己的消息，正常；`ignored_group` 是不在允许 group 的消息，正常；`duplicates` 是已写入过的事件再次被 polling 拉到，正常。

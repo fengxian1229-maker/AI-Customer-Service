@@ -39,11 +39,20 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-- If P7-A.7 remains green, run a shadow-only LLM rewrite/intent smoke plan without enabling fallback or final answer generation
+- If P7-A.7.1 remains green, run a shadow-only LLM rewrite/intent smoke plan without enabling fallback or final answer generation
 - or start the FAQ multi-outbound batch contract, still without real `send_image` / buttons production sending
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
+
+## Latest P7-A.7.1 Status
+
+- Hardened `faq_smoke_admin` filter semantics in `FaqSmokeReadRepository`.
+- `--conversation-id livechat:<chat-id>` now maps to `chat_id=<chat-id>` for `latest-inbound`, because `inbound_events` has no `conversation_id` column.
+- `--chat-id <chat-id>` now maps to `conversation_id=livechat:<chat-id>` for `latest-checkpoints` and `latest-errors`, because those tables have no `chat_id` column.
+- `summary(chat_id=...)` now normalizes all subqueries to the same `chat_id` / `conversation_id` scope so checkpoint/error counts do not silently fall back to global history.
+- The admin tool remains read-only, parameterized, JSON-only, and still does not output full payloads, secrets, or LangGraph saver internal table data.
+- Recommended real smoke diagnostics: pass either `--conversation-id livechat:<chat-id>` or `--chat-id <chat-id>` to avoid global summary results being affected by old sessions.
 
 ## Latest P7-A.7 Status
 
@@ -143,6 +152,12 @@ Recommended next task:
 
 ## Latest Verification Status
 
+- Ran `uv run --group dev pytest tests/unit -q`
+- Result: `322 passed`
+- Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`
+- Result: `8 passed`
+- Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration/test_faq_single_text_closed_loop_mysql_smoke.py -q`
+- Result: `2 passed`
 - Ran `uv run --group dev pytest tests/unit -q`
 - Result: `317 passed`
 - Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`
