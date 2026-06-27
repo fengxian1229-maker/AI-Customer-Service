@@ -98,6 +98,87 @@ def test_gateway_cli_parser_accepts_once_and_limit():
     assert args.limit == 20
 
 
+def test_faq_smoke_admin_parser_accepts_filters():
+    from app.workers.faq_smoke_admin import build_arg_parser
+
+    args = build_arg_parser().parse_args([
+        "summary",
+        "--conversation-id",
+        "livechat:chat-1",
+        "--chat-id",
+        "chat-1",
+        "--inbound-event-id",
+        "11",
+        "--limit",
+        "5",
+    ])
+
+    assert args.command == "summary"
+    assert args.conversation_id == "livechat:chat-1"
+    assert args.chat_id == "chat-1"
+    assert args.inbound_event_id == 11
+    assert args.limit == 5
+
+
+def test_faq_smoke_admin_run_command_is_read_only_and_uses_unused_livechat_credentials(monkeypatch):
+    import asyncio
+
+    from app.workers import faq_smoke_admin
+
+    calls = {}
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            calls["settings_kwargs"] = kwargs
+
+    class FakePool:
+        def close(self) -> None:
+            calls["closed"] = True
+
+        async def wait_closed(self) -> None:
+            calls["wait_closed"] = True
+
+    class FakeRepository:
+        def __init__(self, pool) -> None:
+            calls["repository_pool"] = pool
+
+        async def latest_inbound(self, **kwargs):
+            calls["query_kwargs"] = kwargs
+            return [{"text": "怎么存款？"}]
+
+    async def fake_create_pool(settings):
+        calls["settings"] = settings
+        return FakePool()
+
+    monkeypatch.setattr(faq_smoke_admin, "Settings", FakeSettings)
+    monkeypatch.setattr(faq_smoke_admin, "create_pool", fake_create_pool)
+    monkeypatch.setattr(faq_smoke_admin, "FaqSmokeReadRepository", FakeRepository)
+
+    result = asyncio.run(
+        faq_smoke_admin.run_command(
+            "latest-inbound",
+            conversation_id="livechat:chat-1",
+            chat_id="chat-1",
+            inbound_event_id=11,
+            limit=5,
+        )
+    )
+
+    assert calls["settings_kwargs"] == {
+        "livechat_agent_access_token": "unused-for-faq-smoke-admin",
+        "livechat_account_id": "unused-for-faq-smoke-admin",
+    }
+    assert calls["query_kwargs"] == {
+        "conversation_id": "livechat:chat-1",
+        "chat_id": "chat-1",
+        "inbound_event_id": 11,
+        "limit": 5,
+    }
+    assert result == [{"text": "怎么存款？"}]
+    assert calls["closed"] is True
+    assert calls["wait_closed"] is True
+
+
 def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
     import asyncio
 

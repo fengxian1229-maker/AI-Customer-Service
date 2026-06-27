@@ -45,7 +45,7 @@ Checkpoint modes:
 
 P3-B adds a checkpoint provider boundary and read-only graph debug helpers. P5-A adds durable checkpoint design, a checkpoint metadata schema, and a provider boundary that explicitly recognizes `off`, `memory`, and planned `mysql` modes. P5-A.1 wires checkpoint run metadata through `gateway_consumer -> GatewayService` using `GraphCheckpointRunRepository`. P5-B adds `langgraph-checkpoint-mysql[pymysql]`, a real `PyMySQLSaver` provider path for `LANGGRAPH_CHECKPOINT_MODE=mysql`, and an explicit setup worker for saver-managed internal tables.
 
-P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts. P5-C adds a read-only checkpoint admin CLI for `graph_checkpoint_runs` and `graph_run_errors`; it is for debugging only and does not modify LangGraph saver tables. P5-D now tightens RAG retrieval so only FAQ traffic prefetches DB-backed `rag_context` before the full graph invoke. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow, both default-off and non-authoritative. P6-B adds a real Gemini Vertex AI shadow provider through `langchain-google-genai` `ChatGoogleGenerativeAI`. P6-B.1 adds Gemini shadow output guardrails and a standalone smoke review worker. P7-A.1 adds a multimodal, vector-ready FAQ canonical data layer on `knowledge_documents` with `question_aliases`, `answer_blocks`, and `metadata_json`; retrieval is still lexical and Gateway output remains single text. P7-A.3 adds a read-only FAQ `answer_blocks` renderer preview helper; it is pure, does not write outbox rows, and does not send images. P7-A.4 adds a read-only FAQ multi-outbound dry-run planner; it returns future outbound plan structures without writing or sending them. P7-A.5 prepares `outbound_messages` for future multi-outbound idempotency with nullable `dedup_key`, `block_index`, `message_kind`, and `command_type` fields while keeping the current single-text path unchanged.
+P4-A adds minimal deterministic knowledge-base-backed RAG. P4-B connects `knowledge_documents` retrieval into the Gateway/RAG path through `KnowledgeDocumentRepository` and `RagService` injection. P4-C adds tenant/kb-scope knowledge management plus deterministic ranking v1. Normal FAQ/RAG answers now produce a customer-facing `livechat.send_text` reply and do not emit `external_commands`. RAG remains read-only and must not answer backend, payment, withdrawal, account, balance, turnover, or order facts. P5-C adds a read-only checkpoint admin CLI for `graph_checkpoint_runs` and `graph_run_errors`; it is for debugging only and does not modify LangGraph saver tables. P5-D now tightens RAG retrieval so only FAQ traffic prefetches DB-backed `rag_context` before the full graph invoke. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow, both default-off and non-authoritative. P6-B adds a real Gemini Vertex AI shadow provider through `langchain-google-genai` `ChatGoogleGenerativeAI`. P6-B.1 adds Gemini shadow output guardrails and a standalone smoke review worker. P7-A.1 adds a multimodal, vector-ready FAQ canonical data layer on `knowledge_documents` with `question_aliases`, `answer_blocks`, and `metadata_json`; retrieval is still lexical and Gateway output remains single text. P7-A.3 adds a read-only FAQ `answer_blocks` renderer preview helper; it is pure, does not write outbox rows, and does not send images. P7-A.4 adds a read-only FAQ multi-outbound dry-run planner; it returns future outbound plan structures without writing or sending them. P7-A.5 prepares `outbound_messages` for future multi-outbound idempotency with nullable `dedup_key`, `block_index`, `message_kind`, and `command_type` fields while keeping the current single-text path unchanged. P7-A.7 hardens the FAQ single-text closed-loop smoke path with a sender pending SQL ambiguity regression fix, fake-sender MySQL smoke coverage, and a read-only `faq_smoke_admin` diagnostics CLI.
 
 Current RAG limits:
 
@@ -58,6 +58,7 @@ Current RAG limits:
 - A read-only FAQ renderer preview exists, but Gateway output remains single text.
 - A read-only FAQ multi-outbound dry-run planner exists, but it does not write `outbound_messages`.
 - `outbound_messages` has future multi-block idempotency fields, but Gateway does not populate FAQ multi-block rows yet.
+- FAQ single-text can be repeatedly smoke-tested and diagnosed, but production FAQ multi-image/buttons sending is still not connected.
 - No real backend or Telegram calls.
 - DB-backed RAG retrieval is prefetched only for deterministic `route=faq`.
 - SOP, human handoff, emotion care, clarification, and `faq_then_sop` traffic do not prefetch `knowledge_documents`.
@@ -132,6 +133,19 @@ plan = build_faq_outbound_plan(
 ```
 
 This planner returns deterministic dry-run message plans for future `text` / `image` / `buttons` outbound rendering. It does not write `outbound_messages`, does not call `sender_worker`, and does not upload or send images.
+
+FAQ single-text smoke diagnostics:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.faq_smoke_admin summary --limit 20
+PYTHONPATH=src uv run --group dev python -m app.workers.faq_smoke_admin latest-inbound --limit 5
+PYTHONPATH=src uv run --group dev python -m app.workers.faq_smoke_admin latest-outbound --limit 5
+PYTHONPATH=src uv run --group dev python -m app.workers.faq_smoke_admin latest-conversation --limit 10
+PYTHONPATH=src uv run --group dev python -m app.workers.faq_smoke_admin latest-checkpoints --limit 5
+PYTHONPATH=src uv run --group dev python -m app.workers.faq_smoke_admin latest-errors --limit 5
+```
+
+See [docs/p7-a7-faq-single-text-closed-loop-smoke.md](/Users/andy/ai-agent/docs/p7-a7-faq-single-text-closed-loop-smoke.md). The diagnostics are read-only, output JSON with Chinese text preserved, and do not query LangGraph saver internal tables.
 
 Lightweight knowledge admin CLI:
 
@@ -217,6 +231,9 @@ MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test'
 PYTHONPATH=src uv run --group dev pytest tests/integration/test_checkpoint_admin_mysql_smoke.py -q
 
 MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src uv run --group dev pytest tests/integration/test_faq_single_text_closed_loop_mysql_smoke.py -q
+
+MYSQL_TEST_DSN='mysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
 PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q
 ```
 
@@ -225,11 +242,12 @@ Notes for local MySQL integration:
 - If the password contains special characters, URL-encode it in `MYSQL_TEST_DSN`.
 - The checked-in integration helpers provision a fresh per-test schema whose name still contains `test`, then drop that schema after the test run.
 - A real pass result looks like `1 passed` / `5 passed`; `skipped` means the DSN was not picked up or failed the safety checks.
-- Verified on this machine on `2026-06-26`:
+- Verified on this machine on `2026-06-27`:
   - `tests/integration/test_mysql_checkpoint_persistence.py -q` -> `1 passed`
   - `tests/integration/test_gateway_consumer_mysql_checkpoint_smoke.py -q` -> `1 passed`
   - `tests/integration/test_checkpoint_admin_mysql_smoke.py -q` -> `1 passed`
-  - `tests/integration -m mysql -q` -> `6 passed`
+  - `tests/integration/test_faq_single_text_closed_loop_mysql_smoke.py -q` -> `2 passed`
+  - `tests/integration -m mysql -q` -> `8 passed`
 
 Bootstrap Database
 ------------------

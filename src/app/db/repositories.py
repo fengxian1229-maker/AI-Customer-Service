@@ -229,7 +229,7 @@ class OutboundMessageRepository:
                m.dedup_key, m.block_index, m.message_kind, m.command_type
         FROM outbound_messages m
         LEFT JOIN conversation_states c ON c.conversation_id = m.conversation_id
-        WHERE status = 'PENDING'
+        WHERE m.status = 'PENDING'
         ORDER BY m.id ASC
         LIMIT %s
         """
@@ -1190,6 +1190,209 @@ class GraphCheckpointRunRepository:
         return rows[0] if rows else None
 
 
+class FaqSmokeReadRepository:
+    def __init__(self, pool) -> None:
+        self.pool = pool
+
+    async def latest_inbound(
+        self,
+        conversation_id: str | None = None,
+        chat_id: str | None = None,
+        inbound_event_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        del conversation_id
+        sql = """
+        SELECT id, source, raw_action, chat_id, thread_id, event_id,
+               standard_event_type, author_id, sender_role, processed,
+               ignored, ignore_reason, occurred_at, created_at, payload_json
+        FROM inbound_events
+        """
+        where, args = self._build_where(
+            {
+                "chat_id": chat_id,
+                "id": inbound_event_id,
+            }
+        )
+        rows = await self._fetch_rows(f"{sql}{where} ORDER BY id DESC LIMIT %s", (*args, limit))
+        for row in rows:
+            payload = json_loads(row.pop("payload_json"))
+            row["text"] = _extract_payload_text(payload)
+        return rows
+
+    async def latest_outbound(
+        self,
+        conversation_id: str | None = None,
+        chat_id: str | None = None,
+        inbound_event_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        sql = """
+        SELECT id, conversation_id, inbound_event_id, chat_id, thread_id,
+               action_type, command_type, message_type, message_kind, block_index,
+               status, retry_count, last_error, sent_at, created_at, payload_json
+        FROM outbound_messages
+        """
+        where, args = self._build_where(
+            {
+                "conversation_id": conversation_id,
+                "chat_id": chat_id,
+                "inbound_event_id": inbound_event_id,
+            }
+        )
+        rows = await self._fetch_rows(f"{sql}{where} ORDER BY id DESC LIMIT %s", (*args, limit))
+        for row in rows:
+            payload = json_loads(row.pop("payload_json"))
+            row["text"] = _extract_payload_text(payload)
+        return rows
+
+    async def latest_conversation(
+        self,
+        conversation_id: str | None = None,
+        chat_id: str | None = None,
+        inbound_event_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        sql = """
+        SELECT id, conversation_id, inbound_event_id, outbound_message_id,
+               sender_role, message_type, text_content, source, created_at
+        FROM conversation_messages
+        """
+        where, args = self._build_where(
+            {
+                "conversation_id": conversation_id,
+                "chat_id": chat_id,
+                "inbound_event_id": inbound_event_id,
+            }
+        )
+        return await self._fetch_rows(f"{sql}{where} ORDER BY id DESC LIMIT %s", (*args, limit))
+
+    async def latest_checkpoints(
+        self,
+        conversation_id: str | None = None,
+        chat_id: str | None = None,
+        inbound_event_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        del chat_id
+        sql = """
+        SELECT id, conversation_id, graph_thread_id, checkpoint_mode, status,
+               inbound_event_id, error_type, error_message, created_at, updated_at
+        FROM graph_checkpoint_runs
+        """
+        where, args = self._build_where(
+            {
+                "conversation_id": conversation_id,
+                "inbound_event_id": inbound_event_id,
+            }
+        )
+        return await self._fetch_rows(f"{sql}{where} ORDER BY id DESC LIMIT %s", (*args, limit))
+
+    async def latest_errors(
+        self,
+        conversation_id: str | None = None,
+        chat_id: str | None = None,
+        inbound_event_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        del chat_id
+        sql = """
+        SELECT id, conversation_id, inbound_event_id, graph_thread_id,
+               node_name, error_type, error_message, retryable, created_at
+        FROM graph_run_errors
+        """
+        where, args = self._build_where(
+            {
+                "conversation_id": conversation_id,
+                "inbound_event_id": inbound_event_id,
+            }
+        )
+        return await self._fetch_rows(f"{sql}{where} ORDER BY id DESC LIMIT %s", (*args, limit))
+
+    async def summary(
+        self,
+        conversation_id: str | None = None,
+        chat_id: str | None = None,
+        inbound_event_id: int | None = None,
+        limit: int = 20,
+    ) -> dict:
+        inbound = await self.latest_inbound(conversation_id, chat_id, inbound_event_id, limit)
+        outbound = await self.latest_outbound(conversation_id, chat_id, inbound_event_id, limit)
+        conversation = await self.latest_conversation(conversation_id, chat_id, inbound_event_id, limit)
+        checkpoints = await self.latest_checkpoints(conversation_id, chat_id, inbound_event_id, limit)
+        errors = await self.latest_errors(conversation_id, chat_id, inbound_event_id, limit)
+
+        inbound_summary = {
+            "total": len(inbound),
+            "processed_count": sum(1 for row in inbound if row.get("processed")),
+            "ignored_count": sum(1 for row in inbound if row.get("ignored")),
+            "unprocessed_count": sum(1 for row in inbound if not row.get("processed") and not row.get("ignored")),
+        }
+        outbound_summary = {
+            "total": len(outbound),
+            "pending_count": sum(1 for row in outbound if row.get("status") == "PENDING"),
+            "sent_count": sum(1 for row in outbound if row.get("status") == "SENT"),
+            "failed_count": sum(1 for row in outbound if str(row.get("status") or "").startswith("FAILED")),
+            "retryable_count": sum(1 for row in outbound if row.get("status") == "RETRYABLE"),
+            "last_errors": [
+                {"id": row.get("id"), "status": row.get("status"), "last_error": row.get("last_error")}
+                for row in outbound
+                if row.get("last_error")
+            ][:5],
+        }
+        customer_count = sum(1 for row in conversation if row.get("sender_role") == "customer")
+        assistant_count = sum(1 for row in conversation if row.get("sender_role") == "assistant")
+        checkpoint_summary = {
+            "succeeded_count": sum(1 for row in checkpoints if row.get("status") == "SUCCEEDED"),
+            "failed_count": sum(1 for row in checkpoints if row.get("status") == "FAILED"),
+            "latest_status": checkpoints[0]["status"] if checkpoints else None,
+        }
+        error_summary = {
+            "error_count": len(errors),
+            "latest_error": errors[0] if errors else None,
+        }
+        ok = (
+            inbound_summary["processed_count"] > 0
+            and outbound_summary["sent_count"] > 0
+            and customer_count > 0
+            and assistant_count > 0
+            and checkpoint_summary["succeeded_count"] > 0
+            and error_summary["error_count"] == 0
+        )
+        return {
+            "inbound": inbound_summary,
+            "outbound": outbound_summary,
+            "conversation_messages": {
+                "customer_count": customer_count,
+                "assistant_count": assistant_count,
+                "has_customer_assistant_pair": customer_count > 0 and assistant_count > 0,
+            },
+            "checkpoints": checkpoint_summary,
+            "errors": error_summary,
+            "overall": {
+                "ok": ok,
+                "reason": "faq single-text closed-loop evidence found" if ok else "missing one or more closed-loop success signals",
+            },
+        }
+
+    async def _fetch_rows(self, sql: str, args: tuple) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, args)
+                rows = await cur.fetchall()
+        return [_normalize_smoke_row(dict(row)) for row in rows]
+
+    def _build_where(self, filters: dict[str, object | None]) -> tuple[str, tuple]:
+        where_clauses = []
+        args = []
+        for field, value in filters.items():
+            if value is not None:
+                where_clauses.append(f"{field} = %s")
+                args.append(value)
+        where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        return where_sql, tuple(args)
+
+
 class ExternalResultTransactionRepository:
     def __init__(
         self,
@@ -1301,6 +1504,31 @@ def _outbound_dedup_key(message: dict) -> str:
     inbound_event_id = message.get("inbound_event_id") or ""
     action_type = message["action_type"]
     return f"{tenant_id}:{conversation_id}:{inbound_event_id}:{action_type}"
+
+
+def _extract_payload_text(payload: dict | list | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    candidates = [
+        payload.get("text"),
+        (payload.get("event") or {}).get("text") if isinstance(payload.get("event"), dict) else None,
+        (payload.get("payload") or {}).get("text") if isinstance(payload.get("payload"), dict) else None,
+        (payload.get("message") or {}).get("text") if isinstance(payload.get("message"), dict) else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            return candidate[:500]
+    return None
+
+
+def _normalize_smoke_row(row: dict) -> dict:
+    normalized = {}
+    for key, value in row.items():
+        if isinstance(value, datetime):
+            normalized[key] = value.strftime("%Y-%m-%d %H:%M:%S.%f")
+        else:
+            normalized[key] = value
+    return normalized
 
 
 def _sanitize_checkpoint_metadata(metadata: dict) -> dict:

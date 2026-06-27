@@ -5,6 +5,7 @@ from app.db.repositories import (
     ExternalCommandRepository,
     ExternalCommandResultRepository,
     ExternalResultTransactionRepository,
+    FaqSmokeReadRepository,
     GraphCheckpointRunRepository,
     GraphRunErrorRepository,
     InboundEventRepository,
@@ -147,6 +148,19 @@ def make_outbound_message() -> dict:
     }
 
 
+async def run_outbound_fetch_pending():
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return []
+
+    cursor = FetchCursor(rowcount=0)
+    repository = OutboundMessageRepository(FakePool(cursor))
+
+    rows = await repository.fetch_pending(limit=5)
+
+    return rows, cursor
+
+
 async def run_outbound_insert_idempotent(rowcount: int):
     cursor = FakeCursor(rowcount=rowcount)
     cursor.lastrowid = 99
@@ -203,6 +217,20 @@ def test_outbound_insert_idempotent_uses_inbound_action_duplicate_key():
     assert result == {"inserted": True, "duplicate": False, "id": 99}
 
 
+def test_outbound_fetch_pending_qualifies_status_in_joined_query():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_outbound_fetch_pending())
+    normalized_sql = " ".join(cursor.sql.split())
+
+    assert rows == []
+    assert "FROM outbound_messages m" in normalized_sql
+    assert "LEFT JOIN conversation_states c ON c.conversation_id = m.conversation_id" in normalized_sql
+    assert "WHERE m.status = 'PENDING'" in normalized_sql
+    assert "WHERE status = 'PENDING'" not in normalized_sql
+    assert cursor.args == (5,)
+
+
 def test_outbound_insert_idempotent_accepts_faq_multiblock_dedup_fields():
     import asyncio
 
@@ -257,6 +285,28 @@ async def run_external_insert_idempotent(rowcount: int):
     result = await repository.insert_idempotent(make_external_command())
 
     return result, cursor
+
+
+async def run_external_fetch_pending():
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return []
+
+    cursor = FetchCursor(rowcount=0)
+    repository = ExternalCommandRepository(FakePool(cursor))
+    rows = await repository.fetch_pending(limit=3)
+    return rows, cursor
+
+
+async def run_external_result_fetch_pending():
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return []
+
+    cursor = FetchCursor(rowcount=0)
+    repository = ExternalCommandResultRepository(FakePool(cursor))
+    rows = await repository.fetch_pending(limit=4)
+    return rows, cursor
 
 
 async def run_graph_run_error_insert(rowcount: int):
@@ -390,6 +440,62 @@ async def run_graph_run_error_fetch_retryable(limit: int = 20):
     return rows, cursor
 
 
+async def run_faq_smoke_latest_outbound():
+    class FetchCursor(FakeCursor):
+        async def fetchall(self):
+            return [
+                {
+                    "id": 7,
+                    "conversation_id": "livechat:chat-1",
+                    "inbound_event_id": 11,
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "action_type": "send_event",
+                    "command_type": "livechat.send_text",
+                    "message_type": "text",
+                    "message_kind": "text",
+                    "block_index": None,
+                    "status": "SENT",
+                    "retry_count": 0,
+                    "last_error": None,
+                    "sent_at": datetime(2026, 6, 27, 1, 2, 3),
+                    "created_at": datetime(2026, 6, 27, 1, 2, 2),
+                    "payload_json": '{"text":"怎么存款？","access_token":"hidden"}',
+                }
+            ]
+
+    cursor = FetchCursor(rowcount=1)
+    repository = FaqSmokeReadRepository(FakePool(cursor))
+    rows = await repository.latest_outbound(
+        conversation_id="livechat:chat-1",
+        chat_id="chat-1",
+        inbound_event_id=11,
+        limit=5,
+    )
+    return rows, cursor
+
+
+async def run_faq_smoke_summary():
+    class SummaryRepository(FaqSmokeReadRepository):
+        async def latest_inbound(self, *args, **kwargs):
+            return [{"processed": 1, "ignored": 0}]
+
+        async def latest_outbound(self, *args, **kwargs):
+            return [{"id": 7, "status": "SENT", "last_error": None}]
+
+        async def latest_conversation(self, *args, **kwargs):
+            return [{"sender_role": "customer"}, {"sender_role": "assistant"}]
+
+        async def latest_checkpoints(self, *args, **kwargs):
+            return [{"status": "SUCCEEDED"}]
+
+        async def latest_errors(self, *args, **kwargs):
+            return []
+
+    repository = SummaryRepository(FakePool(FakeCursor(rowcount=0)))
+    return await repository.summary(limit=20)
+
+
 def make_conversation_message(**overrides) -> dict:
     base = {
         "conversation_id": "livechat:chat-1",
@@ -461,6 +567,32 @@ def test_external_command_insert_idempotent_reports_duplicate():
     assert result == {"inserted": False, "duplicate": True, "id": None}
 
 
+def test_external_command_fetch_pending_keeps_unaliased_status():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_external_fetch_pending())
+    normalized_sql = " ".join(cursor.sql.split())
+
+    assert rows == []
+    assert "FROM external_commands" in normalized_sql
+    assert "WHERE status = 'PENDING'" in normalized_sql
+    assert "m.status" not in normalized_sql
+    assert cursor.args == (3,)
+
+
+def test_external_command_result_fetch_pending_keeps_unaliased_status():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_external_result_fetch_pending())
+    normalized_sql = " ".join(cursor.sql.split())
+
+    assert rows == []
+    assert "FROM external_command_results" in normalized_sql
+    assert "WHERE status = 'PENDING'" in normalized_sql
+    assert "m.status" not in normalized_sql
+    assert cursor.args == (4,)
+
+
 def test_graph_run_error_insert_writes_json_snapshot():
     import asyncio
 
@@ -525,6 +657,36 @@ def test_graph_run_error_fetch_retryable_reads_graph_run_errors_and_loads_snapsh
     assert "WHERE retryable = 1" in cursor.sql
     assert cursor.args == (5,)
     assert rows[0]["state_snapshot"] == {"conversation_id": "livechat:chat-1"}
+
+
+def test_faq_smoke_latest_outbound_uses_parameterized_filters_and_text_summary():
+    import asyncio
+
+    rows, cursor = asyncio.run(run_faq_smoke_latest_outbound())
+    normalized_sql = " ".join(cursor.sql.split())
+
+    assert "FROM outbound_messages" in normalized_sql
+    assert "conversation_id = %s" in normalized_sql
+    assert "chat_id = %s" in normalized_sql
+    assert "inbound_event_id = %s" in normalized_sql
+    assert cursor.args == ("livechat:chat-1", "chat-1", 11, 5)
+    assert rows[0]["text"] == "怎么存款？"
+    assert "payload_json" not in rows[0]
+    assert "access_token" not in str(rows[0])
+    assert rows[0]["sent_at"] == "2026-06-27 01:02:03.000000"
+
+
+def test_faq_smoke_summary_marks_ok_when_closed_loop_signals_exist():
+    import asyncio
+
+    summary = asyncio.run(run_faq_smoke_summary())
+
+    assert summary["inbound"]["processed_count"] == 1
+    assert summary["outbound"]["sent_count"] == 1
+    assert summary["conversation_messages"]["has_customer_assistant_pair"] is True
+    assert summary["checkpoints"]["succeeded_count"] == 1
+    assert summary["errors"]["error_count"] == 0
+    assert summary["overall"]["ok"] is True
 
 
 def test_graph_checkpoint_run_fetch_recent_filters_by_conversation_and_loads_metadata():

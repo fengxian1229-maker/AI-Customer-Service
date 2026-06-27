@@ -1,6 +1,6 @@
 # AI Customer Service MVP Next Session Handoff
 
-Date: 2026-06-26
+Date: 2026-06-27
 Repository: `https://github.com/fengxian1229-maker/AI-Customer-Service.git`
 Local path: `/Users/andy/ai-agent`
 
@@ -16,9 +16,9 @@ Read these first:
 - `/Users/andy/Downloads/New project 2/bot66tornado/docs/AI智能客服MVP技术方案.md`
 
 Current goal:
-Continue from the polling-first LiveChat MVP that already proved this loop:
-LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only. P6-B.1 adds shadow output guardrails and a standalone smoke review tool. P7-A.1 adds multimodal FAQ canonical fields to `knowledge_documents`, `question_aliases` lexical ranking, vector-ready metadata, and minimal multimodal seed data without rendering or sending images.
+Continue from the polling-first LiveChat MVP that has now hardened this repeatable loop:
+LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/conversation_messages/outbound_messages -> sender_worker -> LiveChat send_event -> conversation_messages assistant row.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only. P6-B.1 adds shadow output guardrails and a standalone smoke review tool. P7-A.1 adds multimodal FAQ canonical fields to `knowledge_documents`, `question_aliases` lexical ranking, vector-ready metadata, and minimal multimodal seed data without rendering or sending images. P7-A.5 prepares outbound idempotency fields. P7-A.7 fixes the sender pending SQL ambiguity and adds repeatable FAQ single-text closed-loop smoke diagnostics/tests.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -29,6 +29,8 @@ Important current constraints:
 - Keep all facts from deterministic code, LiveChat, Telegram staff, backend API, or stored state.
 - Keep `.env` out of Git.
 - Normal FAQ/RAG path must only emit `livechat.send_text`; do not emit `RAG_PLACEHOLDER` or write `external_commands`.
+- Keep `llm_provider=off`, `llm_rewrite_shadow_enabled=false`, and `llm_intent_shadow_enabled=false` unless the task is explicitly a shadow-only smoke.
+- Do not implement FAQ multi-image production send, LiveChat `send_image`, buttons/rich message, or LLM final answer generation as part of the single-text smoke path.
 
 Before coding:
 1. Inspect the latest local files.
@@ -37,11 +39,29 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-- P7-A.2: design a read-only FAQ block renderer boundary that can preview `answer_blocks` without changing Gateway outbox behavior
-- or build checkpoint Web admin / richer debug UX on top of the read-only CLI / repository boundary
+- If P7-A.7 remains green, run a shadow-only LLM rewrite/intent smoke plan without enabling fallback or final answer generation
+- or start the FAQ multi-outbound batch contract, still without real `send_image` / buttons production sending
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
+
+## Latest P7-A.7 Status
+
+- Fixed `OutboundMessageRepository.fetch_pending()` so the joined query uses `WHERE m.status = 'PENDING'`; this prevents MySQL ambiguity because both `outbound_messages` and `conversation_states` have `status`.
+- Restored unrelated `external_commands` and `external_command_results` pending queries to unaliased `WHERE status = 'PENDING'`.
+- Added repository regression tests that assert the outbound query joins `conversation_states` and qualifies `m.status`.
+- Added MySQL integration coverage proving `fetch_pending()` works when both joined tables contain `status`.
+- Added `src/app/workers/faq_smoke_admin.py` with read-only JSON commands:
+  - `latest-inbound`
+  - `latest-outbound`
+  - `latest-conversation`
+  - `latest-checkpoints`
+  - `latest-errors`
+  - `summary`
+- Added `FaqSmokeReadRepository` so CLI SQL stays in a testable repository boundary and uses parameterized filters.
+- Added `tests/integration/test_faq_single_text_closed_loop_mysql_smoke.py`, which inserts “怎么存款？”, runs gateway processing, uses a fake sender client, and verifies outbound `SENT`, customer/assistant conversation messages, checkpoint success, and no graph errors.
+- Added `/Users/andy/ai-agent/docs/p7-a7-faq-single-text-closed-loop-smoke.md` with manual commands, success criteria, failure checks, ignored/duplicate meanings, and MySQL CLI UTF-8 troubleshooting.
+- Still not implemented: FAQ multi图文 production send, LiveChat `send_image`, buttons/rich message, LLM final answer generation, LLM fallback, WebSocket/Webhook main ingress, and production Gateway multi-outbound batch contract.
 
 ## Latest P7-A.1 Status
 
@@ -123,6 +143,10 @@ Recommended next task:
 
 ## Latest Verification Status
 
+- Ran `uv run --group dev pytest tests/unit -q`
+- Result: `317 passed`
+- Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`
+- Result: `8 passed`
 - Ran `uv run --group dev pytest tests/unit -q`
 - Result: `284 passed`
 - Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`

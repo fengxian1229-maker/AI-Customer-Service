@@ -76,6 +76,12 @@ P6-B.1：Gemini shadow guardrail + real smoke review
 P7-A.1：Multimodal FAQ Canonical Data Layer, Vector-ready
 ```
 
+当前 P7-A.7 已完成：
+
+```text
+P7-A.7：FAQ single-text closed-loop smoke hardening + sender pending SQL ambiguity fix
+```
+
 说明：
 
 ```text
@@ -189,6 +195,16 @@ P7-A.1 新增多模态 FAQ canonical 数据层：
 7. metadata_json 预留 intent_id、answer_mode、requires_asset、vector_index_enabled 等未来向量化字段
 ```
 
+P7-A.7 固化 FAQ 单文本闭环 smoke：
+
+```text
+1. 修复 sender_worker pending 查询中的 SQL ambiguity：outbound_messages/conversation_states 都有 status，因此 fetch_pending 必须使用 m.status
+2. 新增回归测试，防止退回 WHERE status = 'PENDING'
+3. 新增 MySQL integration smoke，使用 fake sender 验证“怎么存款？”从 inbound 到 outbound SENT，再到 customer/assistant conversation_messages 成对出现
+4. 新增 faq_smoke_admin 只读诊断 CLI，输出 JSON，支持 latest-inbound/latest-outbound/latest-conversation/latest-checkpoints/latest-errors/summary
+5. 新增 smoke 文档，记录 polling_receiver -> gateway_consumer -> sender_worker -> DB 诊断步骤
+```
+
 当前 RAG 仍明确不做：
 
 ```text
@@ -197,8 +213,16 @@ embedding
 LLM answer generation
 LLM tool calling
 知识库 Web 管理后台
-FAQ renderer
-图片发送
+FAQ 多图文生产发送
+LiveChat send_image
+buttons/rich message
+```
+
+当前 P7-A 后续候选：
+
+```text
+1. LLM rewrite/intent shadow smoke，但仍不启用 fallback 或 final answer generation
+2. FAQ multi-outbound batch contract，但仍不真实发送 image/buttons
 ```
 
 当前知识库运维入口仅包含：
