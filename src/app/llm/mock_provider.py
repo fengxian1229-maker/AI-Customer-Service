@@ -52,6 +52,9 @@ class MockLLMProvider:
         }
 
     async def route(self, payload: LLMRouterInput) -> LLMRouterDecisionOutput:
+        router_mode = _router_mode_from_payload(payload)
+        if router_mode == "faq_authoritative":
+            return _faq_authoritative_route(payload, provider_name=self.provider_name)
         deterministic = payload.get("deterministic_intent_result") or {}
         rewrite = payload.get("deterministic_rewrite_result") or {}
         text = normalize_text(payload.get("raw_user_input"))
@@ -71,8 +74,64 @@ class MockLLMProvider:
             "preserved_entities": [],
             "reason": "Mock guarded router mirrors deterministic decision for offline validation.",
             "provider": self.provider_name,
-            "mode": "guarded_authoritative",
+            "mode": router_mode,
         }
+
+
+def _router_mode_from_payload(payload: dict) -> str:
+    mode = str(payload.get("router_mode") or payload.get("mode") or "guarded_authoritative").strip().lower()
+    return mode if mode in {"guarded_authoritative", "faq_authoritative"} else "guarded_authoritative"
+
+
+def _faq_authoritative_route(payload: LLMRouterInput, provider_name: str) -> LLMRouterDecisionOutput:
+    text = normalize_text(payload.get("raw_user_input"))
+    lower = text.lower()
+    if any(token in lower for token in ("怎么存款", "如何充值", "deposit", "recharge")):
+        intent = "deposit_howto"
+        faq_query = "怎么存款"
+    elif any(token in lower for token in ("如何提款", "withdraw")):
+        intent = "withdrawal_howto"
+        faq_query = "如何提款"
+    elif any(token in lower for token in ("忘记密码", "forgot password", "reset password")):
+        intent = "forgot_password_howto"
+        faq_query = "忘记密码"
+    else:
+        return {
+            "rewritten_question": text,
+            "normalized_query": text,
+            "language": "unknown",
+            "intent": "clarification_needed",
+            "route": "clarification",
+            "confidence": 0.84,
+            "sop_name": None,
+            "faq_query": None,
+            "risk_level": None,
+            "requires_human": False,
+            "requires_backend": False,
+            "missing_slots": [],
+            "preserved_entities": [],
+            "reason": "Mock FAQ-authoritative router asks for clarification when no FAQ alias is matched.",
+            "provider": provider_name,
+            "mode": "faq_authoritative",
+        }
+    return {
+        "rewritten_question": text,
+        "normalized_query": faq_query,
+        "language": "zh" if any("\u4e00" <= char <= "\u9fff" for char in text) else "unknown",
+        "intent": intent,
+        "route": "faq",
+        "confidence": 0.9,
+        "sop_name": None,
+        "faq_query": faq_query,
+        "risk_level": None,
+        "requires_human": False,
+        "requires_backend": False,
+        "missing_slots": [],
+        "preserved_entities": [],
+        "reason": "Mock FAQ-authoritative router matched a FAQ alias.",
+        "provider": provider_name,
+        "mode": "faq_authoritative",
+    }
 
 
 def _risk_flags(text: str, active_workflow: str | None = None) -> list[str]:

@@ -275,6 +275,60 @@ def test_llm_shadow_admin_run_command_reads_checkpoint_metadata_and_sanitizes(mo
     assert calls["wait_closed"] is True
 
 
+def test_llm_shadow_admin_sanitizes_datetime_and_json_dumps():
+    import json
+    from datetime import datetime
+
+    from app.workers.llm_shadow_admin import _sanitize_shadow
+
+    result = _sanitize_shadow(
+        {
+            "created_at": datetime(2026, 6, 27, 1, 2, 3),
+            "router": {"status": "fallback", "api_key": "hidden", "error_message": "boom"},
+            "password": "hidden",
+        }
+    )
+
+    dumped = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+
+    assert "2026-06-27T01:02:03" in dumped
+    assert "api_key" not in dumped
+    assert "password" not in dumped
+
+
+def test_real_gemini_faq_smoke_parser_defaults():
+    from app.workers.real_gemini_faq_smoke import build_arg_parser
+
+    args = build_arg_parser().parse_args([])
+
+    assert args.text == "怎么存款？"
+    assert args.tenant_id == "default"
+    assert args.kb_scope == "default"
+    assert args.send is False
+    assert args.sender_limit == 10
+    assert args.mark_unsent_smoke_skipped is True
+
+
+def test_real_gemini_faq_smoke_rejects_wrong_settings_before_writes(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    class FakeSettings:
+        llm_provider = "mock"
+        llm_router_mode = "faq_authoritative"
+
+    monkeypatch.setattr(real_gemini_faq_smoke, "Settings", lambda: FakeSettings())
+
+    result = asyncio.run(real_gemini_faq_smoke.run(["--text", "怎么存款？"]))
+
+    assert result["worker"] == "real_gemini_faq_smoke"
+    assert result["smoke_success"] is False
+    assert result["error"]["code"] == "invalid_settings"
+    assert "llm_provider=gemini" in result["error"]["message"]
+    assert result["inbound_event_id"] is None
+
+
 def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
     import asyncio
 

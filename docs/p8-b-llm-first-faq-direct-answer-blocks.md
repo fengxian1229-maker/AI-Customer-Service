@@ -40,6 +40,19 @@ In `faq_authoritative`, the router payload keeps deterministic fields as `None`:
 
 Provider missing, invalid schema, low confidence, or non-FAQ decisions fall back to deterministic-free clarification, not keyword reclassification.
 
+## P8-B.1 Hardening
+
+P8-B.1 formalizes issues found during manual real Gemini FAQ-authoritative smoke:
+
+- Gemini has separate router prompts for `guarded_authoritative` and `faq_authoritative`.
+- `ROUTER_SYSTEM_PROMPT` remains as a backward-compatible alias to the guarded prompt, not the FAQ prompt.
+- Gateway sends `router_mode` and `mode` in router payloads.
+- Gemini and mock providers return `mode` equal to the requested router mode.
+- route and intent guardrails normalize common model aliases instead of expanding internal canonical enums.
+- `faq_authoritative` active workflow, invalid route, low confidence, missing provider, validation error, file-without-text, and empty input all fall back to deterministic-free clarification with `fallback_to_deterministic=false`.
+- Router checkpoint metadata retains compact `reason`, rewrite/query fields, `faq_query`, `language`, errors, final route/source fields, and compact RAG retrieval diagnostics.
+- `llm_shadow_admin` can JSON dump datetime values and continues to sanitize secret-like fields.
+
 ## FAQ Retrieval
 
 FAQ retrieval query priority is:
@@ -105,3 +118,21 @@ uv run --group dev pytest tests/integration/test_llm_faq_authoritative_multimoda
 ```
 
 The MySQL smoke is skipped when no MySQL test DSN is configured.
+
+Manual real Gemini smoke:
+
+```bash
+LLM_PROVIDER=gemini \
+LLM_ROUTER_MODE=faq_authoritative \
+LLM_ROUTER_MIN_CONFIDENCE=0.75 \
+GEMINI_MODEL=gemini-3.1-flash-lite \
+GEMINI_VERTEXAI=true \
+GEMINI_PROJECT=project-gemini-0306 \
+GEMINI_LOCATION=global \
+PYTHONPATH=src \
+uv run --group dev python -m app.workers.real_gemini_faq_smoke \
+  --text "怎么存款？" \
+  --seed-default-faq
+```
+
+The manual smoke inserts one inbound event, runs `gateway_consumer`, prints JSON, and by default marks this smoke's pending outbound rows as `SKIPPED_MANUAL_SMOKE` instead of sending to LiveChat. Use `--send` only with a real `chat_id` / `thread_id`.

@@ -399,7 +399,7 @@ class GatewayService:
         if graph_state.get("event_type") == "FILE_RECEIVED" and not raw:
             return self._faq_authoritative_fallback_state(graph_state, "file_without_text")
         if graph_state.get("active_workflow") and graph_state.get("workflow_stage") in ACTIVE_WORKFLOW_GUARD_STAGES:
-            return prepare_route_state(graph_state)
+            return self._faq_authoritative_fallback_state(graph_state, "active_workflow_guard")
         if not raw:
             return self._faq_authoritative_fallback_state(graph_state, "empty_input")
         if not self.llm_intent_service or not hasattr(self.llm_intent_service, "route"):
@@ -513,6 +513,7 @@ class GatewayService:
                 mode=mode or "faq_authoritative",
                 fallback_reason=fallback_reason,
                 error_type=type(exc).__name__ if exc else None,
+                error_message=str(exc) if exc else None,
                 fallback_to_deterministic=False,
             ),
         }
@@ -569,6 +570,7 @@ class GatewayService:
             mode=mode or "guarded_authoritative",
             fallback_reason=fallback_reason,
             error_type=type(exc).__name__ if exc else None,
+            error_message=str(exc) if exc else None,
             hard_guard=hard_guard,
             fallback_to_deterministic=self.llm_router_fallback_to_deterministic,
         )
@@ -582,6 +584,7 @@ class GatewayService:
         mode: str | None = None,
         fallback_reason: str | None = None,
         error_type: str | None = None,
+        error_message: str | None = None,
         hard_guard: str | None = None,
         fallback_to_deterministic: bool | None = None,
     ) -> dict:
@@ -594,6 +597,9 @@ class GatewayService:
             "route": decision.get("route"),
             "confidence": decision.get("confidence"),
             "reason": decision.get("reason"),
+            "rewritten_question": decision.get("rewritten_question"),
+            "normalized_query": decision.get("normalized_query"),
+            "language": decision.get("language"),
             "sop_name": decision.get("sop_name"),
             "faq_query": decision.get("faq_query"),
             "requires_human": decision.get("requires_human"),
@@ -603,6 +609,8 @@ class GatewayService:
             summary["fallback_reason"] = fallback_reason
         if error_type:
             summary["error_type"] = error_type
+        if error_message:
+            summary["error_message"] = error_message[:1000]
         if hard_guard:
             summary["hard_guard"] = hard_guard
         if fallback_to_deterministic is not None:
@@ -614,6 +622,7 @@ class GatewayService:
             "mode": "shadow",
             "status": "error",
             "error_type": type(exc).__name__,
+            "error_message": self._redact_sensitive_text(str(exc)[:1000]),
         }
 
     def _build_checkpoint_success_metadata(self, graph_state: dict) -> dict:
@@ -632,19 +641,59 @@ class GatewayService:
             }
         if router:
             metadata["llm_router"] = self._router_checkpoint_summary(router, graph_state)
+        if graph_state.get("rag_context"):
+            metadata["rag"] = self._rag_checkpoint_summary(graph_state["rag_context"])
         return self._sanitize_value(metadata)
 
     def _router_checkpoint_summary(self, router: dict, graph_state: dict) -> dict:
+        keys = (
+            "provider",
+            "mode",
+            "status",
+            "route",
+            "intent",
+            "confidence",
+            "reason",
+            "rewritten_question",
+            "normalized_query",
+            "faq_query",
+            "language",
+            "requires_human",
+            "requires_backend",
+            "fallback_reason",
+            "hard_guard",
+            "fallback_to_deterministic",
+            "error_type",
+            "error_message",
+        )
+        summary = {key: router.get(key) for key in keys if router.get(key) is not None}
+        summary.update(
+            {
+                "final_route": graph_state.get("route"),
+                "final_intent": (graph_state.get("intent_result") or {}).get("intent"),
+                "route_source": graph_state.get("route_source"),
+                "rewrite_source": graph_state.get("rewrite_source"),
+            }
+        )
+        return summary
+
+    def _rag_checkpoint_summary(self, rag_context: dict) -> dict:
         return {
-            **self._shadow_result_summary(router),
-            "fallback_reason": router.get("fallback_reason"),
-            "hard_guard": router.get("hard_guard"),
-            "requires_human": router.get("requires_human"),
-            "requires_backend": router.get("requires_backend"),
-            "fallback_to_deterministic": router.get("fallback_to_deterministic"),
-            "final_route": graph_state.get("route"),
-            "final_intent": (graph_state.get("intent_result") or {}).get("intent"),
-            "route_source": graph_state.get("route_source"),
+            "rag_query": rag_context.get("query"),
+            "rag_matched": rag_context.get("matched"),
+            "rag_source": rag_context.get("source"),
+            "rag_fallback_reason": rag_context.get("fallback_reason"),
+            "rag_documents": [
+                {
+                    "id": document.get("id"),
+                    "title": document.get("title"),
+                    "score": document.get("score"),
+                    "priority": document.get("priority"),
+                    "matched_fields": list(document.get("matched_fields") or []),
+                    "matched_terms": list(document.get("matched_terms") or []),
+                }
+                for document in (rag_context.get("documents") or [])[:5]
+            ],
         }
 
     def _shadow_result_summary(self, result: dict | None) -> dict | None:
@@ -697,8 +746,14 @@ class GatewayService:
         if isinstance(value, list):
             return [self._sanitize_value(item) for item in value[:20]]
         if isinstance(value, str):
-            return value[:2000]
+            return self._redact_sensitive_text(value[:2000])
         return value
+
+    def _redact_sensitive_text(self, value: str) -> str:
+        redacted = value
+        for token in ("access_token", "api_key", "secret", "password", "token"):
+            redacted = redacted.replace(token, "[redacted]")
+        return redacted
 
     def _build_llm_rewrite_shadow_input(self, graph_state: dict) -> LLMRewriteShadowInput:
         return {
@@ -731,6 +786,8 @@ class GatewayService:
 
     def _build_llm_router_input(self, graph_state: dict, include_deterministic: bool = True) -> LLMRouterInput:
         return {
+            "router_mode": self.llm_router_mode,
+            "mode": self.llm_router_mode,
             "tenant_id": graph_state.get("tenant_id"),
             "conversation_id": graph_state.get("conversation_id"),
             "raw_user_input": graph_state.get("raw_user_input"),

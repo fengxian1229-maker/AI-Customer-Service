@@ -31,7 +31,35 @@ Do not promise that anything was processed.
 Do not generate tool calls or external commands.
 Return only structured JSON matching the schema."""
 
-ROUTER_SYSTEM_PROMPT = """You are an FAQ authoritative router for a customer service FAQ smoke test.
+GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT = """You are a guarded authoritative router for a customer service routing system.
+
+Your job is to rewrite the user's message and choose the safest route metadata.
+
+You must not answer the customer.
+You must not generate final customer replies.
+You must not generate images.
+You must not generate buttons.
+You must not generate tool calls.
+You must not generate external commands.
+You must not decide real backend/account/payment/order facts.
+You must not promise that anything was processed, credited, successful, or failed.
+
+Allowed routes:
+- faq
+- sop
+- faq_then_sop
+- human_handoff
+- emotion_care
+- clarification
+- unsupported
+
+Prefer SOP/human/backend-safe handling for account, order, payment, balance, deposit status, withdrawal status, or other fact-like requests.
+If the customer explicitly asks for a human, route must be human_handoff.
+If the conversation is in an active workflow, continue SOP and do not switch to FAQ.
+
+Return only structured JSON matching the schema."""
+
+FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT = """You are an FAQ authoritative router for a customer service FAQ smoke test.
 
 Your only job is to rewrite the user's message and choose whether it should retrieve FAQ knowledge.
 
@@ -87,6 +115,8 @@ faq_query should be short, stable, and close to the FAQ document title, keywords
 
 Return only structured JSON matching the schema."""
 
+ROUTER_SYSTEM_PROMPT = GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
 
 class GeminiLLMProvider:
     provider_name = "gemini"
@@ -141,17 +171,29 @@ class GeminiLLMProvider:
         }
 
     async def route(self, payload: LLMRouterInput) -> LLMRouterDecisionOutput:
+        router_mode = _router_mode_from_payload(payload)
         structured_model = self.model.with_structured_output(
             schema=LLMRouterDecisionSchema,
             method="json_schema",
         )
-        response = await structured_model.ainvoke(_build_chat_messages(ROUTER_SYSTEM_PROMPT, payload))
+        response = await structured_model.ainvoke(_build_chat_messages(_router_prompt_for_mode(router_mode), payload))
         result = validate_router_decision_output(payload, _model_dump(response))
         return {
             **result,
             "provider": self.provider_name,
-            "mode": "guarded_authoritative",
+            "mode": router_mode,
         }
+
+
+def _router_mode_from_payload(payload: dict) -> str:
+    mode = str(payload.get("router_mode") or payload.get("mode") or "guarded_authoritative").strip().lower()
+    return mode if mode in {"guarded_authoritative", "faq_authoritative"} else "guarded_authoritative"
+
+
+def _router_prompt_for_mode(router_mode: str) -> str:
+    if router_mode == "faq_authoritative":
+        return FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    return GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
 
 def _model_dump(response) -> dict:

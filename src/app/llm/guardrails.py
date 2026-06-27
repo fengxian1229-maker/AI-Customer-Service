@@ -16,7 +16,6 @@ ALLOWED_LLM_ROUTES = (
 ALLOWED_LLM_INTENTS = (
     "faq_general",
     "deposit_howto",
-    "deposit_inquiry",
     "withdrawal_howto",
     "forgot_password_howto",
     "screenshot_upload_howto",
@@ -101,26 +100,52 @@ def normalize_confidence(value) -> float:
 
 
 def validate_llm_route(route: str) -> str:
-    normalized = str(route or "").strip().lower()
+    normalized = normalize_llm_route(route)
+    if normalized not in ALLOWED_LLM_ROUTES:
+        raise ValueError(f"Unsupported llm route: {normalized or route}")
+    return normalized
+
+
+def normalize_llm_route(route: str) -> str:
+    normalized = str(route or "").strip().lower().replace("-", "_")
     route_aliases = {
         "sop": "sop",
         "faq": "faq",
         "clarification": "clarification",
         "unsupported": "unsupported",
         "human": "human_handoff",
+        "human handoff": "human_handoff",
         "human_handoff": "human_handoff",
+        "faq then sop": "faq_then_sop",
+        "faq_then_sop": "faq_then_sop",
     }
-    normalized = route_aliases.get(normalized, normalized)
-    if normalized not in ALLOWED_LLM_ROUTES:
-        raise ValueError(f"Unsupported llm route: {normalized or route}")
-    return normalized
+    return route_aliases.get(normalized, normalized)
 
 
 def validate_llm_intent(intent: str) -> str:
-    normalized = str(intent or "").strip()
+    normalized = normalize_llm_intent(intent)
     if normalized not in ALLOWED_LLM_INTENTS:
         raise ValueError(f"Unsupported llm intent: {normalized or intent}")
     return normalized
+
+
+def normalize_llm_intent(intent: str) -> str:
+    normalized = str(intent or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "deposit_inquiry": "deposit_howto",
+        "deposit": "deposit_howto",
+        "deposit_guide": "deposit_howto",
+        "recharge_howto": "deposit_howto",
+        "recharge": "deposit_howto",
+        "withdrawal_inquiry": "withdrawal_howto",
+        "withdrawal": "withdrawal_howto",
+        "withdraw": "withdrawal_howto",
+        "withdraw_guide": "withdrawal_howto",
+        "password_reset": "forgot_password_howto",
+        "reset_password": "forgot_password_howto",
+        "forgot_password": "forgot_password_howto",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def normalize_risk_flags(flags: list[str] | None) -> list[str]:

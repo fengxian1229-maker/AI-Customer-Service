@@ -572,6 +572,7 @@ def test_gateway_service_faq_authoritative_calls_llm_before_keyword_router_and_u
     result = asyncio.run(service.process_event(34, make_event_with_text("mi deposito no llegó")))
 
     assert len(router_service.calls) == 1
+    assert router_service.calls[0]["router_mode"] == "faq_authoritative"
     assert router_service.calls[0]["deterministic_route"] is None
     assert router_service.calls[0]["deterministic_intent_result"] is None
     assert result["graph_state"]["route"] == "faq"
@@ -585,6 +586,141 @@ def test_gateway_service_faq_authoritative_calls_llm_before_keyword_router_and_u
     assert result["outbound_messages"][0]["command_type"] == "livechat.send_text"
     assert result["outbound_messages"][0]["payload_json"] == {"text": "FAQ answer should not be rewritten."}
     assert result["external_commands"] == []
+
+
+def test_gateway_service_faq_authoritative_rejects_sop_route_without_deterministic_fallback():
+    router_service = FakeLLMRouterService(
+        {
+            "rewritten_question": "mi deposito no llegó",
+            "normalized_query": "mi deposito no llegó",
+            "language": "es",
+            "intent": "deposit_howto",
+            "route": "SOP",
+            "confidence": 0.95,
+            "sop_name": "deposit_missing",
+            "faq_query": None,
+            "risk_level": "elevated",
+            "requires_human": False,
+            "requires_backend": False,
+            "missing_slots": [],
+            "preserved_entities": [],
+            "reason": "bad model route",
+            "provider": "mock",
+            "mode": "faq_authoritative",
+        }
+    )
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="faq_authoritative",
+        rag_service=FakeRagService(),
+    )
+
+    result = asyncio.run(service.process_event(36, make_event_with_text("mi deposito no llegó")))
+
+    assert result["graph_state"]["route"] == "clarification"
+    assert result["graph_state"]["intent_result"]["intent"] == "clarification_needed"
+    assert result["graph_state"]["llm_router_result"]["fallback_reason"] == "unsupported_route"
+    assert result["graph_state"]["llm_router_result"]["fallback_to_deterministic"] is False
+    assert result["external_commands"] == []
+
+
+def test_gateway_service_faq_authoritative_active_workflow_falls_back_to_clarification_without_sop():
+    class ActiveWorkflowConversationRepository(FakeConversationRepository):
+        async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
+            conversation = await super().get_or_create(chat_id, thread_id)
+            conversation["active_workflow"] = "deposit_missing"
+            conversation["workflow_stage"] = "collecting_slots"
+            return conversation
+
+    router_service = FakeLLMRouterService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=ActiveWorkflowConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="faq_authoritative",
+        rag_service=FakeRagService(),
+    )
+
+    result = asyncio.run(service.process_event(37, make_event_with_text("ya lo mandé")))
+
+    assert router_service.calls == []
+    assert result["graph_state"]["route"] == "clarification"
+    assert result["graph_state"]["llm_router_result"]["fallback_reason"] == "active_workflow_guard"
+    assert result["graph_state"]["llm_router_result"]["fallback_to_deterministic"] is False
+    assert result["external_commands"] == []
+
+
+def test_gateway_service_router_checkpoint_metadata_preserves_router_and_rag_summary():
+    service = GatewayService()
+    metadata = service._build_checkpoint_success_metadata(
+        {
+            "route": "faq",
+            "route_source": "llm_faq_authoritative",
+            "rewrite_source": "llm_faq_authoritative",
+            "intent_result": {"intent": "deposit_howto"},
+            "llm_router_result": {
+                "provider": "gemini",
+                "mode": "faq_authoritative",
+                "status": "accepted",
+                "route": "faq",
+                "intent": "deposit_howto",
+                "confidence": 0.95,
+                "reason": "matched FAQ",
+                "rewritten_question": "怎么存款？",
+                "normalized_query": "怎么存款",
+                "faq_query": "怎么存款",
+                "language": "zh",
+                "requires_human": False,
+                "requires_backend": False,
+                "error_type": "RuntimeError",
+                "error_message": "api_key=hidden password=hidden boom",
+            },
+            "rag_context": {
+                "query": "怎么存款",
+                "matched": True,
+                "source": "knowledge_documents",
+                "fallback_reason": None,
+                "answer_blocks": [{"type": "text", "text": "too large"}],
+                "documents": [
+                    {
+                        "id": 1,
+                        "title": "充值方式说明",
+                        "score": 12,
+                        "priority": 1,
+                        "matched_fields": ["question_aliases"],
+                        "matched_terms": ["怎么存款"],
+                        "content": "should not be copied",
+                    }
+                ],
+            },
+        }
+    )
+
+    router = metadata["llm_router"]
+    assert router["reason"] == "matched FAQ"
+    assert router["rewritten_question"] == "怎么存款？"
+    assert router["normalized_query"] == "怎么存款"
+    assert router["faq_query"] == "怎么存款"
+    assert router["language"] == "zh"
+    assert router["final_route"] == "faq"
+    assert router["final_intent"] == "deposit_howto"
+    assert router["route_source"] == "llm_faq_authoritative"
+    assert router["rewrite_source"] == "llm_faq_authoritative"
+    assert "api_key" not in str(router)
+    assert "password" not in str(router)
+    assert metadata["rag"]["rag_query"] == "怎么存款"
+    assert metadata["rag"]["rag_matched"] is True
+    assert metadata["rag"]["rag_documents"][0]["title"] == "充值方式说明"
+    assert "answer_blocks" not in str(metadata["rag"])
+    assert "content" not in str(metadata["rag"])
 
 
 def test_gateway_service_faq_authoritative_renders_multimodal_answer_blocks_to_ordered_outbox_rows():
@@ -965,6 +1101,7 @@ def test_gateway_service_shadow_guardrail_failure_records_shadow_error_and_keeps
         "mode": "shadow",
         "status": "error",
         "error_type": "ValueError",
+        "error_message": "Unsupported llm route: invalid_route",
     }
     assert inbound_repository.processed == [23]
     assert conversation_repository.updated

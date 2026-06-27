@@ -171,6 +171,15 @@ async def run_outbound_insert_idempotent(rowcount: int):
     return result, cursor
 
 
+async def run_outbound_mark_pending_by_inbound_skipped():
+    cursor = FakeCursor(rowcount=3)
+    repository = OutboundMessageRepository(FakePool(cursor))
+
+    result = await repository.mark_pending_by_inbound_event_skipped(55)
+
+    return result, cursor
+
+
 def test_inbound_insert_uses_duplicate_key_update():
     import asyncio
 
@@ -178,6 +187,17 @@ def test_inbound_insert_uses_duplicate_key_update():
 
     assert "ON DUPLICATE KEY UPDATE id = id" in cursor.sql
     assert result == {"inserted": True, "duplicate": False}
+
+
+def test_outbound_mark_pending_by_inbound_event_skipped_only_updates_pending_rows():
+    import asyncio
+
+    result, cursor = asyncio.run(run_outbound_mark_pending_by_inbound_skipped())
+
+    assert result == 3
+    assert "WHERE inbound_event_id = %s" in cursor.sql
+    assert "AND status = 'PENDING'" in cursor.sql
+    assert cursor.args == ("SKIPPED_MANUAL_SMOKE", "manual smoke uses fake chat_id; not sent", 55)
 
 
 def test_inbound_insert_reports_duplicate_without_failure():

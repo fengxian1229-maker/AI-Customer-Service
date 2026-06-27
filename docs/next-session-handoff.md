@@ -50,6 +50,15 @@ Recommended next task:
 
 ## Latest P8-B Status
 
+- P8-B.1 formalized real Gemini FAQ-authoritative smoke hardening.
+- Split Gemini router prompts into `GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT` and `FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT`; `ROUTER_SYSTEM_PROMPT` remains an alias to the guarded prompt.
+- Gateway router payloads now include `router_mode` / `mode`, and providers return the current router mode.
+- Mock provider supports `faq_authoritative` without deterministic context for common FAQ how-to aliases.
+- route/intent guardrails normalize aliases such as `SOP`, `Human`, `deposit_inquiry`, `deposit-guide`, and `reset password`.
+- `faq_authoritative` active-workflow and unsupported/SOP/human/backend-like model routes now fall back to deterministic-free clarification with `fallback_to_deterministic=false`.
+- Router checkpoint metadata now preserves compact reason/query/error/RAG diagnostics and excludes full answer blocks.
+- `llm_shadow_admin` now serializes datetime values and keeps secret sanitization.
+- Added `python -m app.workers.real_gemini_faq_smoke`; it does not send by default and marks this smoke's pending outbox rows `SKIPPED_MANUAL_SMOKE`.
 - Added `llm_router_mode=faq_authoritative`.
 - Ordinary text messages in this mode call the LLM router before deterministic keyword routing.
 - The LLM router payload carries `deterministic_rewrite_result=None`, `deterministic_intent_result=None`, and `deterministic_route=None`.
@@ -193,6 +202,12 @@ Recommended next task:
 
 ## Latest Verification Status
 
+- Ran `uv run --group dev pytest tests/unit -q`
+- Result: `351 passed`
+- Ran `uv run --group dev pytest tests/integration/test_llm_faq_authoritative_multimodal_mysql_smoke.py -q`
+- Result: `1 skipped` because no MySQL integration DSN was configured in the local environment
+- Ran `uv run --group dev pytest tests/integration -m mysql -q`
+- Result: `12 skipped` because no MySQL integration DSN was configured in the local environment
 - Ran `uv run --group dev pytest tests/unit -q`
 - Result: `340 passed`
 - Ran `uv run --group dev pytest tests/integration/test_llm_faq_authoritative_multimodal_mysql_smoke.py -q`

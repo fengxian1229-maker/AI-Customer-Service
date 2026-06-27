@@ -46,3 +46,27 @@ def test_build_llm_provider_rejects_unknown_mode():
 
     with pytest.raises(ValueError, match="Unsupported llm provider"):
         build_llm_provider("openai")
+
+
+def test_mock_provider_faq_authoritative_routes_deposit_without_deterministic_context():
+    import asyncio
+
+    from app.llm.mock_provider import MockLLMProvider
+
+    result = asyncio.run(
+        MockLLMProvider().route(
+            {
+                "raw_user_input": "怎么存款？",
+                "router_mode": "faq_authoritative",
+                "deterministic_route": None,
+                "deterministic_intent_result": None,
+                "deterministic_rewrite_result": None,
+            }
+        )
+    )
+
+    assert result["mode"] == "faq_authoritative"
+    assert result["route"] == "faq"
+    assert result["intent"] == "deposit_howto"
+    assert result["faq_query"] == "怎么存款"
+    assert result["confidence"] >= 0.84

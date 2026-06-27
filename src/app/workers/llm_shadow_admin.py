@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+from datetime import date, datetime
 
 from app.core.settings import Settings
 from app.db.mysql import create_pool
@@ -106,6 +107,8 @@ def _sanitize_shadow(value):
         return [_sanitize_shadow(item) for item in value[:20]]
     if isinstance(value, str):
         return value[:500]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     return value
 
 
@@ -125,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
         )
     )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0
 
 

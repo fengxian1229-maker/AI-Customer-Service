@@ -8,11 +8,30 @@ def test_validate_llm_route_rejects_invalid_route():
         validate_llm_route("not_a_route")
 
 
+def test_validate_llm_route_normalizes_common_aliases():
+    from app.llm.guardrails import validate_llm_route
+
+    assert validate_llm_route("SOP") == "sop"
+    assert validate_llm_route("FAQ") == "faq"
+    assert validate_llm_route("Human") == "human_handoff"
+    assert validate_llm_route("human handoff") == "human_handoff"
+    assert validate_llm_route("faq-then-sop") == "faq_then_sop"
+
+
 def test_validate_llm_intent_rejects_invalid_intent():
     from app.llm.guardrails import validate_llm_intent
 
     with pytest.raises(ValueError, match="Unsupported llm intent"):
         validate_llm_intent("not_an_intent")
+
+
+def test_validate_llm_intent_normalizes_common_aliases():
+    from app.llm.guardrails import validate_llm_intent
+
+    assert validate_llm_intent("deposit_inquiry") == "deposit_howto"
+    assert validate_llm_intent("deposit-guide") == "deposit_howto"
+    assert validate_llm_intent("reset password") == "forgot_password_howto"
+    assert validate_llm_intent("withdraw") == "withdrawal_howto"
 
 
 def test_normalize_confidence_clamps_to_range():

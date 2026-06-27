@@ -225,3 +225,45 @@ def test_gemini_provider_missing_required_field_has_readable_error(monkeypatch):
     provider = GeminiLLMProvider(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
     with pytest.raises(ValueError, match="Missing required rewrite shadow field"):
         asyncio.run(provider.rewrite({"raw_user_input": "how to deposit"}))
+
+
+def test_gemini_provider_route_uses_prompt_and_mode_from_router_mode(monkeypatch):
+    from app.core.settings import Settings
+    from app.llm.gemini_provider import (
+        FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT,
+        GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT,
+        GeminiLLMProvider,
+    )
+
+    captured = {"prompts": []}
+
+    class FakeStructuredModel:
+        async def ainvoke(self, payload):
+            captured["prompts"].append(payload[0][1])
+            return {
+                "rewritten_question": "怎么存款？",
+                "normalized_query": "怎么存款",
+                "language": "zh",
+                "intent": "deposit_howto",
+                "route": "FAQ",
+                "confidence": 0.95,
+                "faq_query": "怎么存款",
+                "reason": "faq smoke",
+            }
+
+    class FakeModel:
+        def with_structured_output(self, schema=None, method=None):
+            return FakeStructuredModel()
+
+    monkeypatch.setattr("app.llm.gemini_provider.build_gemini_chat_model", lambda settings: FakeModel())
+    provider = GeminiLLMProvider(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
+
+    faq = asyncio.run(provider.route({"raw_user_input": "怎么存款？", "router_mode": "faq_authoritative"}))
+    guarded = asyncio.run(provider.route({"raw_user_input": "怎么存款？", "router_mode": "guarded_authoritative"}))
+
+    assert faq["mode"] == "faq_authoritative"
+    assert guarded["mode"] == "guarded_authoritative"
+    assert captured["prompts"] == [
+        FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT,
+        GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT,
+    ]

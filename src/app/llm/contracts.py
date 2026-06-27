@@ -44,6 +44,8 @@ class LLMIntentShadowInput(TypedDict, total=False):
 
 
 class LLMRouterInput(TypedDict, total=False):
+    router_mode: str | None
+    mode: str | None
     tenant_id: str
     conversation_id: str
     raw_user_input: str

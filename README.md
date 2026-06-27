@@ -82,7 +82,9 @@ Current LLM boundary:
 - `llm_router_mode` supports `deterministic`, `shadow`, `guarded_authoritative`, and `faq_authoritative`; default is still `shadow`.
 - In `guarded_authoritative`, accepted LLM router decisions may set `rewritten_question`, `rewrite_result`, `intent_result`, and `route` before graph invoke.
 - In `faq_authoritative`, ordinary text messages call the LLM router before deterministic keyword routing; accepted FAQ decisions set `rewrite_source=llm_faq_authoritative`, `route_source=llm_faq_authoritative`, and use LLM `faq_query` / `normalized_query` for FAQ retrieval.
+- Gemini router prompts are split by mode: `guarded_authoritative` uses the guarded router prompt and `faq_authoritative` uses the FAQ-only smoke prompt. `ROUTER_SYSTEM_PROMPT` remains an alias for the guarded prompt.
 - Router decisions are recorded in `graph_checkpoint_runs.metadata_json.llm_router` with accepted/fallback status.
+- Router checkpoint metadata now keeps compact rewrite/query/reason/error fields plus compact RAG retrieval diagnostics without storing full answer blocks.
 - Router hard guards keep active workflows, explicit human requests, file-without-text events, deterministic SOP / human / emotion routes, and FAQ-leaning backend/account/order/payment/balance/status fact-like requests on deterministic safety paths. `llm_router_fallback_to_deterministic` is retained for config/diagnostics, but P8-A safety fallback is not disableable.
 - Gateway-path shadow result/error summaries are stored in `graph_checkpoint_runs.metadata_json.llm_shadow`.
 - Shadow failures are isolated from deterministic graph execution and do not create `graph_run_errors`.
@@ -115,6 +117,13 @@ Seed the minimal multimodal FAQ canonical data set:
 
 ```bash
 PYTHONPATH=src uv run --group dev python -m app.workers.seed_knowledge --tenant-id default --kb-scope default --source-file data/knowledge/default_multimodal_faq_seed.json
+```
+
+Real Gemini FAQ-authoritative manual smoke, no send by default:
+
+```bash
+LLM_PROVIDER=gemini LLM_ROUTER_MODE=faq_authoritative PYTHONPATH=src \
+uv run --group dev python -m app.workers.real_gemini_faq_smoke --text "怎么存款？" --seed-default-faq
 ```
 
 FAQ renderer preview helper:

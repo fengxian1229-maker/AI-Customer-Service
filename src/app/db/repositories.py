@@ -263,6 +263,23 @@ class OutboundMessageRepository:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (status, error, outbound_message_id))
 
+    async def mark_pending_by_inbound_event_skipped(
+        self,
+        inbound_event_id: int,
+        status: str = "SKIPPED_MANUAL_SMOKE",
+        error: str = "manual smoke uses fake chat_id; not sent",
+    ) -> int:
+        sql = """
+        UPDATE outbound_messages
+        SET status = %s, last_error = %s
+        WHERE inbound_event_id = %s
+          AND status = 'PENDING'
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (status, error, inbound_event_id))
+                return cur.rowcount
+
 
 class ExternalCommandRepository:
     def __init__(self, pool) -> None:

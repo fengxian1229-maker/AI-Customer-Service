@@ -261,6 +261,9 @@ P8-B 固化 LLM-first FAQ route + answer_blocks outbound smoke：
 7. image 当前是 sender_worker MVP URL text fallback，不是真实 LiveChat image upload
 8. buttons 当前是 livechat.buttons_preview，并由 sender_worker 标记 SKIPPED_PREVIEW
 9. 多块 outbound 幂等依赖 dedup_key，旧 uk_inbound_action 唯一键不再适合多块 FAQ
+10. P8-B.1 将 Gemini router prompt 按 guarded_authoritative / faq_authoritative 分离
+11. P8-B.1 新增 real_gemini_faq_smoke CLI，默认不发送，并把 manual smoke outbox 标记 SKIPPED_MANUAL_SMOKE
+12. P8-B.1 补强 llm_router checkpoint metadata 与 llm_shadow_admin datetime JSON 输出
 ```
 
 当前 RAG 仍明确不做：
