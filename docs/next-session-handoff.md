@@ -53,6 +53,7 @@ Recommended next task:
 - P8-B.1 formalized real Gemini FAQ-authoritative smoke hardening.
 - P8-B.2 locks the real Gemini FAQ smoke to the single inbound event it inserts.
 - P8-B.2.1 tightens FAQ smoke send-mode success: all pending outbounds for the smoke inbound event must be processed, sender results must match the same inbound event, unsafe statuses fail, and `pending_after_count` must be zero.
+- P8-B.3.1 fixes Gemini payload JSON serialization for datetime/date/Decimal recent messages and adds a pre-send accepted FAQ gate for real FAQ send smoke.
 - P8-A.2 adds `python -m app.workers.real_gemini_guarded_smoke`, a dry-run-only real Gemini `guarded_authoritative` small-sample review.
 - P8-A.2.1 hardens guarded smoke evaluator semantics and dry-run cleanup for `external_commands`.
 - Split Gemini router prompts into `GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT` and `FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT`; `ROUTER_SYSTEM_PROMPT` remains an alias to the guarded prompt.
@@ -65,6 +66,7 @@ Recommended next task:
 - Added `python -m app.workers.real_gemini_faq_smoke`; it does not send by default, does not require real LiveChat credentials in no-send mode, and marks only this smoke inbound event's pending outbox rows `SKIPPED_MANUAL_SMOKE`.
 - Added scoped worker/repository entry points: `fetch_unprocessed_by_id`, `process_inbound_event_id`, `fetch_pending_by_inbound_event`, and `process_pending_for_inbound_event`.
 - `--send` requires explicit `--chat-id` and `--thread-id` before inserting an inbound event, then sends only pending outbound rows for that inbound event.
+- `--send` now blocks before LiveChat dispatch unless gateway success, no graph errors, `llm_router.status=accepted`, `llm_router.final_route=faq`, scoped outbound rows, and pending rows are all present. Blocked sends mark this inbound event's pending outbounds `SKIPPED_MANUAL_SMOKE` and return `send_blocked=true`.
 - Gateway LLM error metadata redacts secret values, not only secret-like key names, including `api-key`, `x-api-key`, quoted values, and `Authorization: Bearer ...`.
 - `real_gemini_guarded_smoke` default cases cover FAQ deposit/how-to, FAQ withdrawal/how-to, Spanish deposit missing SOP safety, explicit human, balance fact-like, order-status fact-like, and file-without-text. It inserts fake chats, uses `process_inbound_event_id`, reads diagnostics by inbound event, marks pending outbounds and pending external commands skipped, and never sends LiveChat or executes external commands.
 - Guarded smoke now permits dry-run external commands only for declared allowlists: `human_handoff.requested` for explicit human and `human_handoff.requested` / `backend.query` for backend fact-like cases. Unknown case-set, unknown case id, and empty limits return JSON errors before pool creation.

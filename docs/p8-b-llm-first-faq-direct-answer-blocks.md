@@ -79,6 +79,15 @@ P8-B.2.1 tightens send-mode diagnostics without changing the default no-send beh
 - If `--sender-limit` leaves rows pending, `smoke_success=false` and warning includes `sender_limit_may_have_left_pending_outbounds`.
 - Router metadata and graph errors are fetched by `(conversation_id, inbound_event_id)` so historical rows for the same chat do not affect the current smoke.
 
+## P8-B.3.1 Send Gate
+
+P8-B.3.1 fixes a real single-session send smoke issue where a router fallback clarification could be sent before final smoke success was computed.
+
+- Gemini router payload serialization now tolerates datetime/date/Decimal and other non-JSON-native values in recent conversation messages.
+- `real_gemini_faq_smoke --send` runs an accepted-FAQ preflight before constructing the LiveChat sender client.
+- LiveChat dispatch is blocked unless the gateway processed this inbound event successfully, `graph_run_errors` is empty, `llm_router.status=accepted`, `llm_router.final_route=faq`, outbound rows exist, pending rows exist, and outbound rows are scoped to the current `inbound_event_id`.
+- When the gate blocks sending, pending outbounds for this inbound event are marked `SKIPPED_MANUAL_SMOKE`, `sender_results` stays empty, and JSON includes `send_blocked=true` plus `send_block_reason`.
+
 ## FAQ Retrieval
 
 FAQ retrieval query priority is:

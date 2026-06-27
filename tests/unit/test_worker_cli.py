@@ -524,8 +524,111 @@ def test_real_gemini_faq_smoke_send_fails_for_mismatched_sender_inbound_event(mo
     assert "sender_results_not_scoped_to_inbound_event" in result["warning"]
 
 
-async def _run_faq_smoke_send_case(monkeypatch, real_gemini_faq_smoke, before_statuses, sender_results, after_statuses):
-    calls = {"fetch_outbound": 0}
+def test_real_gemini_faq_smoke_send_blocks_before_sender_when_router_fallback(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    result, calls = asyncio.run(
+        _run_faq_smoke_send_case(
+            monkeypatch,
+            real_gemini_faq_smoke,
+            before_statuses=["PENDING"],
+            sender_results=[{"status": "SENT", "inbound_event_id": 55}],
+            after_statuses=["SKIPPED_MANUAL_SMOKE"],
+            llm_router={"status": "fallback", "final_route": "clarification", "mode": "faq_authoritative"},
+            return_calls=True,
+        )
+    )
+
+    assert calls["sender_called"] == 0
+    assert calls["skipped_inbound_event_ids"] == [55]
+    assert result["send_blocked"] is True
+    assert result["send_block_reason"] == "llm_router_not_accepted_faq"
+    assert result["sender_results"] == []
+    assert result["smoke_success"] is False
+    assert "send blocked before LiveChat dispatch" in result["warning"]
+
+
+def test_real_gemini_faq_smoke_send_blocks_when_final_route_is_not_faq(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    result, calls = asyncio.run(
+        _run_faq_smoke_send_case(
+            monkeypatch,
+            real_gemini_faq_smoke,
+            before_statuses=["PENDING"],
+            sender_results=[{"status": "SENT", "inbound_event_id": 55}],
+            after_statuses=["SKIPPED_MANUAL_SMOKE"],
+            llm_router={"status": "accepted", "final_route": "clarification", "mode": "faq_authoritative"},
+            return_calls=True,
+        )
+    )
+
+    assert calls["sender_called"] == 0
+    assert result["send_blocked"] is True
+    assert result["send_block_reason"] == "llm_router_not_accepted_faq"
+    assert result["smoke_success"] is False
+
+
+def test_real_gemini_faq_smoke_send_blocks_when_graph_run_errors_exist(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    result, calls = asyncio.run(
+        _run_faq_smoke_send_case(
+            monkeypatch,
+            real_gemini_faq_smoke,
+            before_statuses=["PENDING"],
+            sender_results=[{"status": "SENT", "inbound_event_id": 55}],
+            after_statuses=["SKIPPED_MANUAL_SMOKE"],
+            graph_run_errors=[{"id": 1, "inbound_event_id": 55, "error_type": "RuntimeError"}],
+            return_calls=True,
+        )
+    )
+
+    assert calls["sender_called"] == 0
+    assert result["send_blocked"] is True
+    assert result["send_block_reason"] == "graph_run_errors_present"
+    assert result["smoke_success"] is False
+
+
+def test_real_gemini_faq_smoke_send_calls_sender_only_after_accepted_faq_gate(monkeypatch):
+    import asyncio
+
+    from app.workers import real_gemini_faq_smoke
+
+    result, calls = asyncio.run(
+        _run_faq_smoke_send_case(
+            monkeypatch,
+            real_gemini_faq_smoke,
+            before_statuses=["PENDING"],
+            sender_results=[{"status": "SENT", "inbound_event_id": 55}],
+            after_statuses=["SENT"],
+            return_calls=True,
+        )
+    )
+
+    assert calls["sender_called"] == 1
+    assert calls["skipped_inbound_event_ids"] == []
+    assert result["send_blocked"] is False
+    assert result["smoke_success"] is True
+
+
+async def _run_faq_smoke_send_case(
+    monkeypatch,
+    real_gemini_faq_smoke,
+    before_statuses,
+    sender_results,
+    after_statuses,
+    llm_router=None,
+    graph_run_errors=None,
+    return_calls=False,
+):
+    calls = {"fetch_outbound": 0, "sender_called": 0, "skipped_inbound_event_ids": []}
 
     class FakeSettings:
         def __init__(self, **kwargs) -> None:
@@ -553,7 +656,7 @@ async def _run_faq_smoke_send_case(monkeypatch, real_gemini_faq_smoke, before_st
         return {"processed": 1, "failed": 0, "enqueued": 1, "inbound_event_id": inbound_event_id, "failures": []}
 
     async def fake_fetch_latest_router_metadata(pool, conversation_id, inbound_event_id):
-        return {"status": "accepted", "final_route": "faq", "mode": "faq_authoritative"}
+        return llm_router or {"status": "accepted", "final_route": "faq", "mode": "faq_authoritative"}
 
     async def fake_fetch_outbound_messages(pool, conversation_id, inbound_event_id):
         calls["fetch_outbound"] += 1
@@ -564,10 +667,19 @@ async def _run_faq_smoke_send_case(monkeypatch, real_gemini_faq_smoke, before_st
         ]
 
     async def fake_fetch_graph_run_errors(pool, conversation_id, inbound_event_id):
-        return []
+        return graph_run_errors or []
 
     async def fake_process_pending_for_inbound_event(pool, sender_client, inbound_event_id, limit=20):
+        calls["sender_called"] += 1
         return sender_results
+
+    class FakeOutboundRepository:
+        def __init__(self, pool) -> None:
+            self.pool = pool
+
+        async def mark_pending_by_inbound_event_skipped(self, inbound_event_id: int, error: str):
+            calls["skipped_inbound_event_ids"].append(inbound_event_id)
+            return sum(1 for status in before_statuses if status == "PENDING")
 
     monkeypatch.setattr(real_gemini_faq_smoke, "Settings", FakeSettings)
     monkeypatch.setattr(real_gemini_faq_smoke, "create_pool", fake_create_pool)
@@ -577,8 +689,10 @@ async def _run_faq_smoke_send_case(monkeypatch, real_gemini_faq_smoke, before_st
     monkeypatch.setattr(real_gemini_faq_smoke, "_fetch_outbound_messages", fake_fetch_outbound_messages)
     monkeypatch.setattr(real_gemini_faq_smoke, "_fetch_graph_run_errors", fake_fetch_graph_run_errors)
     monkeypatch.setattr(real_gemini_faq_smoke.sender_worker, "process_pending_for_inbound_event", fake_process_pending_for_inbound_event)
+    monkeypatch.setattr(real_gemini_faq_smoke, "OutboundMessageRepository", FakeOutboundRepository)
 
-    return await real_gemini_faq_smoke.run(["--send", "--chat-id", "chat-1", "--thread-id", "thread-1", "--sender-limit", "1"])
+    result = await real_gemini_faq_smoke.run(["--send", "--chat-id", "chat-1", "--thread-id", "thread-1", "--sender-limit", "1"])
+    return (result, calls) if return_calls else result
 
 
 def test_real_gemini_faq_smoke_router_and_errors_queries_filter_inbound_event_id():

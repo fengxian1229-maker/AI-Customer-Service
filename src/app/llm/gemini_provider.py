@@ -1,4 +1,6 @@
 import json
+from datetime import date, datetime
+from decimal import Decimal
 
 from app.llm.contracts import (
     LLMIntentShadowInput,
@@ -207,5 +209,17 @@ def _model_dump(response) -> dict:
 def _build_chat_messages(system_prompt: str, payload: dict) -> list[tuple[str, str]]:
     return [
         ("system", system_prompt),
-        ("human", json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+        ("human", _json_dumps_payload(payload)),
     ]
+
+
+def _json_dumps_payload(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=_json_default)
+
+
+def _json_default(value):
+    if isinstance(value, (datetime, date)):
+        return str(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    return str(value)

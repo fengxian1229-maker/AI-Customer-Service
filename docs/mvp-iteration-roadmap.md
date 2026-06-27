@@ -275,6 +275,8 @@ P8-B 固化 LLM-first FAQ route + answer_blocks outbound smoke：
 21. P8-A.2.1 调整 guarded smoke evaluator，允许显式白名单 external command types
 22. P8-A.2.1 将 guarded smoke 本次 PENDING external_commands 标记 SKIPPED_MANUAL_SMOKE，不执行外部命令
 23. P8-A.2.1 修复 unknown --case / unsupported --case-set / --limit 0 空选择误报成功
+24. P8-B.3.1 修复 Gemini payload datetime/date/Decimal JSON serialization
+25. P8-B.3.1 在 real_gemini_faq_smoke --send 真实发送前增加 accepted FAQ gate，不通过则 skip pending 且不发 LiveChat
 ```
 
 当前 RAG 仍明确不做：

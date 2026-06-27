@@ -106,20 +106,39 @@ async def run(argv: list[str] | None = None) -> dict:
         skipped_unsent_count = 0
         pending_before_count = sum(1 for message in outbound_messages if message.get("status") == "PENDING")
         pending_after_count = pending_before_count
+        send_blocked = False
+        send_block_reason = None
         if args.send:
-            sender_client = LiveChatSenderClient(
-                settings.livechat_api_base,
-                settings.livechat_account_id,
-                settings.livechat_agent_access_token,
-            )
-            sender_results = await sender_worker.process_pending_for_inbound_event(
-                pool,
-                sender_client,
+            send_block_reason = _send_preflight_block_reason(
                 inbound_event_id=inbound_event_id,
-                limit=args.sender_limit,
+                gateway_result=gateway_result,
+                llm_router=llm_router,
+                outbound_messages=outbound_messages,
+                graph_run_errors=graph_run_errors,
+                pending_before_count=pending_before_count,
             )
-            outbound_messages = await _fetch_outbound_messages(pool, conversation_id, inbound_event_id)
-            pending_after_count = sum(1 for message in outbound_messages if message.get("status") == "PENDING")
+            if send_block_reason:
+                send_blocked = True
+                skipped_unsent_count = await OutboundMessageRepository(pool).mark_pending_by_inbound_event_skipped(
+                    inbound_event_id,
+                    error=DEFAULT_SKIP_ERROR,
+                )
+                outbound_messages = await _fetch_outbound_messages(pool, conversation_id, inbound_event_id)
+                pending_after_count = sum(1 for message in outbound_messages if message.get("status") == "PENDING")
+            else:
+                sender_client = LiveChatSenderClient(
+                    settings.livechat_api_base,
+                    settings.livechat_account_id,
+                    settings.livechat_agent_access_token,
+                )
+                sender_results = await sender_worker.process_pending_for_inbound_event(
+                    pool,
+                    sender_client,
+                    inbound_event_id=inbound_event_id,
+                    limit=args.sender_limit,
+                )
+                outbound_messages = await _fetch_outbound_messages(pool, conversation_id, inbound_event_id)
+                pending_after_count = sum(1 for message in outbound_messages if message.get("status") == "PENDING")
         elif args.mark_unsent_smoke_skipped:
             skipped_unsent_count = await OutboundMessageRepository(pool).mark_pending_by_inbound_event_skipped(
                 inbound_event_id,
@@ -134,24 +153,28 @@ async def run(argv: list[str] | None = None) -> dict:
             sender_statuses = {result.get("status") for result in sender_results}
             sender_result_count = len(sender_results)
             sender_scoped = all(result.get("inbound_event_id") == inbound_event_id for result in sender_results)
-            sender_ok = (
-                pending_before_count > 0
-                and sender_result_count == pending_before_count
-                and sender_scoped
-                and sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}
-                and pending_after_count == 0
-            )
             warnings = []
-            if sender_result_count < pending_before_count:
-                warnings.append("sender_limit_may_have_left_pending_outbounds")
-            if not sender_scoped:
-                warnings.append("sender_results_not_scoped_to_inbound_event")
-            if not sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}:
-                warnings.append("sender_results_not_all_send_safe")
-            if "SKIPPED_PREVIEW" in sender_statuses:
-                warnings.append("buttons preview was skipped by sender_worker")
-            if pending_after_count:
-                warnings.append("pending_outbounds_remain_after_send")
+            if send_blocked:
+                sender_ok = False
+                warnings.append(f"send blocked before LiveChat dispatch: {send_block_reason}")
+            else:
+                sender_ok = (
+                    pending_before_count > 0
+                    and sender_result_count == pending_before_count
+                    and sender_scoped
+                    and sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}
+                    and pending_after_count == 0
+                )
+                if sender_result_count < pending_before_count:
+                    warnings.append("sender_limit_may_have_left_pending_outbounds")
+                if not sender_scoped:
+                    warnings.append("sender_results_not_scoped_to_inbound_event")
+                if not sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}:
+                    warnings.append("sender_results_not_all_send_safe")
+                if "SKIPPED_PREVIEW" in sender_statuses:
+                    warnings.append("buttons preview was skipped by sender_worker")
+                if pending_after_count:
+                    warnings.append("pending_outbounds_remain_after_send")
             warning = "; ".join(warnings) if warnings else None
         else:
             sender_ok = skipped_unsent_count == pending_before_count if args.mark_unsent_smoke_skipped else True
@@ -179,6 +202,8 @@ async def run(argv: list[str] | None = None) -> dict:
             "pending_before_count": pending_before_count,
             "sender_result_count": len(sender_results),
             "pending_after_count": pending_after_count,
+            "send_blocked": send_blocked,
+            "send_block_reason": send_block_reason,
             "warning": warning,
             "smoke_success": smoke_success,
         }
@@ -198,6 +223,34 @@ def _build_settings(send: bool):
         return Settings(**kwargs)
     except TypeError:
         return Settings()
+
+
+def _send_preflight_block_reason(
+    inbound_event_id: int,
+    gateway_result: dict,
+    llm_router: dict | None,
+    outbound_messages: list[dict],
+    graph_run_errors: list[dict],
+    pending_before_count: int,
+) -> str | None:
+    if gateway_result.get("inbound_event_id") != inbound_event_id:
+        return "gateway_inbound_event_mismatch"
+    if gateway_result.get("processed") != 1 or gateway_result.get("failed") != 0:
+        return "gateway_not_successful"
+    if graph_run_errors:
+        return "graph_run_errors_present"
+    if (llm_router or {}).get("status") != "accepted" or (llm_router or {}).get("final_route") != "faq":
+        return "llm_router_not_accepted_faq"
+    if not outbound_messages:
+        return "no_outbound_messages"
+    if pending_before_count <= 0:
+        return "no_pending_outbounds"
+    if any(message.get("inbound_event_id") != inbound_event_id for message in outbound_messages):
+        return "outbound_messages_not_scoped_to_inbound_event"
+    allowed_command_types = {"livechat.send_text", "livechat.send_image", "livechat.buttons_preview", None}
+    if any(message.get("command_type") not in allowed_command_types for message in outbound_messages):
+        return "outbound_command_type_not_send_safe"
+    return None
 
 
 def _base_summary(args) -> dict:

@@ -1,5 +1,7 @@
 import asyncio
 import pytest
+from datetime import datetime, date
+from decimal import Decimal
 
 
 def test_gemini_provider_rewrite_returns_shadow_output(monkeypatch):
@@ -267,3 +269,30 @@ def test_gemini_provider_route_uses_prompt_and_mode_from_router_mode(monkeypatch
         FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT,
         GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT,
     ]
+
+
+def test_gemini_provider_build_chat_messages_serializes_datetime_recent_messages():
+    import json
+
+    from app.llm.gemini_provider import _build_chat_messages
+
+    messages = _build_chat_messages(
+        "system prompt",
+        {
+            "raw_user_input": "怎么存款？",
+            "recent_messages": [
+                {
+                    "created_at": datetime(2026, 6, 27, 1, 2, 3),
+                    "business_date": date(2026, 6, 27),
+                    "amount": Decimal("10.50"),
+                }
+            ],
+        },
+    )
+
+    payload = json.loads(messages[1][1])
+
+    assert payload["recent_messages"][0]["created_at"] == "2026-06-27 01:02:03"
+    assert payload["recent_messages"][0]["business_date"] == "2026-06-27"
+    assert payload["recent_messages"][0]["amount"] == "10.50"
+    assert "怎么存款？" in messages[1][1]
