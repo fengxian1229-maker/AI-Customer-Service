@@ -684,6 +684,9 @@ def test_knowledge_document_insert_idempotent_uses_unique_key_upsert():
                 "title": "Bonus rules",
                 "content": "奖金规则以活动页面说明为准。",
                 "keywords": ["bonus"],
+                "question_aliases": ["bonus rules"],
+                "answer_blocks": [{"type": "text", "text": "奖金规则以活动页面说明为准。"}],
+                "metadata_json": {"intent_id": "bonus_rules"},
                 "language": "multi",
                 "priority": 10,
                 "enabled": True,
@@ -694,11 +697,15 @@ def test_knowledge_document_insert_idempotent_uses_unique_key_upsert():
     assert "ON DUPLICATE KEY UPDATE" in cursor.sql
     assert "content = VALUES(content)" in cursor.sql
     assert "keywords = VALUES(keywords)" in cursor.sql
+    assert "question_aliases = VALUES(question_aliases)" in cursor.sql
+    assert "answer_blocks = VALUES(answer_blocks)" in cursor.sql
+    assert "metadata_json = VALUES(metadata_json)" in cursor.sql
     assert "language = VALUES(language)" in cursor.sql
     assert "priority = VALUES(priority)" in cursor.sql
     assert "enabled = VALUES(enabled)" in cursor.sql
     assert "updated_at = CURRENT_TIMESTAMP" in cursor.sql
     assert cursor.args[0:4] == ("default", "default", "Bonus rules", "奖金规则以活动页面说明为准。")
+    assert '"奖金规则以活动页面说明为准。"' in cursor.args[6]
     assert result == {"inserted": False, "duplicate": True, "id": 42}
 
 
@@ -715,6 +722,9 @@ def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores
                     "title": "Bonus rules",
                     "content": "奖金规则以活动页面说明为准。",
                     "keywords": '["bonus","rules"]',
+                    "question_aliases": '["bonus rules","bonus terms"]',
+                    "answer_blocks": '[{"type":"text","text":"奖金规则以活动页面说明为准。"}]',
+                    "metadata_json": '{"intent_id":"bonus_rules"}',
                     "language": "en",
                     "priority": 20,
                 },
@@ -725,6 +735,9 @@ def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores
                     "title": "Deposit guide",
                     "content": "how to deposit",
                     "keywords": '["deposit"]',
+                    "question_aliases": None,
+                    "answer_blocks": None,
+                    "metadata_json": None,
                     "language": "en",
                     "priority": 10,
                 },
@@ -740,8 +753,11 @@ def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores
     assert cursor.args == ("default", "default")
     assert rows[0]["id"] == 1
     assert rows[0]["keywords"] == ["bonus", "rules"]
+    assert rows[0]["question_aliases"] == ["bonus rules", "bonus terms"]
+    assert rows[0]["answer_blocks"] == [{"type": "text", "text": "奖金规则以活动页面说明为准。"}]
+    assert rows[0]["metadata_json"] == {"intent_id": "bonus_rules"}
     assert rows[0]["score"] > 0
-    assert rows[0]["matched_fields"] == ["title", "keywords"]
+    assert rows[0]["matched_fields"] == ["title", "question_aliases", "keywords"]
     assert len(rows) == 1
 
 
@@ -758,6 +774,9 @@ def test_knowledge_document_search_returns_empty_without_match():
                     "title": "Bonus rules",
                     "content": "奖金规则以活动页面说明为准。",
                     "keywords": '["bonus"]',
+                    "question_aliases": None,
+                    "answer_blocks": None,
+                    "metadata_json": None,
                     "language": "en",
                     "priority": 20,
                 },
@@ -777,9 +796,9 @@ def test_knowledge_document_search_sorts_by_score_priority_and_id():
     class FetchCursor(FakeCursor):
         async def fetchall(self):
             return [
-                {"id": 3, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "bonus", "keywords": "[]", "language": None, "priority": 30},
-                {"id": 1, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "", "keywords": '["bonus"]', "language": None, "priority": 10},
-                {"id": 2, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "", "keywords": '["bonus"]', "language": None, "priority": 10},
+                {"id": 3, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "bonus", "keywords": "[]", "question_aliases": None, "answer_blocks": None, "metadata_json": None, "language": None, "priority": 30},
+                {"id": 1, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "", "keywords": '["bonus"]', "question_aliases": None, "answer_blocks": None, "metadata_json": None, "language": None, "priority": 10},
+                {"id": 2, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "", "keywords": '["bonus"]', "question_aliases": None, "answer_blocks": None, "metadata_json": None, "language": None, "priority": 10},
             ]
 
     cursor = FetchCursor(rowcount=3)
@@ -802,6 +821,9 @@ def test_knowledge_document_list_documents_filters_tenant_scope_and_enabled():
             "title": "Bonus rules",
             "content": "奖金规则以活动页面说明为准。",
             "keywords": '["bonus","rules"]',
+            "question_aliases": '["bonus rules"]',
+            "answer_blocks": '[{"type":"text","text":"奖金规则以活动页面说明为准。"}]',
+            "metadata_json": '{"intent_id":"bonus_rules"}',
             "language": "multi",
             "priority": 10,
             "enabled": 1,
@@ -819,6 +841,9 @@ def test_knowledge_document_list_documents_filters_tenant_scope_and_enabled():
     assert "ORDER BY priority ASC, id ASC" in cursor.sql
     assert cursor.args == ("default", "default", 1, 50)
     assert rows[0]["keywords"] == ["bonus", "rules"]
+    assert rows[0]["question_aliases"] == ["bonus rules"]
+    assert rows[0]["answer_blocks"] == [{"type": "text", "text": "奖金规则以活动页面说明为准。"}]
+    assert rows[0]["metadata_json"] == {"intent_id": "bonus_rules"}
 
 
 def test_knowledge_document_list_documents_skips_enabled_filter_when_none():
@@ -844,6 +869,9 @@ def test_knowledge_document_get_by_title_uses_parameterized_query():
         "title": "Bonus rules",
         "content": "奖金规则以活动页面说明为准。",
         "keywords": '["bonus","rules"]',
+        "question_aliases": '["bonus rules"]',
+        "answer_blocks": '[{"type":"text","text":"奖金规则以活动页面说明为准。"}]',
+        "metadata_json": '{"intent_id":"bonus_rules"}',
         "language": "multi",
         "priority": 10,
         "enabled": 1,
@@ -857,6 +885,9 @@ def test_knowledge_document_get_by_title_uses_parameterized_query():
     assert "WHERE tenant_id = %s AND kb_scope = %s AND title = %s" in cursor.sql
     assert cursor.args == ("default", "default", "Bonus rules")
     assert row["keywords"] == ["bonus", "rules"]
+    assert row["question_aliases"] == ["bonus rules"]
+    assert row["answer_blocks"] == [{"type": "text", "text": "奖金规则以活动页面说明为准。"}]
+    assert row["metadata_json"] == {"intent_id": "bonus_rules"}
 
 
 def test_knowledge_document_set_enabled_uses_parameterized_update():

@@ -1,0 +1,5 @@
+-- Idempotent multimodal knowledge field migration is applied by app.db.bootstrap.
+-- The bootstrap layer checks existing columns for MySQL and SQLite before adding:
+-- question_aliases JSON NULL
+-- answer_blocks JSON NULL
+-- metadata_json JSON NULL

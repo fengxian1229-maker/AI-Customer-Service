@@ -53,8 +53,9 @@ def test_load_sql_files_in_order():
             "007_add_worker_lease_fields.sql",
             "008_graph_run_errors.sql",
             "009_conversation_messages.sql",
-            "010_knowledge_documents.sql",
-            "011_graph_checkpoint_metadata.sql",
+        "010_knowledge_documents.sql",
+        "011_graph_checkpoint_metadata.sql",
+        "012_add_multimodal_knowledge_fields.sql",
         ]
 
 
@@ -145,6 +146,16 @@ def test_knowledge_documents_schema_has_required_indexes():
     assert "UNIQUE KEY uk_knowledge_documents_tenant_scope_title" in sql
     assert "KEY idx_knowledge_documents_tenant_enabled_priority" in sql
     assert "KEY idx_knowledge_documents_scope" in sql
+
+
+def test_multimodal_knowledge_fields_migration_adds_json_columns():
+    from pathlib import Path
+
+    sql = Path("sql/012_add_multimodal_knowledge_fields.sql").read_text()
+
+    assert "question_aliases JSON NULL" in sql
+    assert "answer_blocks JSON NULL" in sql
+    assert "metadata_json JSON NULL" in sql
 
 
 def test_graph_checkpoint_runs_schema_has_required_indexes():
@@ -619,15 +630,18 @@ def test_knowledge_documents_bootstrap_keeps_existing_sqlite_columns_and_indexes
             return [
                 (0, "tenant_id"),
                 (1, "kb_scope"),
-                (2, "title"),
-                (3, "content"),
-                (4, "keywords"),
-                (5, "language"),
-                (6, "priority"),
-                (7, "enabled"),
-                (8, "created_at"),
-                (9, "updated_at"),
-            ]
+                    (2, "title"),
+                    (3, "content"),
+                    (4, "keywords"),
+                    (5, "question_aliases"),
+                    (6, "answer_blocks"),
+                    (7, "metadata_json"),
+                    (8, "language"),
+                    (9, "priority"),
+                    (10, "enabled"),
+                    (11, "created_at"),
+                    (12, "updated_at"),
+                ]
 
     cursor = FakeCursor()
 

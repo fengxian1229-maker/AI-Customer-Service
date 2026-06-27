@@ -70,6 +70,12 @@ P6-B：Gemini Vertex AI real llm provider shadow integration
 P6-B.1：Gemini shadow guardrail + real smoke review
 ```
 
+当前 P7-A.1 已完成：
+
+```text
+P7-A.1：Multimodal FAQ Canonical Data Layer, Vector-ready
+```
+
 说明：
 
 ```text
@@ -171,6 +177,18 @@ P6-B.1 新增 Gemini shadow guardrail 与 smoke review：
 9. models/ 目录只是参考代码，不属于当前 MVP 主链路，本轮不处理
 ```
 
+P7-A.1 新增多模态 FAQ canonical 数据层：
+
+```text
+1. knowledge_documents 增加 question_aliases / answer_blocks / metadata_json
+2. KnowledgeDocumentRepository 可写入、读取、搜索并 decode 新 JSON 字段
+3. rank_knowledge_document 继续使用词法检索，并加入 question_aliases 打分
+4. RagService.retrieve(...) 返回 answer_blocks，但 rag_node 仍只使用 response_text
+5. 新增 default_multimodal_faq_seed.json，最小覆盖充值教程、提款教程、忘记密码、上传截图
+6. seed_knowledge 支持多模态 FAQ JSON，导入时验证 answer_blocks 并保持旧纯文本 seed 兼容
+7. metadata_json 预留 intent_id、answer_mode、requires_asset、vector_index_enabled 等未来向量化字段
+```
+
 当前 RAG 仍明确不做：
 
 ```text
@@ -179,6 +197,8 @@ embedding
 LLM answer generation
 LLM tool calling
 知识库 Web 管理后台
+FAQ renderer
+图片发送
 ```
 
 当前知识库运维入口仅包含：

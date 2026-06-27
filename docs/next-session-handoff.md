@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that already proved this loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/outbound_messages -> sender_worker -> LiveChat send_event.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only. P6-B.1 adds shadow output guardrails and a standalone smoke review tool.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only. P6-B.1 adds shadow output guardrails and a standalone smoke review tool. P7-A.1 adds multimodal FAQ canonical fields to `knowledge_documents`, `question_aliases` lexical ranking, vector-ready metadata, and minimal multimodal seed data without rendering or sending images.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -37,11 +37,22 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-- build checkpoint Web admin or richer debug UX on top of the new read-only CLI / repository boundary
-- or verify Gemini shadow quality and failure handling without placing real LLM calls inside graph nodes
+- P7-A.2: design a read-only FAQ block renderer boundary that can preview `answer_blocks` without changing Gateway outbox behavior
+- or build checkpoint Web admin / richer debug UX on top of the read-only CLI / repository boundary
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
+
+## Latest P7-A.1 Status
+
+- Added `sql/012_add_multimodal_knowledge_fields.sql` plus bootstrap compatibility for `question_aliases`, `answer_blocks`, and `metadata_json`
+- Added `src/app/services/knowledge_blocks.py` for alias normalization, answer block validation, metadata normalization, and text fallback blocks
+- Extended `KnowledgeDocumentRepository` to upsert, list, get, search, and decode the new JSON fields
+- Extended lexical ranking so `question_aliases` can match exact aliases, alias contains/query contains, and token matches
+- Extended `RagService.retrieve(...)` to return `answer_blocks` and document block metadata while preserving old text answer compatibility
+- Added `data/knowledge/default_multimodal_faq_seed.json` with minimal tutorial FAQ records for deposit, withdrawal, forgot password, and screenshot upload
+- Extended `seed_knowledge` so old text-only docs still import and missing `answer_blocks` fall back to one text block
+- P7-A.1 still does not implement FAQ rendering, image sending, vector DB, embeddings, or LLM final answer generation
 
 ## Latest P6-B.1 Status
 
@@ -112,6 +123,10 @@ Recommended next task:
 
 ## Latest Verification Status
 
+- Ran `uv run --group dev pytest tests/unit -q`
+- Result: `284 passed`
+- Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`
+- Result: `6 passed`
 - Ran `uv run --group dev pytest tests/unit -q`
 - Result: `268 passed`
 - Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`

@@ -54,6 +54,7 @@ def test_rag_service_retrieve_uses_repository_search():
             "priority": 20,
             "matched_fields": ["title", "keywords"],
             "matched_terms": ["bonus rules"],
+            "answer_blocks": [{"type": "text", "text": "奖金规则以活动页面说明为准。"}],
         }
     ])
     service = RagService(repository)
@@ -68,6 +69,10 @@ def test_rag_service_retrieve_uses_repository_search():
     assert context["kb_scope"] == "default"
     assert context["query"] == "bonus rules"
     assert context["documents"][0]["matched_fields"] == ["title", "keywords"]
+    assert context["answer_blocks"] == [{"type": "text", "text": "奖金规则以活动页面说明为准。"}]
+    assert context["documents"][0]["has_answer_blocks"] is True
+    assert context["documents"][0]["block_types"] == ["text"]
+    assert context["documents"][0]["asset_keys"] == []
     assert repository.calls == [("default", "bonus rules", "default", 3)]
 
 
@@ -106,6 +111,7 @@ def test_rag_service_retrieve_does_not_query_repository_for_backend_fact_questio
 
     assert context["matched"] is False
     assert context["answer"] == BACKEND_FACT_FALLBACK_ANSWER
+    assert context["answer_blocks"] == [{"type": "text", "text": BACKEND_FACT_FALLBACK_ANSWER}]
     assert context["documents"] == []
     assert context["source"] == "guardrail"
     assert context["fallback_reason"] == "backend_fact"
@@ -233,6 +239,55 @@ def test_rank_knowledge_document_prefers_exact_keyword_over_content_match():
     assert keyword_doc["score"] > content_doc["score"]
 
 
+def test_rank_knowledge_document_matches_question_aliases():
+    alias_doc = rank_knowledge_document(
+        {
+            "id": 1,
+            "title": "充值教程",
+            "content": "按页面提示完成充值。",
+            "keywords": ["deposit"],
+            "question_aliases": ["how can I recharge", "cómo recargar"],
+            "priority": 10,
+            "language": "multi",
+        },
+        "how can I recharge",
+    )
+    content_doc = rank_knowledge_document(
+        {
+            "id": 2,
+            "title": "General",
+            "content": "how can I recharge appears once.",
+            "keywords": [],
+            "question_aliases": [],
+            "priority": 1,
+            "language": "multi",
+        },
+        "how can I recharge",
+    )
+
+    assert alias_doc["score"] > content_doc["score"]
+    assert "question_aliases" in alias_doc["matched_fields"]
+    assert "how can i recharge" in alias_doc["matched_terms"]
+
+
+def test_rank_knowledge_document_scores_alias_contains_query():
+    result = rank_knowledge_document(
+        {
+            "id": 1,
+            "title": "提款教程",
+            "content": "按页面提示申请提款。",
+            "keywords": [],
+            "question_aliases": ["how do I withdraw money"],
+            "priority": 10,
+            "language": "multi",
+        },
+        "withdraw money",
+    )
+
+    assert result["score"] > 0
+    assert "question_aliases" in result["matched_fields"]
+
+
 def test_rank_knowledge_document_supports_chinese_query():
     result = rank_knowledge_document(
         {
@@ -282,7 +337,28 @@ def test_rag_service_low_score_returns_fallback():
 
     assert context["matched"] is False
     assert context["answer"] == RAG_FALLBACK_ANSWER
+    assert context["answer_blocks"] == [{"type": "text", "text": RAG_FALLBACK_ANSWER}]
     assert context["fallback_reason"] == "low_score"
+
+
+def test_rag_service_returns_text_block_for_legacy_document():
+    repository = FakeKnowledgeRepository([
+        {
+            "id": 1,
+            "title": "Upload screenshot",
+            "content": "请上传清晰截图。",
+            "score": 12,
+            "priority": 20,
+            "matched_fields": ["title"],
+            "matched_terms": ["upload screenshot"],
+        }
+    ])
+    service = RagService(repository)
+
+    context = asyncio.run(service.retrieve({"tenant_id": "default", "raw_user_input": "upload screenshot"}))
+
+    assert context["answer_blocks"] == [{"type": "text", "text": "请上传清晰截图。"}]
+    assert context["documents"][0]["has_answer_blocks"] is False
 
 
 def test_answer_from_rag_context_without_context_uses_static_fallback():

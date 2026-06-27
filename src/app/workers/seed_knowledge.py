@@ -6,6 +6,12 @@ from pathlib import Path
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import KnowledgeDocumentRepository
+from app.services.knowledge_blocks import (
+    default_text_answer_blocks,
+    normalize_metadata_json,
+    normalize_question_aliases,
+    validate_answer_blocks,
+)
 from app.services.rag import DEFAULT_KNOWLEDGE_DOCUMENTS
 
 
@@ -79,20 +85,37 @@ async def seed_repository(
         "inserted": 0,
         "duplicates": 0,
         "skipped": 0,
+        "invalid": 0,
     }
-    if dry_run:
-        return result
 
     for document in documents:
         if not document.get("title") or not document.get("content"):
             result["skipped"] += 1
             continue
-        upsert = await repository.insert_idempotent(document)
+        try:
+            prepared = prepare_seed_document(document)
+        except ValueError:
+            result["invalid"] += 1
+            continue
+        if dry_run:
+            continue
+        upsert = await repository.insert_idempotent(prepared)
         if upsert.get("inserted"):
             result["inserted"] += 1
         else:
             result["duplicates"] += 1
     return result
+
+
+def prepare_seed_document(document: dict) -> dict:
+    prepared = dict(document)
+    prepared["question_aliases"] = normalize_question_aliases(prepared.get("question_aliases"))
+    prepared["metadata_json"] = normalize_metadata_json(prepared.get("metadata_json"))
+    if prepared.get("answer_blocks") is None:
+        prepared["answer_blocks"] = default_text_answer_blocks(prepared.get("content") or "")
+    else:
+        prepared["answer_blocks"] = validate_answer_blocks(prepared.get("answer_blocks"))
+    return prepared
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

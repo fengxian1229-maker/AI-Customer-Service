@@ -1,3 +1,4 @@
+from app.services.knowledge_blocks import default_text_answer_blocks, validate_answer_blocks
 from app.workflows.slot_extractors import normalize_text
 
 
@@ -150,9 +151,11 @@ class RagService:
                 kb_scope=kb_scope,
             )
 
+        answer_blocks = _answer_blocks_for_document(best)
         return {
             "matched": True,
-            "answer": best.get("content") or RAG_FALLBACK_ANSWER,
+            "answer": _answer_text(best, answer_blocks) or RAG_FALLBACK_ANSWER,
+            "answer_blocks": answer_blocks,
             "documents": [_rag_document_payload(document) for document in documents],
             "fallback_reason": None,
             "source": source,
@@ -232,6 +235,7 @@ def rank_knowledge_document(document: dict, query: str, language: str | None = N
     title = normalize_text(document.get("title")).lower()
     content = normalize_text(document.get("content")).lower()
     keywords = [normalize_text(keyword).lower() for keyword in document.get("keywords") or []]
+    question_aliases = [normalize_text(alias).lower() for alias in document.get("question_aliases") or []]
 
     score = 0
     matched_fields: list[str] = []
@@ -252,6 +256,24 @@ def rank_knowledge_document(document: dict, query: str, language: str | None = N
             reasons.append("exact_keyword_match")
             break
 
+    for alias in question_aliases:
+        if alias and normalized_query == alias:
+            score += 7
+            matched_fields.append("question_aliases")
+            matched_terms.append(alias)
+            reasons.append("exact_alias_match")
+            break
+
+    for alias in question_aliases:
+        if not alias or normalized_query == alias:
+            continue
+        if normalized_query in alias or alias in normalized_query:
+            score += 5
+            matched_fields.append("question_aliases")
+            matched_terms.append(alias)
+            reasons.append("alias_contains_match")
+            break
+
     for token in tokens:
         if token in title:
             score += 4
@@ -260,6 +282,10 @@ def rank_knowledge_document(document: dict, query: str, language: str | None = N
         if any(token in keyword for keyword in keywords):
             score += 3
             matched_fields.append("keywords")
+            matched_terms.append(token)
+        if any(token in alias for alias in question_aliases):
+            score += 3
+            matched_fields.append("question_aliases")
             matched_terms.append(token)
         if token in content:
             score += 1
@@ -295,6 +321,7 @@ def _fallback_context(
     return {
         "matched": False,
         "answer": answer,
+        "answer_blocks": default_text_answer_blocks(answer),
         "documents": [],
         "fallback_reason": fallback_reason,
         "source": source,
@@ -342,6 +369,7 @@ def _build_answer_from_context(context: dict) -> dict:
 
 
 def _rag_document_payload(document: dict) -> dict:
+    raw_blocks = document.get("answer_blocks") or []
     return {
         "id": document.get("id"),
         "title": document.get("title"),
@@ -350,6 +378,9 @@ def _rag_document_payload(document: dict) -> dict:
         "matched_fields": list(document.get("matched_fields") or []),
         "matched_terms": list(document.get("matched_terms") or []),
         "content": document.get("content") or "",
+        "has_answer_blocks": bool(raw_blocks),
+        "block_types": _block_types(raw_blocks),
+        "asset_keys": _asset_keys(raw_blocks),
     }
 
 
@@ -372,6 +403,30 @@ def _query_tokens(query: str) -> list[str]:
     if any("\u4e00" <= char <= "\u9fff" for char in normalized):
         tokens.extend(_zh_substrings(normalized))
     return [token for token in _unique(tokens + [normalized]) if token]
+
+
+def _answer_blocks_for_document(document: dict) -> list[dict]:
+    raw_blocks = document.get("answer_blocks")
+    if raw_blocks:
+        return validate_answer_blocks(raw_blocks)
+    return default_text_answer_blocks(document.get("content") or "")
+
+
+def _answer_text(document: dict, blocks: list[dict]) -> str:
+    if document.get("content"):
+        return document.get("content")
+    for block in blocks:
+        if block.get("type") == "text" and block.get("text"):
+            return block["text"]
+    return ""
+
+
+def _block_types(blocks: list[dict]) -> list[str]:
+    return _unique([block.get("type") for block in blocks if isinstance(block, dict) and block.get("type")])
+
+
+def _asset_keys(blocks: list[dict]) -> list[str]:
+    return _unique([block.get("asset_key") for block in blocks if isinstance(block, dict) and block.get("asset_key")])
 
 
 def _zh_substrings(text: str) -> list[str]:

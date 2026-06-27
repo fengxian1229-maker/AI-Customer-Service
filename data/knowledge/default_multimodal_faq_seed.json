@@ -1,0 +1,185 @@
+[
+  {
+    "title": "充值教程",
+    "content": "若你要进行充值，请登录账号，进入充值或存款页面，选择可用付款方式，按页面提示完成付款，并保留付款成功截图。",
+    "question_aliases": [
+      "how to deposit",
+      "how can I recharge",
+      "cómo recargar",
+      "如何充值"
+    ],
+    "keywords": [
+      "deposit",
+      "recharge",
+      "recargar",
+      "充值",
+      "存款"
+    ],
+    "language": "multi",
+    "priority": 10,
+    "answer_blocks": [
+      {
+        "type": "image",
+        "asset_key": "deposit_howto",
+        "caption": "",
+        "position": "before",
+        "platform_asset_map": {
+          "default": "bot66tornado/assets/tutorials/JUE999/deposit.jpg"
+        }
+      },
+      {
+        "type": "text",
+        "text": "若你要进行充值，请登录账号，进入充值或存款页面，选择可用付款方式，按页面提示完成付款，并保留付款成功截图。"
+      },
+      {
+        "type": "buttons",
+        "menu_key": "deposit_recovery"
+      }
+    ],
+    "metadata_json": {
+      "source_flow": "bot66tornado",
+      "old_intent_id": "deposit_howto",
+      "intent_id": "deposit_howto",
+      "category": "self_service_tutorial",
+      "answer_mode": "direct",
+      "requires_llm": false,
+      "requires_asset": true,
+      "vector_index_enabled": true,
+      "risk_level": "low"
+    }
+  },
+  {
+    "title": "提款教程",
+    "content": "若你要申请提款，请登录账号，进入提款页面，确认提款资料，输入金额并提交申请，提交后保留提款申请截图。",
+    "question_aliases": [
+      "how to withdraw",
+      "how can I withdraw",
+      "cómo retirar",
+      "如何提款"
+    ],
+    "keywords": [
+      "withdraw",
+      "withdrawal",
+      "retirar",
+      "提款",
+      "取款"
+    ],
+    "language": "multi",
+    "priority": 12,
+    "answer_blocks": [
+      {
+        "type": "image",
+        "asset_key": "withdrawal_howto",
+        "caption": "",
+        "position": "before",
+        "platform_asset_map": {
+          "default": "bot66tornado/assets/tutorials/JUE999/withdrawal.jpg"
+        }
+      },
+      {
+        "type": "text",
+        "text": "若你要申请提款，请登录账号，进入提款页面，确认提款资料，输入金额并提交申请，提交后保留提款申请截图。"
+      },
+      {
+        "type": "buttons",
+        "menu_key": "withdrawal_recovery"
+      }
+    ],
+    "metadata_json": {
+      "source_flow": "bot66tornado",
+      "old_intent_id": "withdrawal_howto",
+      "intent_id": "withdrawal_howto",
+      "category": "self_service_tutorial",
+      "answer_mode": "direct",
+      "requires_llm": false,
+      "requires_asset": true,
+      "vector_index_enabled": true,
+      "risk_level": "low"
+    }
+  },
+  {
+    "title": "忘记密码说明",
+    "content": "多数情况下用户名是注册手机号。请按图片步骤重设密码；如果仍无法登录，请提供错误截图以便继续协助。",
+    "question_aliases": [
+      "forgot password",
+      "I forgot my password",
+      "olvidé mi contraseña",
+      "忘记密码"
+    ],
+    "keywords": [
+      "password",
+      "contraseña",
+      "forgot password",
+      "忘记密码",
+      "重设密码"
+    ],
+    "language": "multi",
+    "priority": 14,
+    "answer_blocks": [
+      {
+        "type": "image",
+        "asset_key": "forgot_password",
+        "caption": "",
+        "position": "before",
+        "platform_asset_map": {
+          "default": "bot66tornado/assets/tutorials/JUE999/forgot-password.jpg"
+        }
+      },
+      {
+        "type": "text",
+        "text": "多数情况下用户名是注册手机号。请按图片步骤重设密码；如果仍无法登录，请提供错误截图以便继续协助。"
+      },
+      {
+        "type": "buttons",
+        "menu_key": "other_recovery"
+      }
+    ],
+    "metadata_json": {
+      "source_flow": "bot66tornado",
+      "old_intent_id": "forgot_password",
+      "intent_id": "forgot_password_howto",
+      "category": "self_service_tutorial",
+      "answer_mode": "direct",
+      "requires_llm": false,
+      "requires_asset": true,
+      "vector_index_enabled": true,
+      "risk_level": "low"
+    }
+  },
+  {
+    "title": "上传截图说明",
+    "content": "若要上传截图，请点击聊天窗口中的加号或附件按钮，从相册选择清晰完整的图片后发送。",
+    "question_aliases": [
+      "how to upload screenshot",
+      "send screenshot",
+      "subir captura",
+      "如何上传截图"
+    ],
+    "keywords": [
+      "upload",
+      "screenshot",
+      "captura",
+      "上传截图",
+      "附件"
+    ],
+    "language": "multi",
+    "priority": 16,
+    "answer_blocks": [
+      {
+        "type": "text",
+        "text": "若要上传截图，请点击聊天窗口中的加号或附件按钮，从相册选择清晰完整的图片后发送。"
+      }
+    ],
+    "metadata_json": {
+      "source_flow": "bot66tornado",
+      "old_intent_id": "screenshot_upload_tutorial",
+      "intent_id": "screenshot_upload_howto",
+      "category": "self_service_tutorial",
+      "answer_mode": "direct",
+      "requires_llm": false,
+      "requires_asset": false,
+      "vector_index_enabled": true,
+      "risk_level": "low"
+    }
+  }
+]

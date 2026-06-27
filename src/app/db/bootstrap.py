@@ -12,6 +12,8 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
             for path in sql_files:
                 if path.name == "004_add_workflow_stage.sql":
                     continue
+                if path.name == "012_add_multimodal_knowledge_fields.sql":
+                    continue
                 statement = path.read_text(encoding="utf-8")
                 await cur.execute(statement)
             await ensure_inbound_events_compat(cur)
@@ -205,6 +207,9 @@ async def ensure_knowledge_documents_compat(cur) -> None:
             "title": "ALTER TABLE knowledge_documents ADD COLUMN title VARCHAR(255) NOT NULL",
             "content": "ALTER TABLE knowledge_documents ADD COLUMN content TEXT NOT NULL",
             "keywords": "ALTER TABLE knowledge_documents ADD COLUMN keywords JSON NULL",
+            "question_aliases": "ALTER TABLE knowledge_documents ADD COLUMN question_aliases JSON NULL",
+            "answer_blocks": "ALTER TABLE knowledge_documents ADD COLUMN answer_blocks JSON NULL",
+            "metadata_json": "ALTER TABLE knowledge_documents ADD COLUMN metadata_json JSON NULL",
             "language": "ALTER TABLE knowledge_documents ADD COLUMN language VARCHAR(32) NULL",
             "priority": "ALTER TABLE knowledge_documents ADD COLUMN priority INT NOT NULL DEFAULT 100",
             "enabled": "ALTER TABLE knowledge_documents ADD COLUMN enabled TINYINT(1) NOT NULL DEFAULT 1",

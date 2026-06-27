@@ -88,3 +88,55 @@ def test_seed_knowledge_loads_source_file_and_skips_invalid_documents(tmp_path):
     assert result["duplicates"] == 0
     assert result["skipped"] == 2
     assert repository.inserted[0]["enabled"] is False
+    assert repository.inserted[0]["answer_blocks"] == [{"type": "text", "text": "按页面提示完成充值。"}]
+
+
+def test_seed_knowledge_loads_multimodal_seed_file():
+    repository = FakeKnowledgeRepository()
+
+    result = asyncio.run(
+        seed_knowledge.seed_repository(
+            repository,
+            tenant_id="default",
+            kb_scope="default",
+            source_file="data/knowledge/default_multimodal_faq_seed.json",
+        )
+    )
+
+    assert result["documents"] == 4
+    assert result["inserted"] == 4
+    deposit = repository.inserted[0]
+    assert deposit["question_aliases"]
+    assert [block["type"] for block in deposit["answer_blocks"]] == ["image", "text", "buttons"]
+    assert deposit["metadata_json"]["intent_id"] == "deposit_howto"
+
+
+def test_seed_knowledge_counts_invalid_answer_blocks(tmp_path):
+    source_file = tmp_path / "knowledge.json"
+    source_file.write_text(
+        json.dumps(
+            [
+                {
+                    "title": "Bad block",
+                    "content": "bad",
+                    "answer_blocks": [{"type": "image"}],
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    repository = FakeKnowledgeRepository()
+
+    result = asyncio.run(
+        seed_knowledge.seed_repository(
+            repository,
+            tenant_id="default",
+            kb_scope="default",
+            source_file=str(source_file),
+        )
+    )
+
+    assert result["documents"] == 1
+    assert result["invalid"] == 1
+    assert repository.inserted == []
