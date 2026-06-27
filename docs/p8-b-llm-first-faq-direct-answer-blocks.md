@@ -1,0 +1,107 @@
+# P8-B LLM-First FAQ Direct Answer Blocks
+
+P8-B adds a smoke-test mode for FAQ only:
+
+```env
+LLM_ROUTER_MODE=faq_authoritative
+```
+
+In this mode, ordinary `MESSAGE_CREATED` text is routed as:
+
+```text
+user message
+-> LLM rewrite / route / faq_query
+-> FAQ retrieval with faq_query / normalized_query
+-> knowledge_documents.answer_blocks
+-> ordered outbound_messages
+-> sender_worker text / image fallback / buttons preview
+```
+
+## LLM Boundary
+
+The LLM is only allowed to decide rewrite/router metadata:
+
+- `rewritten_question`
+- `normalized_query`
+- `language`
+- `intent`
+- `route`
+- `faq_query`
+- `confidence`
+- `reason`
+
+It does not generate final customer replies, images, buttons, tool calls, or `external_commands`.
+
+In `faq_authoritative`, the router payload keeps deterministic fields as `None`:
+
+- `deterministic_rewrite_result=None`
+- `deterministic_intent_result=None`
+- `deterministic_route=None`
+
+Provider missing, invalid schema, low confidence, or non-FAQ decisions fall back to deterministic-free clarification, not keyword reclassification.
+
+## FAQ Retrieval
+
+FAQ retrieval query priority is:
+
+1. `intent_result.faq_query`
+2. `rewrite_result.normalized_query`
+3. `rewritten_question`
+4. `raw_user_input`
+
+For this FAQ-first smoke mode, backend-fact RAG guard can be disabled by state so a phrase like `deposit not arrived FAQ` can still retrieve an explicitly seeded FAQ document. This is limited to `faq_authoritative` retrieval and does not enable backend fact answering.
+
+## Outbound Blocks
+
+When `route=faq` and `rag_context.answer_blocks` exists, Gateway renders answer blocks into multiple `outbound_messages` and suppresses the default single FAQ text command to avoid duplicates.
+
+Supported block behavior:
+
+- `text`: `command_type=livechat.send_text`, `message_type=text`
+- `image`: `command_type=livechat.send_image`, `message_type=image`
+- `buttons`: `command_type=livechat.buttons_preview`, `message_type=buttons`
+
+Rows keep stable `dedup_key`, `block_index`, `message_kind`, and `command_type`.
+
+The legacy `(inbound_event_id, action_type)` unique key is no longer kept because one FAQ answer can legitimately create multiple blocks with the same command type. Multi-block idempotency is based on `dedup_key`.
+
+## Sender Worker
+
+`sender_worker` now dispatches by `message_type`:
+
+- `text`: sends through `send_text`.
+- `image`: sends an MVP fallback text containing the image URL and caption, and marks the row `SENT`.
+- `buttons`: marks the row `SKIPPED_PREVIEW`.
+- unknown types: mark `SKIPPED_UNSUPPORTED`.
+
+The current image/buttons behavior is not production-grade LiveChat rich messaging.
+
+## Still Not Implemented
+
+- LLM final answer generation
+- LLM tool calling
+- LLM-created `external_commands`
+- real backend / Tiancheng calls
+- real Telegram
+- WebSocket / Webhook ingress
+- embeddings / vector DB
+- real LiveChat image upload
+- real LiveChat rich buttons
+
+## Verification
+
+Unit:
+
+```bash
+uv run --group dev pytest tests/unit -q
+```
+
+MySQL smoke:
+
+```bash
+MYSQL_TEST_DSN='mysql+pymysql://root:<password>@127.0.0.1:3306/ai_customer_service_test' \
+PYTHONPATH=src \
+uv run --group dev pytest tests/integration/test_llm_faq_authoritative_multimodal_mysql_smoke.py -q
+```
+
+The MySQL smoke is skipped when no MySQL test DSN is configured.

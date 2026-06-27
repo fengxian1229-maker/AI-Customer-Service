@@ -5,6 +5,7 @@ from app.llm.contracts import LLMIntentShadowInput, LLMRewriteShadowInput, LLMRo
 from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
+from app.services.faq_outbound_plan import build_faq_outbound_plan_from_rag_context, faq_plan_to_outbound_rows
 from app.services.message_history import build_customer_message_from_inbound
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
 from app.workflows.command_contracts import CommandType
@@ -20,7 +21,7 @@ EXTERNAL_COMMAND_TYPES = {
     str(CommandType.RAG_PLACEHOLDER),
 }
 
-LLM_ROUTER_MODES = {"deterministic", "shadow", "guarded_authoritative"}
+LLM_ROUTER_MODES = {"deterministic", "shadow", "guarded_authoritative", "faq_authoritative"}
 ACTIVE_WORKFLOW_GUARD_STAGES = {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}
 
 
@@ -333,6 +334,8 @@ class GatewayService:
             return self._shadow_error_result(exc)
 
     async def _prepare_route_state(self, graph_state: dict) -> dict:
+        if self.llm_router_mode == "faq_authoritative":
+            return await self._prepare_faq_authoritative_route_state(graph_state)
         deterministic_state = prepare_route_state(graph_state)
         if self.llm_router_mode != "guarded_authoritative":
             return deterministic_state
@@ -354,6 +357,8 @@ class GatewayService:
         mode = sanitized_raw.get("mode") or "guarded_authoritative"
         if decision["confidence"] < self.llm_router_min_confidence:
             return self._router_fallback_state(deterministic_state, "low_confidence", decision=decision, provider=provider, mode=mode)
+        if decision["route"] == "unsupported":
+            return self._router_fallback_state(deterministic_state, "unsupported_route", decision=decision, provider=provider, mode=mode)
         if decision["route"] == "faq" and (decision["requires_backend"] or self._contains_backend_fact_signal(deterministic_state)):
             return self._router_fallback_state(deterministic_state, "backend_fact_guard", decision=decision, provider=provider, mode=mode)
         if decision["requires_human"] and decision["route"] != "human_handoff":
@@ -388,6 +393,130 @@ class GatewayService:
                 mode=mode,
             ),
         }
+
+    async def _prepare_faq_authoritative_route_state(self, graph_state: dict) -> dict:
+        raw = normalize_text(graph_state.get("raw_user_input"))
+        if graph_state.get("event_type") == "FILE_RECEIVED" and not raw:
+            return self._faq_authoritative_fallback_state(graph_state, "file_without_text")
+        if graph_state.get("active_workflow") and graph_state.get("workflow_stage") in ACTIVE_WORKFLOW_GUARD_STAGES:
+            return prepare_route_state(graph_state)
+        if not raw:
+            return self._faq_authoritative_fallback_state(graph_state, "empty_input")
+        if not self.llm_intent_service or not hasattr(self.llm_intent_service, "route"):
+            return self._faq_authoritative_fallback_state(graph_state, "missing_provider")
+
+        payload = self._build_llm_router_input(graph_state, include_deterministic=False)
+        try:
+            raw_result = await self.llm_intent_service.route(payload)
+            sanitized_raw = self._sanitize_value(raw_result or {})
+            decision = validate_router_decision_output(payload, sanitized_raw)
+        except Exception as exc:
+            return self._faq_authoritative_fallback_state(
+                graph_state,
+                "exception" if not isinstance(exc, ValueError) else "validation_error",
+                exc=exc,
+            )
+
+        provider = sanitized_raw.get("provider")
+        mode = sanitized_raw.get("mode") or "faq_authoritative"
+        if decision["confidence"] < self.llm_router_min_confidence:
+            return self._faq_authoritative_fallback_state(
+                graph_state,
+                "low_confidence",
+                decision=decision,
+                provider=provider,
+                mode=mode,
+            )
+        if decision["route"] not in {"faq", "clarification", "unsupported"}:
+            return self._faq_authoritative_fallback_state(
+                graph_state,
+                "unsupported_route",
+                decision=decision,
+                provider=provider,
+                mode=mode,
+            )
+        if decision["route"] == "faq" and not decision.get("faq_query"):
+            return self._faq_authoritative_fallback_state(
+                graph_state,
+                "missing_faq_query",
+                decision=decision,
+                provider=provider,
+                mode=mode,
+            )
+
+        final_route = "faq" if decision["route"] == "faq" else "clarification"
+        rewritten_question = decision["rewritten_question"]
+        return {
+            **graph_state,
+            "rewritten_question": rewritten_question,
+            "rewrite_result": {
+                "rewritten_question": rewritten_question,
+                "normalized_query": decision.get("normalized_query"),
+                "language": decision.get("language"),
+                "preserved_entities": decision.get("preserved_entities") or [],
+                "source": "llm_faq_authoritative",
+            },
+            "rewrite_source": "llm_faq_authoritative",
+            "intent_result": {
+                "intent": decision["intent"],
+                "route": final_route,
+                "confidence": decision["confidence"],
+                "reason": decision["reason"],
+                "sop_name": None,
+                "faq_query": decision.get("faq_query"),
+                "risk_level": decision.get("risk_level"),
+            },
+            "route": final_route,
+            "route_source": "llm_faq_authoritative",
+            "rag_backend_fact_guard_enabled": False,
+            "llm_router_result": self._router_result_summary(
+                status="accepted",
+                decision=decision,
+                provider=provider,
+                mode=mode,
+            ),
+        }
+
+    def _faq_authoritative_fallback_state(
+        self,
+        graph_state: dict,
+        fallback_reason: str,
+        decision: dict | None = None,
+        provider: str | None = None,
+        mode: str | None = None,
+        exc: Exception | None = None,
+    ) -> dict:
+        raw = normalize_text(graph_state.get("raw_user_input"))
+        state = {
+            **graph_state,
+            "rewritten_question": raw,
+            "rewrite_result": {
+                "rewritten_question": raw,
+                "normalized_query": raw,
+                "language": "unknown",
+                "preserved_entities": [],
+                "source": "llm_faq_authoritative_fallback",
+            },
+            "rewrite_source": "llm_faq_authoritative",
+            "intent_result": {
+                "intent": "clarification_needed",
+                "route": "clarification",
+                "confidence": 0.0,
+                "reason": "FAQ-authoritative router fell back to deterministic-free clarification.",
+            },
+            "route": "clarification",
+            "route_source": "llm_faq_authoritative",
+            "llm_router_result": self._router_result_summary(
+                status="fallback",
+                decision=decision,
+                provider=provider,
+                mode=mode or "faq_authoritative",
+                fallback_reason=fallback_reason,
+                error_type=type(exc).__name__ if exc else None,
+                fallback_to_deterministic=False,
+            ),
+        }
+        return state
 
     def _router_hard_guard_reason(self, graph_state: dict) -> str | None:
         if graph_state.get("active_workflow") and graph_state.get("workflow_stage") in ACTIVE_WORKFLOW_GUARD_STAGES:
@@ -600,14 +729,14 @@ class GatewayService:
             "attachments_summary": self._attachments_summary(graph_state),
         }
 
-    def _build_llm_router_input(self, graph_state: dict) -> LLMRouterInput:
+    def _build_llm_router_input(self, graph_state: dict, include_deterministic: bool = True) -> LLMRouterInput:
         return {
             "tenant_id": graph_state.get("tenant_id"),
             "conversation_id": graph_state.get("conversation_id"),
             "raw_user_input": graph_state.get("raw_user_input"),
-            "deterministic_rewrite_result": graph_state.get("rewrite_result"),
-            "deterministic_intent_result": graph_state.get("intent_result"),
-            "deterministic_route": graph_state.get("route"),
+            "deterministic_rewrite_result": graph_state.get("rewrite_result") if include_deterministic else None,
+            "deterministic_intent_result": graph_state.get("intent_result") if include_deterministic else None,
+            "deterministic_route": graph_state.get("route") if include_deterministic else None,
             "recent_messages": list(graph_state.get("recent_messages") or []),
             "active_workflow": graph_state.get("active_workflow"),
             "workflow_stage": graph_state.get("workflow_stage"),
@@ -654,6 +783,27 @@ class GatewayService:
     ) -> list[dict]:
         if not graph_state:
             return []
+        if graph_state.get("route") == "faq" and graph_state.get("rag_context"):
+            plan = build_faq_outbound_plan_from_rag_context(
+                graph_state["rag_context"],
+                tenant_id=graph_state.get("tenant_id") or "default",
+                conversation_id=conversation_id,
+                inbound_event_id=inbound_event_id,
+                platform="JUE999",
+                channel_type=graph_state.get("channel_type") or "livechat",
+                language=((graph_state.get("rewrite_result") or {}).get("language")) or "zh",
+            )
+            rows = faq_plan_to_outbound_rows(
+                plan,
+                chat_id=event.chat_id,
+                thread_id=event.thread_id,
+                conversation_id=conversation_id,
+                inbound_event_id=inbound_event_id,
+                tenant_id=graph_state.get("tenant_id") or "default",
+                channel_type=graph_state.get("channel_type") or "livechat",
+            )
+            if rows:
+                return rows
         return [
             build_command_outbox(
                 chat_id=event.chat_id,

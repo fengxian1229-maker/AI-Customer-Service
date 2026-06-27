@@ -249,6 +249,20 @@ P8-A 固化 guarded authoritative rewrite/router：
 8. 仍不允许 LLM 生成最终客服回复、调用工具、生成 external_commands、决定 FAQ image/buttons
 ```
 
+P8-B 固化 LLM-first FAQ route + answer_blocks outbound smoke：
+
+```text
+1. 新增 llm_router_mode=faq_authoritative，默认仍不是开启状态
+2. faq_authoritative 下普通文本消息先调用 LLM router，不先跑 deterministic keyword route
+3. LLM 只输出 rewrite / route / faq_query / normalized_query，不生成最终客服回复
+4. FAQ 检索优先使用 faq_query，其次 normalized_query / rewritten_question / raw_user_input
+5. FAQ 答案直接来自 knowledge_documents.answer_blocks，不经过 AI 润色
+6. Gateway 可把 text / image / buttons answer_blocks 写成多条 outbound_messages
+7. image 当前是 sender_worker MVP URL text fallback，不是真实 LiveChat image upload
+8. buttons 当前是 livechat.buttons_preview，并由 sender_worker 标记 SKIPPED_PREVIEW
+9. 多块 outbound 幂等依赖 dedup_key，旧 uk_inbound_action 唯一键不再适合多块 FAQ
+```
+
 当前 RAG 仍明确不做：
 
 ```text
@@ -257,16 +271,16 @@ embedding
 LLM answer generation
 LLM tool calling
 知识库 Web 管理后台
-FAQ 多图文生产发送
-LiveChat send_image
-buttons/rich message
+生产级 FAQ 多图文 rich message
+真实 LiveChat send_image / file upload
+真实 buttons/rich message
 ```
 
 当前 P7-A 后续候选：
 
 ```text
-1. 小范围真实 Gemini guarded-authoritative router smoke review，仍不启用 final answer generation
-2. FAQ multi-outbound batch contract，但仍不真实发送 image/buttons
+1. 小范围真实 Gemini faq_authoritative FAQ route smoke review，仍不启用 final answer generation
+2. 将 image MVP URL fallback 替换为确认过的真实 LiveChat image/file event
 3. LLM/router shadow result review / metrics
 ```
 

@@ -76,6 +76,39 @@ def test_rag_service_retrieve_uses_repository_search():
     assert repository.calls == [("default", "bonus rules", "default", 3)]
 
 
+def test_rag_service_retrieve_prefers_llm_faq_query_then_normalized_query():
+    repository = FakeKnowledgeRepository([
+        {
+            "id": 1,
+            "title": "Deposit not arrived FAQ",
+            "content": "请打开存款问题 FAQ 查看处理方式。",
+            "score": 12,
+            "priority": 20,
+            "matched_fields": ["question_aliases"],
+            "matched_terms": ["deposit not arrived FAQ"],
+            "answer_blocks": [{"type": "text", "text": "请打开存款问题 FAQ 查看处理方式。"}],
+        }
+    ])
+    service = RagService(repository)
+
+    context = asyncio.run(
+        service.retrieve(
+            {
+                "tenant_id": "default",
+                "raw_user_input": "mi deposito no llegó",
+                "rewritten_question": "mi deposito no llegó",
+                "rewrite_result": {"normalized_query": "deposit issue"},
+                "intent_result": {"faq_query": "deposit not arrived FAQ"},
+                "rag_backend_fact_guard_enabled": False,
+            }
+        )
+    )
+
+    assert context["matched"] is True
+    assert context["query"] == "deposit not arrived FAQ"
+    assert repository.calls == [("default", "deposit not arrived FAQ", "default", 3)]
+
+
 def test_rag_service_returns_safe_fallback_when_no_match():
     service = RagService(FakeKnowledgeRepository([]))
 

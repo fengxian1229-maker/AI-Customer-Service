@@ -58,12 +58,40 @@ async def process_pending_message(
     transaction_repository=None,
 ) -> dict:
     payload = message["payload_json"]
+    message_type = message.get("message_type") or message.get("message_kind") or "text"
+    if message_type == "buttons":
+        result = {
+            "status": "SKIPPED_PREVIEW",
+            "last_error": "buttons preview is not sent by sender_worker",
+            "retryable": False,
+        }
+        await outbound_repository.mark_failed(message["id"], result["status"], result["last_error"], retryable=False)
+        return result
+    if message_type not in {"text", "image"}:
+        result = {
+            "status": "SKIPPED_UNSUPPORTED",
+            "last_error": f"unsupported outbound message_type: {message_type}",
+            "retryable": False,
+        }
+        await outbound_repository.mark_failed(message["id"], result["status"], result["last_error"], retryable=False)
+        return result
+
     try:
-        response = await sender_client.send_text(
-            chat_id=message["chat_id"],
-            thread_id=message.get("thread_id"),
-            text=payload["text"],
-        )
+        outbound_for_history = message
+        if message_type == "image":
+            text = _image_mvp_fallback_text(payload)
+            outbound_for_history = {**message, "payload_json": {"text": text}}
+            response = await sender_client.send_text(
+                chat_id=message["chat_id"],
+                thread_id=message.get("thread_id"),
+                text=text,
+            )
+        else:
+            response = await sender_client.send_text(
+                chat_id=message["chat_id"],
+                thread_id=message.get("thread_id"),
+                text=payload["text"],
+            )
     except Exception as exc:
         result = classify_send_error(exc)
         await outbound_repository.mark_failed(
@@ -75,8 +103,10 @@ async def process_pending_message(
         return result
 
     result = classify_send_result(response)
+    if message_type == "image" and result["status"] == "SENT":
+        result["delivery_mode"] = "mvp_text_fallback"
     if result["status"] == "SENT":
-        assistant_message = build_assistant_message_from_outbound(message)
+        assistant_message = build_assistant_message_from_outbound(outbound_for_history)
         if transaction_repository:
             await transaction_repository.mark_sent_with_message(message["id"], assistant_message)
         else:
@@ -91,6 +121,15 @@ async def process_pending_message(
             retryable=result["retryable"],
         )
     return result
+
+
+def _image_mvp_fallback_text(payload: dict) -> str:
+    asset_ref = str(payload.get("asset_ref") or payload.get("asset_key") or "").strip()
+    caption = str(payload.get("caption") or "").strip()
+    text = f"图片：{asset_ref}" if asset_ref else "图片："
+    if caption:
+        text = f"{text}\n{caption}"
+    return text
 
 
 async def process_next_batch(pool, sender_client, limit: int = 20) -> list[dict]:

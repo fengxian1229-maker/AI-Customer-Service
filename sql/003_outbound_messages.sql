@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
   sent_at DATETIME(6) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_inbound_action (inbound_event_id, action_type),
   UNIQUE KEY uk_outbound_messages_dedup_key (dedup_key),
   KEY idx_status_created (status, created_at),
   KEY idx_chat_thread (chat_id, thread_id)

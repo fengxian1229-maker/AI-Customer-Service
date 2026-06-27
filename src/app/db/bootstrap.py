@@ -65,14 +65,12 @@ async def ensure_outbound_messages_compat(cur) -> None:
         cur,
         "outbound_messages",
         {
-            "uk_inbound_action": (
-                "CREATE UNIQUE INDEX uk_inbound_action ON outbound_messages (inbound_event_id, action_type)"
-            ),
             "uk_outbound_messages_dedup_key": (
                 "CREATE UNIQUE INDEX uk_outbound_messages_dedup_key ON outbound_messages (dedup_key)"
             ),
         },
     )
+    await drop_index_if_exists(cur, "outbound_messages", "uk_inbound_action")
 
 
 async def ensure_conversation_states_compat(cur) -> None:
@@ -323,6 +321,16 @@ async def ensure_indexes(cur, table_name: str, additions: dict[str, str]) -> Non
     for index, statement in additions.items():
         if index not in indexes:
             await cur.execute(statement)
+
+
+async def drop_index_if_exists(cur, table_name: str, index_name: str) -> None:
+    indexes = await fetch_indexes(cur, table_name)
+    if index_name not in indexes:
+        return
+    try:
+        await cur.execute(f"ALTER TABLE {table_name} DROP INDEX {index_name}")
+    except Exception:
+        await cur.execute(f"DROP INDEX {index_name}")
 
 
 async def fetch_columns(cur, table_name: str) -> set[str]:

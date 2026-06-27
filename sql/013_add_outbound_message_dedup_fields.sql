@@ -5,3 +5,5 @@
 -- message_kind VARCHAR(64) NULL
 -- command_type VARCHAR(128) NULL
 -- UNIQUE KEY uk_outbound_messages_dedup_key (dedup_key)
+-- Drops legacy UNIQUE KEY uk_inbound_action when present so one inbound event can create
+-- multiple ordered FAQ answer block messages with the same command_type/action_type.

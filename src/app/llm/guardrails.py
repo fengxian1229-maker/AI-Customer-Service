@@ -10,6 +10,7 @@ ALLOWED_LLM_ROUTES = (
     "human_handoff",
     "emotion_care",
     "clarification",
+    "unsupported",
 )
 
 ALLOWED_LLM_INTENTS = (

@@ -18,7 +18,7 @@ Read these first:
 Current goal:
 Continue from the polling-first LiveChat MVP that has now hardened this repeatable loop:
 LiveChat polling -> inbound_events -> gateway_consumer -> conversation_states/conversation_messages/outbound_messages -> sender_worker -> LiveChat send_event -> conversation_messages assistant row.
-P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only. P6-B.1 adds shadow output guardrails and a standalone smoke review tool. P7-A.1 adds multimodal FAQ canonical fields to `knowledge_documents`, `question_aliases` lexical ranking, vector-ready metadata, and minimal multimodal seed data without rendering or sending images. P7-A.5 prepares outbound idempotency fields. P7-A.7 fixes the sender pending SQL ambiguity and adds repeatable FAQ single-text closed-loop smoke diagnostics/tests. P7-A.8 adds Gateway-path LLM rewrite/intent shadow smoke, shadow error isolation, checkpoint metadata diagnostics, and `llm_shadow_admin`. P8-A adds an optional guarded authoritative LLM router for rewrite/router decisions only, with schema/whitelist/confidence/hard-guard validation and deterministic fallback.
+P0 ingress contract is complete. P1 graph failure boundaries and P2 conversation history are complete. P3-A introduced the LangGraph checkpointer injection boundary and per-conversation thread config. P3-B added a checkpoint provider boundary with `off` and local `memory` modes plus read-only graph debug helpers. P4-A added minimal deterministic KB-backed RAG. P4-B connects DB-backed `knowledge_documents` retrieval into the RAG path through GatewayService/RagService injection. P4-C adds tenant/kb-scope knowledge management, deterministic ranking v1, source-file seeding, and the lightweight knowledge admin CLI. P5-A adds durable checkpoint design, checkpoint metadata schema/bootstrap, a `graph_checkpoint_runs` repository, and a conservative `mysql` checkpoint mode boundary. P5-A.1 wires `GraphCheckpointRunRepository` into `gateway_consumer -> GatewayService` for lightweight runtime metadata only. P5-B enables a real sync MySQL LangGraph saver path with `PyMySQLSaver`, explicit saver setup, and batch-lifetime checkpointer management in `gateway_consumer`. P5-C adds a read-only checkpoint admin CLI over `graph_checkpoint_runs` and `graph_run_errors`. P5-D changes DB-backed RAG prefetching to FAQ-only lazy retrieval. P6-A adds a model-provider boundary with mock rewrite shadow and mock intent shadow. P6-B adds a real Gemini Vertex AI shadow provider for rewrite and intent only. P6-B.1 adds shadow output guardrails and a standalone smoke review tool. P7-A.1 adds multimodal FAQ canonical fields to `knowledge_documents`, `question_aliases` lexical ranking, vector-ready metadata, and minimal multimodal seed data. P7-A.5 prepares outbound idempotency fields. P7-A.7 fixes the sender pending SQL ambiguity and adds repeatable FAQ single-text closed-loop smoke diagnostics/tests. P7-A.8 adds Gateway-path LLM rewrite/intent shadow smoke, shadow error isolation, checkpoint metadata diagnostics, and `llm_shadow_admin`. P8-A adds an optional guarded authoritative LLM router for rewrite/router decisions only, with schema/whitelist/confidence/hard-guard validation and deterministic fallback. P8-B adds `faq_authoritative`, an LLM-first FAQ route smoke mode that retrieves FAQ by LLM `faq_query` / `normalized_query` and writes `answer_blocks` as ordered outbound rows.
 
 Important current constraints:
 - Only poll LiveChat group 23 for now unless I explicitly change it.
@@ -28,10 +28,11 @@ Important current constraints:
 - Backend-fact questions must return a safe fallback and must not query `knowledge_documents`, even if they pass through RagService guardrail logic.
 - Keep all facts from deterministic code, LiveChat, Telegram staff, backend API, or stored state.
 - Keep `.env` out of Git.
-- Normal FAQ/RAG path must only emit `livechat.send_text`; do not emit `RAG_PLACEHOLDER` or write `external_commands`.
+- Normal FAQ/RAG path must not emit `RAG_PLACEHOLDER` or write `external_commands`.
+- In `faq_authoritative`, FAQ `answer_blocks` may write multiple `outbound_messages`; image is currently MVP URL text fallback and buttons are preview/skipped.
 - Keep `llm_provider=off`, `llm_rewrite_shadow_enabled=false`, and `llm_intent_shadow_enabled=false` unless the task is explicitly a shadow-only smoke.
-- Keep `llm_router_mode=shadow` unless the task is explicitly a guarded-authoritative router smoke.
-- Do not implement FAQ multi-image production send, LiveChat `send_image`, buttons/rich message, or LLM final answer generation as part of the single-text smoke path.
+- Keep `llm_router_mode=shadow` unless the task is explicitly a guarded-authoritative or FAQ-authoritative router smoke.
+- Do not implement production LiveChat `send_image`, buttons/rich message, or LLM final answer generation unless explicitly requested.
 
 Before coding:
 1. Inspect the latest local files.
@@ -40,12 +41,28 @@ Before coding:
 4. Confirm whether I want to clear test data before running a new end-to-end smoke.
 
 Recommended next task:
-- Review real Gemini guarded-authoritative router smoke results on a tiny allowlisted case set before considering any broader rollout
-- or start the FAQ multi-outbound batch contract, still without real `send_image` / buttons production sending
-- or add LLM/router shadow result review metrics while still not enabling final answer generation
+- Run a real Gemini `faq_authoritative` FAQ route smoke on a tiny allowlisted case set before considering broader rollout
+- or replace image MVP URL fallback with a verified real LiveChat image/file event path
+- or add LLM/router review metrics while still not enabling final answer generation
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
 - Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
 ```
+
+## Latest P8-B Status
+
+- Added `llm_router_mode=faq_authoritative`.
+- Ordinary text messages in this mode call the LLM router before deterministic keyword routing.
+- The LLM router payload carries `deterministic_rewrite_result=None`, `deterministic_intent_result=None`, and `deterministic_route=None`.
+- Accepted FAQ decisions set `rewrite_source=llm_faq_authoritative` and `route_source=llm_faq_authoritative`.
+- FAQ retrieval now prefers `intent_result.faq_query`, then `rewrite_result.normalized_query`, then `rewritten_question`, then `raw_user_input`.
+- FAQ answers are taken directly from `knowledge_documents.answer_blocks`; no LLM answer generation or polishing is added.
+- Gateway can render FAQ answer blocks into multiple `outbound_messages` with stable `dedup_key`, `block_index`, `message_kind`, and `command_type`.
+- Removed the legacy `uk_inbound_action` unique-key dependency so one inbound event can create multiple FAQ rows with repeated command types.
+- `sender_worker` dispatches `text`, `image`, `buttons`, and unknown message types.
+- Image blocks currently use MVP URL text fallback and are marked `SENT`; buttons blocks are marked `SKIPPED_PREVIEW`.
+- Added `/Users/andy/ai-agent/docs/p8-b-llm-first-faq-direct-answer-blocks.md`.
+- Added MySQL smoke `tests/integration/test_llm_faq_authoritative_multimodal_mysql_smoke.py`.
+- Still no LLM final answer generation, tool calling, external command generation, real backend, real Telegram, WebSocket/Webhook, embeddings/vector DB, production LiveChat image upload, or production rich buttons.
 
 ## Latest P8-A Status
 
@@ -176,6 +193,12 @@ Recommended next task:
 
 ## Latest Verification Status
 
+- Ran `uv run --group dev pytest tests/unit -q`
+- Result: `340 passed`
+- Ran `uv run --group dev pytest tests/integration/test_llm_faq_authoritative_multimodal_mysql_smoke.py -q`
+- Result: `1 skipped` because no MySQL integration DSN was configured in the local environment
+- Ran `uv run --group dev pytest tests/integration -m mysql -q`
+- Result: `12 skipped` because no MySQL integration DSN was configured in the local environment
 - Ran `uv run --group dev pytest tests/unit -q`
 - Result: `328 passed`
 - Ran `MYSQL_TEST_DSN='mysql+pymysql://root:lingxi%40123@127.0.0.1:3306/ai_customer_service_test' PYTHONPATH=src uv run --group dev pytest tests/integration -m mysql -q`

@@ -525,6 +525,124 @@ def test_gateway_service_guarded_authoritative_blocks_llm_faq_for_deterministic_
     assert "commands" not in result["graph_state"]["llm_router_result"]
 
 
+def test_gateway_service_faq_authoritative_calls_llm_before_keyword_router_and_uses_answer_blocks():
+    router_service = FakeLLMRouterService(
+        {
+            "rewritten_question": "mi deposito no llegó",
+            "normalized_query": "deposit not arrived",
+            "language": "es",
+            "intent": "faq_general",
+            "route": "faq",
+            "confidence": 0.95,
+            "sop_name": None,
+            "faq_query": "deposit not arrived FAQ",
+            "risk_level": None,
+            "requires_human": False,
+            "requires_backend": False,
+            "missing_slots": [],
+            "preserved_entities": [],
+            "reason": "FAQ route for smoke",
+            "provider": "mock",
+            "mode": "faq_authoritative",
+        }
+    )
+    rag_service = FakeRagService(
+        {
+            "matched": True,
+            "answer": "FAQ answer should not be rewritten.",
+            "answer_blocks": [{"type": "text", "text": "FAQ answer should not be rewritten."}],
+            "documents": [{"id": 1, "title": "Deposit FAQ", "score": 12}],
+            "fallback_reason": None,
+            "source": "knowledge_documents",
+            "query": "deposit not arrived FAQ",
+            "tenant_id": "default",
+            "kb_scope": "default",
+        }
+    )
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="faq_authoritative",
+        rag_service=rag_service,
+    )
+
+    result = asyncio.run(service.process_event(34, make_event_with_text("mi deposito no llegó")))
+
+    assert len(router_service.calls) == 1
+    assert router_service.calls[0]["deterministic_route"] is None
+    assert router_service.calls[0]["deterministic_intent_result"] is None
+    assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["route_source"] == "llm_faq_authoritative"
+    assert result["graph_state"]["rewrite_source"] == "llm_faq_authoritative"
+    assert result["graph_state"]["intent_result"]["faq_query"] == "deposit not arrived FAQ"
+    assert rag_service.calls[0]["intent_result"]["faq_query"] == "deposit not arrived FAQ"
+    assert rag_service.calls[0]["rag_backend_fact_guard_enabled"] is False
+    assert len(result["outbound_messages"]) == 1
+    assert result["outbound_messages"][0]["message_type"] == "text"
+    assert result["outbound_messages"][0]["command_type"] == "livechat.send_text"
+    assert result["outbound_messages"][0]["payload_json"] == {"text": "FAQ answer should not be rewritten."}
+    assert result["external_commands"] == []
+
+
+def test_gateway_service_faq_authoritative_renders_multimodal_answer_blocks_to_ordered_outbox_rows():
+    router_service = FakeLLMRouterService()
+    rag_service = FakeRagService(
+        {
+            "matched": True,
+            "answer": "请按以下步骤操作：",
+            "answer_blocks": [
+                {"type": "text", "text": "请按以下步骤操作："},
+                {
+                    "type": "image",
+                    "asset_key": "deposit_step_1",
+                    "platform_asset_map": {"JUE999": "https://cdn.example/deposit_step_1.png"},
+                    "caption": "第一步：进入充值页面",
+                    "position": "after",
+                },
+                {"type": "text", "text": "选择可用通道后提交。"},
+                {"type": "buttons", "menu_key": "deposit_menu"},
+            ],
+            "documents": [{"id": 1, "title": "Deposit FAQ", "score": 12}],
+            "fallback_reason": None,
+            "source": "knowledge_documents",
+            "query": "how to deposit",
+            "tenant_id": "default",
+            "kb_scope": "default",
+        }
+    )
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="faq_authoritative",
+        rag_service=rag_service,
+    )
+
+    result = asyncio.run(service.process_event(35, make_event_with_text("怎么存款？")))
+
+    assert [message["block_index"] for message in result["outbound_messages"]] == [0, 1, 2, 3]
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["text", "image", "text", "buttons"]
+    assert [message["command_type"] for message in result["outbound_messages"]] == [
+        "livechat.send_text",
+        "livechat.send_image",
+        "livechat.send_text",
+        "livechat.buttons_preview",
+    ]
+    assert result["outbound_messages"][1]["payload_json"] == {
+        "asset_key": "deposit_step_1",
+        "asset_ref": "https://cdn.example/deposit_step_1.png",
+        "caption": "第一步：进入充值页面",
+        "position": "after",
+    }
+    assert result["outbound_messages"][3]["payload_json"] == {"menu_key": "deposit_menu"}
+    assert len({message["dedup_key"] for message in result["outbound_messages"]}) == 4
+
+
 def test_gateway_service_guarded_authoritative_uses_llm_sop_route():
     router_service = FakeLLMRouterService(
         {

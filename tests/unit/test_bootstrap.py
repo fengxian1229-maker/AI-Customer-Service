@@ -60,12 +60,12 @@ def test_load_sql_files_in_order():
         ]
 
 
-def test_outbound_messages_schema_has_inbound_action_idempotency_key():
+def test_outbound_messages_schema_does_not_keep_legacy_inbound_action_unique_key():
     from pathlib import Path
 
     sql = Path("sql/003_outbound_messages.sql").read_text()
 
-    assert "UNIQUE KEY uk_inbound_action (inbound_event_id, action_type)" in sql
+    assert "UNIQUE KEY uk_inbound_action" not in sql
 
 
 def test_outbound_messages_schema_has_multiblock_dedup_fields():

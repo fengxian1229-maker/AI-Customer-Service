@@ -100,6 +100,21 @@ def make_message() -> dict:
     }
 
 
+def make_message_of_type(message_type: str, payload: dict, message_id: int = 7) -> dict:
+    message = make_message()
+    message["id"] = message_id
+    message["message_type"] = message_type
+    message["message_kind"] = message_type
+    message["command_type"] = {
+        "text": "livechat.send_text",
+        "image": "livechat.send_image",
+        "buttons": "livechat.buttons_preview",
+    }.get(message_type, f"livechat.{message_type}")
+    message["action_type"] = message["command_type"]
+    message["payload_json"] = payload
+    return message
+
+
 def test_process_pending_message_marks_success_with_event_id():
     class SenderClient:
         async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
@@ -116,6 +131,63 @@ def test_process_pending_message_marks_success_with_event_id():
     assert message_repository.inserted[0]["outbound_message_id"] == 7
     assert message_repository.inserted[0]["sender_role"] == "assistant"
     assert message_repository.inserted[0]["text_content"] == "hello"
+
+
+def test_process_pending_message_image_uses_mvp_url_text_fallback():
+    class SenderClient:
+        def __init__(self) -> None:
+            self.sent_texts = []
+
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            self.sent_texts.append(text)
+            return {"event_id": "event-image-fallback"}
+
+    repository = FakeOutboundRepository()
+    client = SenderClient()
+    message = make_message_of_type(
+        "image",
+        {
+            "asset_key": "deposit_step_1",
+            "asset_ref": "https://cdn.example/deposit_step_1.png",
+            "caption": "第一步：进入充值页面",
+            "position": "after",
+        },
+    )
+
+    result = asyncio.run(process_pending_message(repository, client, message))
+
+    assert result["status"] == "SENT"
+    assert result["delivery_mode"] == "mvp_text_fallback"
+    assert client.sent_texts == ["图片：https://cdn.example/deposit_step_1.png\n第一步：进入充值页面"]
+    assert repository.sent == [7]
+
+
+def test_process_pending_message_buttons_preview_is_skipped_without_crashing():
+    class SenderClient:
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            raise AssertionError("buttons preview should not send")
+
+    repository = FakeOutboundRepository()
+    message = make_message_of_type("buttons", {"menu_key": "deposit_menu"})
+
+    result = asyncio.run(process_pending_message(repository, SenderClient(), message))
+
+    assert result["status"] == "SKIPPED_PREVIEW"
+    assert repository.failures == [(7, "SKIPPED_PREVIEW", "buttons preview is not sent by sender_worker", False)]
+
+
+def test_process_pending_message_unknown_type_is_skipped_unsupported():
+    class SenderClient:
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            raise AssertionError("unknown message should not send")
+
+    repository = FakeOutboundRepository()
+    message = make_message_of_type("video", {"url": "https://cdn.example/video.mp4"})
+
+    result = asyncio.run(process_pending_message(repository, SenderClient(), message))
+
+    assert result["status"] == "SKIPPED_UNSUPPORTED"
+    assert repository.failures == [(7, "SKIPPED_UNSUPPORTED", "unsupported outbound message_type: video", False)]
 
 
 def test_process_pending_message_marks_retryable_failure():

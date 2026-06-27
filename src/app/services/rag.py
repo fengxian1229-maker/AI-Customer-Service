@@ -89,10 +89,10 @@ class RagService:
     async def retrieve(self, state: dict) -> dict:
         tenant_id = state.get("tenant_id") or "default"
         kb_scope = state.get("kb_scope") or "default"
-        query = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
+        query = _retrieval_query(state)
         language = ((state.get("rewrite_result") or {}).get("language")) or None
 
-        if _is_backend_fact_question(query):
+        if state.get("rag_backend_fact_guard_enabled", True) and _is_backend_fact_question(query):
             return _fallback_context(
                 answer=BACKEND_FACT_FALLBACK_ANSWER,
                 fallback_reason="backend_fact",
@@ -170,8 +170,8 @@ class RagService:
 
 
 def answer_from_static_knowledge(state: dict) -> dict:
-    query = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
-    if _is_backend_fact_question(query):
+    query = _retrieval_query(state)
+    if state.get("rag_backend_fact_guard_enabled", True) and _is_backend_fact_question(query):
         return _fallback_answer("backend_fact", BACKEND_FACT_FALLBACK_ANSWER)
     if not query:
         return _fallback_answer("empty_query", RAG_FALLBACK_ANSWER)
@@ -338,6 +338,15 @@ def _fallback_answer(reason: str, answer: str) -> dict:
         "documents": [],
         "fallback_reason": reason,
     }
+
+
+def _retrieval_query(state: dict) -> str:
+    return normalize_text(
+        (state.get("intent_result") or {}).get("faq_query")
+        or (state.get("rewrite_result") or {}).get("normalized_query")
+        or state.get("rewritten_question")
+        or state.get("raw_user_input")
+    )
 
 
 def _build_answer_from_context(context: dict) -> dict:
