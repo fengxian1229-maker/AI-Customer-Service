@@ -13,7 +13,7 @@ from app.db.repositories import (
 from app.graph.checkpointing import build_checkpointer
 from app.llm.provider import build_llm_provider
 from app.schemas.events import InboundEvent
-from app.services.gateway import GatewayService
+from app.services.llm_first_gateway import LLMFirstGatewayService
 from app.services.rag import RagService
 
 
@@ -100,7 +100,7 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
                 "llm_sop_slot_fallback_to_deterministic": getattr(settings, "llm_sop_slot_fallback_to_deterministic", True),
             }
         )
-    service = GatewayService(**service_kwargs)
+    service = LLMFirstGatewayService(**service_kwargs)
     return inbound_repository, service, managed_checkpointer
 
 
