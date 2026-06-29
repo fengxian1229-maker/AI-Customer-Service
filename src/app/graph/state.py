@@ -27,6 +27,7 @@ class GraphState(TypedDict, total=False):
     llm_intent_result: dict[str, Any] | None
     route: str | None
     route_source: str | None
+    route_locked: bool
     rewrite_source: str | None
     rag_context: dict[str, Any] | None
     rag_result: dict[str, Any] | None
