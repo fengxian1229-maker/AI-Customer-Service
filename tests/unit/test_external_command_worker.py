@@ -678,7 +678,7 @@ def test_external_command_worker_retryable_reaches_terminal_after_max_retries_in
         )
     )
 
-    assert result[0]["status"] == "RETRYABLE"
+    assert result[0]["status"] == "FAILED"
     assert repository.row["status"] == "FAILED"
     assert repository.row["retry_count"] == 2
     assert second == []
@@ -724,6 +724,7 @@ def test_external_command_worker_run_once_summary_counts_failed_retryable_skippe
             {"id": 5, "status": "RETRYABLE"},
             {"id": 6, "status": "SENT"},
             {"id": 7, "status": "DRY_RUN_DONE", "result_insert": {"inserted": True}},
+            {"id": 8, "status": "FAILED"},
         ]
 
     monkeypatch.setattr(external_command_worker, "Settings", FakeSettings)
@@ -735,9 +736,9 @@ def test_external_command_worker_run_once_summary_counts_failed_retryable_skippe
 
     result = asyncio.run(external_command_worker.run_once(limit=20, dry_run=True, emit_result=True))
 
-    assert result["processed"] == 7
-    assert result["failed"] == 3
-    assert result["terminal_failed"] == 3
+    assert result["processed"] == 8
+    assert result["failed"] == 4
+    assert result["terminal_failed"] == 4
     assert result["retryable"] == 1
     assert result["skipped"] == 1
     assert result["blocked"] == 1

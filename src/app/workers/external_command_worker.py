@@ -208,8 +208,8 @@ async def _process_real_command(
         )
     except Exception as exc:
         status = classify_handoff_error(exc)
-        await _mark_command_status(repository, command["id"], status, str(exc), max_retries=max_retries)
-        return {"id": command["id"], "command_type": command_type, "status": status, "error": str(exc)}
+        final_status = await _mark_command_status(repository, command["id"], status, str(exc), max_retries=max_retries)
+        return {"id": command["id"], "command_type": command_type, "status": final_status, "error": str(exc)}
 
     result_json = {
         "status": "TRANSFERRED",
@@ -339,20 +339,27 @@ async def _mark_command_status(
     status: str,
     error: str | None,
     max_retries: int = 3,
-) -> None:
+) -> str:
     if status == "RETRYABLE":
+        if hasattr(repository, "mark_processing_failed_and_get_status"):
+            return await repository.mark_processing_failed_and_get_status(command_id, error or status, max_retries=max_retries)
         if hasattr(repository, "mark_processing_failed"):
-            await repository.mark_processing_failed(command_id, error or status, max_retries=max_retries)
-            return
+            final_status = await repository.mark_processing_failed(command_id, error or status, max_retries=max_retries)
+            if isinstance(final_status, str):
+                return final_status
+            row = getattr(repository, "row", None)
+            if isinstance(row, dict) and isinstance(row.get("status"), str):
+                return row["status"]
+            return status
         if hasattr(repository, "mark_retryable"):
             await repository.mark_retryable(command_id, error or status)
-            return
+            return status
     if hasattr(repository, "mark_status"):
         await repository.mark_status(command_id, status, error)
-        return
+        return status
     if hasattr(repository, "mark_failed"):
         await repository.mark_failed(command_id, error or status)
-        return
+        return status
     raise AttributeError("repository does not support status updates")
 
 

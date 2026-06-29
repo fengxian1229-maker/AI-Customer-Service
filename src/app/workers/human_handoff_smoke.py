@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import json
+import os
+import socket
 
 import aiomysql
 
@@ -20,10 +22,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     scope = parser.add_mutually_exclusive_group(required=True)
     scope.add_argument("--inbound-event-id", type=int)
     scope.add_argument("--chat-id")
-    parser.add_argument("--dry-run", action="store_true", default=True)
+    parser.add_argument("--dry-run", action="store_true", default=True, help="Compatibility flag; default smoke mode is plan-only dry-run.")
     parser.add_argument("--consume-dry-run", action="store_true")
     parser.add_argument("--execute-human-handoff", action="store_true")
     parser.add_argument("--emit-result", action="store_true", default=True)
+    parser.add_argument("--worker-id")
+    parser.add_argument("--lease-seconds", type=int, default=60)
     return parser
 
 
@@ -34,6 +38,7 @@ async def run(argv: list[str] | None = None) -> dict:
         livechat_account_id="unused-for-human-handoff-smoke",
     )
     pool = await create_pool(settings)
+    worker_id = args.worker_id or default_worker_id()
     try:
         command = await _fetch_scoped_handoff_command(pool, inbound_event_id=args.inbound_event_id, chat_id=args.chat_id)
         if not command:
@@ -46,12 +51,56 @@ async def run(argv: list[str] | None = None) -> dict:
                 status_after=None,
                 block_reason="no pending human_handoff.requested command found for scope",
                 admin_summary=await _fetch_handoff_admin_summary(pool, chat_id=args.chat_id, conversation_id=None),
+                worker_id=worker_id,
             )
 
         status_before = await _fetch_conversation_status(pool, command["conversation_id"])
         repository = ExternalCommandRepository(pool)
         result_repository = ExternalCommandResultRepository(pool) if args.emit_result else None
         conversation_repository = ConversationRepository(pool)
+        lease_attempted = bool(args.execute_human_handoff or args.consume_dry_run)
+        lease_acquired = False
+        lease_blocked_reason = None
+        if lease_attempted:
+            leased_command = await _lease_scoped_handoff_command(
+                pool,
+                command_id=command["id"],
+                worker_id=worker_id,
+                lease_seconds=args.lease_seconds,
+            )
+            if not leased_command:
+                lease_blocked_reason = "command is locked or no longer pending"
+                command_result = {
+                    "id": command["id"],
+                    "command_type": command["command_type"],
+                    "status": command.get("status"),
+                    "error": lease_blocked_reason,
+                    "lease_attempted": True,
+                    "lease_acquired": False,
+                    "lease_blocked_reason": lease_blocked_reason,
+                }
+                status_after = await _fetch_conversation_status(pool, command["conversation_id"])
+                return _summary(
+                    args=args,
+                    settings=settings,
+                    command=command,
+                    command_result=command_result,
+                    status_before=status_before,
+                    status_after=status_after,
+                    block_reason=lease_blocked_reason,
+                    admin_summary=await _fetch_handoff_admin_summary(
+                        pool,
+                        chat_id=command.get("chat_id") or args.chat_id,
+                        conversation_id=command.get("conversation_id"),
+                    ),
+                    worker_id=worker_id,
+                    lease_attempted=True,
+                    lease_acquired=False,
+                    lease_blocked_reason=lease_blocked_reason,
+                )
+            command = leased_command
+            lease_acquired = True
+
         if args.execute_human_handoff:
             command_result = await _process_real_command(
                 command,
@@ -87,6 +136,10 @@ async def run(argv: list[str] | None = None) -> dict:
                 chat_id=command.get("chat_id") or args.chat_id,
                 conversation_id=command.get("conversation_id"),
             ),
+            worker_id=worker_id,
+            lease_attempted=lease_attempted,
+            lease_acquired=lease_acquired,
+            lease_blocked_reason=lease_blocked_reason,
         )
     finally:
         pool.close()
@@ -120,6 +173,14 @@ async def _fetch_scoped_handoff_command(pool, inbound_event_id: int | None, chat
         return None
     row["payload_json"] = json_loads(row["payload_json"])
     return row
+
+
+async def _lease_scoped_handoff_command(pool, command_id: int, worker_id: str, lease_seconds: int) -> dict | None:
+    return await ExternalCommandRepository(pool).lease_pending_by_id(
+        command_id=command_id,
+        worker_id=worker_id,
+        lease_seconds=lease_seconds,
+    )
 
 
 async def _fetch_conversation_status(pool, conversation_id: str) -> str | None:
@@ -237,9 +298,15 @@ def _summary(
     status_after: str | None,
     block_reason: str | None,
     admin_summary: dict | None = None,
+    worker_id: str | None = None,
+    lease_attempted: bool = False,
+    lease_acquired: bool = False,
+    lease_blocked_reason: str | None = None,
 ) -> dict:
     command_result = command_result or {}
     transfer_attempted = bool(args.execute_human_handoff and command and not _handoff_block_reason(command, settings, True))
+    if lease_attempted and not lease_acquired:
+        transfer_attempted = False
     transfer_success = command_result.get("status") == "SENT"
     transfer_blocked = bool(block_reason and not transfer_success)
     smoke_success = bool(command_result.get("plan_only") and command)
@@ -252,6 +319,7 @@ def _summary(
         "plan_only": bool(command_result.get("plan_only")),
         "consume_dry_run": bool(getattr(args, "consume_dry_run", False)),
         "execute_human_handoff": args.execute_human_handoff,
+        "worker_id": worker_id,
         "chat_id": (command or {}).get("chat_id") or args.chat_id,
         "thread_id": (command or {}).get("thread_id"),
         "target_group_id": settings.livechat_handoff_target_group_id,
@@ -260,6 +328,10 @@ def _summary(
         "transfer_success": transfer_success,
         "transfer_blocked": transfer_blocked,
         "block_reason": block_reason,
+        "lease_attempted": lease_attempted,
+        "lease_acquired": lease_acquired,
+        "lease_blocked_reason": lease_blocked_reason,
+        "locked_by": (command or {}).get("locked_by"),
         "conversation_status_before": status_before,
         "conversation_status_after": status_after,
         "external_command_status": command_result.get("status") or (command or {}).get("status"),
@@ -268,6 +340,10 @@ def _summary(
         "would_transfer": command_result.get("would_transfer"),
         "admin_summary": admin_summary or {},
     }
+
+
+def default_worker_id() -> str:
+    return f"human-handoff-smoke-{socket.gethostname()}-{os.getpid()}"
 
 
 def main(argv: list[str] | None = None) -> int:

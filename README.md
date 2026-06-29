@@ -128,11 +128,14 @@ uv run --group dev python -m app.workers.external_command_worker --once --execut
 Scoped handoff smoke, default plan-only and read-only:
 
 ```bash
-PYTHONPATH=src uv run --group dev python -m app.workers.human_handoff_smoke --inbound-event-id <id>
-PYTHONPATH=src uv run --group dev python -m app.workers.human_handoff_smoke --chat-id <livechat_chat_id>
+LIVECHAT_HANDOFF_ENABLED=true LIVECHAT_HANDOFF_TARGET_GROUP_ID=<positive_group_id> PYTHONPATH=src \
+uv run --group dev python -m app.workers.human_handoff_smoke --inbound-event-id <id>
+
+LIVECHAT_HANDOFF_ENABLED=true LIVECHAT_HANDOFF_TARGET_GROUP_ID=<positive_group_id> PYTHONPATH=src \
+uv run --group dev python -m app.workers.human_handoff_smoke --chat-id <livechat_chat_id>
 ```
 
-The default smoke command does not update `external_commands` and does not write `external_command_results`. Use `--consume-dry-run` only when you intentionally want to mark a scoped command `DRY_RUN_DONE`.
+The default smoke command uses env only to evaluate the real handoff gate. It does not lease the command, update `external_commands`, write `external_command_results`, or transfer LiveChat. Use `--consume-dry-run` only when you intentionally want to lease and mark a scoped command `DRY_RUN_DONE`.
 
 Scoped handoff smoke, real transfer:
 

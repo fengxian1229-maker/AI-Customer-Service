@@ -1313,6 +1313,10 @@ def test_human_handoff_smoke_consume_dry_run_is_explicit(monkeypatch):
     async def fake_fetch_command(pool, inbound_event_id=None, chat_id=None):
         return command
 
+    async def fake_lease_command(pool, command_id, worker_id, lease_seconds):
+        calls["lease"] = (command_id, worker_id, lease_seconds)
+        return command
+
     async def fake_fetch_status(pool, conversation_id):
         return "AI_ACTIVE"
 
@@ -1326,14 +1330,18 @@ def test_human_handoff_smoke_consume_dry_run_is_explicit(monkeypatch):
     monkeypatch.setattr(human_handoff_smoke, "Settings", FakeSettings)
     monkeypatch.setattr(human_handoff_smoke, "create_pool", fake_create_pool)
     monkeypatch.setattr(human_handoff_smoke, "_fetch_scoped_handoff_command", fake_fetch_command)
+    monkeypatch.setattr(human_handoff_smoke, "_lease_scoped_handoff_command", fake_lease_command)
     monkeypatch.setattr(human_handoff_smoke, "_fetch_conversation_status", fake_fetch_status)
     monkeypatch.setattr(human_handoff_smoke, "_process_dry_run_command", fake_dry_run)
     monkeypatch.setattr(human_handoff_smoke, "_process_real_command", fail_real)
 
     result = asyncio.run(human_handoff_smoke.run(["--chat-id", "chat-1", "--consume-dry-run"]))
 
+    assert calls["lease"][0] == 8
     assert calls["dry_run"] == (command, True)
     assert result["plan_only"] is False
+    assert result["lease_attempted"] is True
+    assert result["lease_acquired"] is True
     assert result["external_command_status"] == "DRY_RUN_DONE"
 
 
@@ -1376,6 +1384,10 @@ def test_human_handoff_smoke_execute_calls_real_path(monkeypatch):
     async def fake_fetch_command(pool, inbound_event_id=None, chat_id=None):
         return command
 
+    async def fake_lease_command(pool, command_id, worker_id, lease_seconds):
+        calls["lease"] = (command_id, worker_id, lease_seconds)
+        return {**command, "locked_by": worker_id}
+
     async def fake_fetch_status(pool, conversation_id):
         return "HUMAN_ACTIVE"
 
@@ -1389,6 +1401,7 @@ def test_human_handoff_smoke_execute_calls_real_path(monkeypatch):
     monkeypatch.setattr(human_handoff_smoke, "Settings", FakeSettings)
     monkeypatch.setattr(human_handoff_smoke, "create_pool", fake_create_pool)
     monkeypatch.setattr(human_handoff_smoke, "_fetch_scoped_handoff_command", fake_fetch_command)
+    monkeypatch.setattr(human_handoff_smoke, "_lease_scoped_handoff_command", fake_lease_command)
     monkeypatch.setattr(human_handoff_smoke, "_fetch_conversation_status", fake_fetch_status)
     monkeypatch.setattr(human_handoff_smoke, "_process_real_command", fake_real)
     monkeypatch.setattr(human_handoff_smoke, "_process_dry_run_command", fail_dry_run)
@@ -1396,9 +1409,82 @@ def test_human_handoff_smoke_execute_calls_real_path(monkeypatch):
     result = asyncio.run(human_handoff_smoke.run(["--chat-id", "chat-1", "--execute-human-handoff"]))
 
     assert calls["settings_kwargs"] == {}
-    assert calls["real"] == (command, True, True)
+    assert calls["lease"][0] == 9
+    assert calls["real"][0]["id"] == command["id"]
+    assert calls["real"][0]["locked_by"] == result["worker_id"]
+    assert calls["real"][1:] == (True, True)
+    assert result["lease_attempted"] is True
+    assert result["lease_acquired"] is True
+    assert result["worker_id"] == result["locked_by"]
     assert result["transfer_attempted"] is True
     assert result["transfer_success"] is True
+
+
+def test_human_handoff_smoke_execute_blocks_when_scoped_lease_not_acquired(monkeypatch):
+    import asyncio
+
+    from app.workers import human_handoff_smoke
+
+    calls = {}
+
+    class FakeSettings:
+        livechat_handoff_target_group_id = 23
+        livechat_handoff_enabled = True
+
+        def __init__(self, **kwargs) -> None:
+            pass
+
+    class FakePool:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    async def fake_create_pool(settings):
+        return FakePool()
+
+    command = {
+        "id": 10,
+        "tenant_id": "default",
+        "conversation_id": "livechat:chat-1",
+        "chat_id": "chat-1",
+        "thread_id": "thread-1",
+        "inbound_event_id": 58,
+        "command_type": "human_handoff.requested",
+        "payload_json": {},
+        "status": "PENDING",
+        "locked_by": "other-worker",
+    }
+
+    async def fake_fetch_command(pool, inbound_event_id=None, chat_id=None):
+        return command
+
+    async def fake_lease_command(pool, command_id, worker_id, lease_seconds):
+        calls["lease"] = (command_id, worker_id, lease_seconds)
+        return None
+
+    async def fake_fetch_status(pool, conversation_id):
+        return "AI_ACTIVE"
+
+    async def fail_real(*args, **kwargs):
+        raise AssertionError("must not execute without scoped lease")
+
+    monkeypatch.setattr(human_handoff_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(human_handoff_smoke, "create_pool", fake_create_pool)
+    monkeypatch.setattr(human_handoff_smoke, "_fetch_scoped_handoff_command", fake_fetch_command)
+    monkeypatch.setattr(human_handoff_smoke, "_lease_scoped_handoff_command", fake_lease_command)
+    monkeypatch.setattr(human_handoff_smoke, "_fetch_conversation_status", fake_fetch_status)
+    monkeypatch.setattr(human_handoff_smoke, "_process_real_command", fail_real)
+
+    result = asyncio.run(human_handoff_smoke.run(["--chat-id", "chat-1", "--execute-human-handoff"]))
+
+    assert calls["lease"][0] == 10
+    assert result["lease_attempted"] is True
+    assert result["lease_acquired"] is False
+    assert result["lease_blocked_reason"] == "command is locked or no longer pending"
+    assert result["locked_by"] == "other-worker"
+    assert result["transfer_attempted"] is False
 
 
 def test_gateway_llm_summary_reports_shadow_and_fallback_flags():

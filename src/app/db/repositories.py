@@ -547,7 +547,7 @@ class ExternalCommandRepository:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (json_dumps(patch), command_id))
 
-    async def mark_processing_failed(self, command_id: int, error: str, max_retries: int = 3) -> None:
+    async def mark_processing_failed(self, command_id: int, error: str, max_retries: int = 3) -> str:
         sql = """
         UPDATE external_commands
         SET retry_count = retry_count + 1,
@@ -562,6 +562,66 @@ class ExternalCommandRepository:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (max_retries, error, command_id))
+        return "RETRYABLE"
+
+    async def mark_processing_failed_and_get_status(self, command_id: int, error: str, max_retries: int = 3) -> str:
+        await self.mark_processing_failed(command_id, error, max_retries=max_retries)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT status FROM external_commands WHERE id = %s", (command_id,))
+                row = await cur.fetchone()
+        return row[0] if row else "FAILED"
+
+    async def lease_pending_by_id(self, command_id: int, worker_id: str, lease_seconds: int) -> dict | None:
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                row = await self._lease_pending_by_id_on_connection(conn, command_id, worker_id, lease_seconds)
+                await conn.commit()
+                return row
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def _lease_pending_by_id_on_connection(self, conn, command_id: int, worker_id: str, lease_seconds: int) -> dict | None:
+        select_sql = """
+        SELECT id
+        FROM external_commands
+        WHERE id = %s
+          AND status IN ('PENDING', 'RETRYABLE')
+          AND (locked_by IS NULL OR lease_expires_at IS NULL OR lease_expires_at < NOW(6))
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+        """
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(select_sql, (command_id,))
+            row = await cur.fetchone()
+            if not row:
+                return None
+            update_sql = """
+            UPDATE external_commands
+            SET leased_at = NOW(6),
+                lease_expires_at = DATE_ADD(NOW(6), INTERVAL %s SECOND),
+                locked_by = %s,
+                attempted_at = NOW(6),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """
+            await cur.execute(update_sql, (lease_seconds, worker_id, command_id))
+            fetch_sql = """
+            SELECT id, tenant_id, conversation_id, chat_id, thread_id, inbound_event_id,
+                   command_type, payload_json, status, retry_count, last_error,
+                   leased_at, lease_expires_at, locked_by, attempted_at, processed_at,
+                   dedup_key
+            FROM external_commands
+            WHERE id = %s
+            LIMIT 1
+            """
+            await cur.execute(fetch_sql, (command_id,))
+            leased = await cur.fetchone()
+        if leased:
+            leased["payload_json"] = json_loads(leased["payload_json"])
+        return leased
 
     async def recover_expired_leases(self) -> int:
         sql = """

@@ -1505,6 +1505,43 @@ def test_external_command_lease_pending_returns_empty_when_no_available_rows():
     assert "locked_by IS NULL OR lease_expires_at IS NULL OR lease_expires_at < NOW(6)" in cursor.sql
 
 
+def test_external_command_lease_pending_by_id_uses_scoped_skip_locked_and_returns_row():
+    import asyncio
+
+    class LeaseByIdCursor(FakeCursor):
+        def __init__(self) -> None:
+            super().__init__(rowcount=1)
+            self.executed = []
+
+        async def execute(self, sql, args):
+            self.sql = sql
+            self.args = args
+            self.executed.append((sql, args))
+
+        async def fetchone(self):
+            if self.sql.strip().startswith("SELECT id\n        FROM external_commands"):
+                return {"id": 9}
+            return {
+                "id": 9,
+                "payload_json": '{"human_handoff_stage":{"notice_sent":true}}',
+                "status": "PENDING",
+                "locked_by": "smoke-worker",
+            }
+
+    cursor = LeaseByIdCursor()
+    repository = ExternalCommandRepository(FakePool(cursor))
+
+    row = asyncio.run(repository.lease_pending_by_id(command_id=9, worker_id="smoke-worker", lease_seconds=45))
+
+    assert "WHERE id = %s" in cursor.executed[0][0]
+    assert "FOR UPDATE SKIP LOCKED" in cursor.executed[0][0]
+    assert "status IN ('PENDING', 'RETRYABLE')" in cursor.executed[0][0]
+    assert "lease_expires_at < NOW(6)" in cursor.executed[0][0]
+    assert cursor.executed[0][1] == (9,)
+    assert cursor.executed[1][1] == (45, "smoke-worker", 9)
+    assert row["payload_json"] == {"human_handoff_stage": {"notice_sent": True}}
+
+
 def test_external_command_release_and_processing_failure_and_recover_sql():
     import asyncio
 
