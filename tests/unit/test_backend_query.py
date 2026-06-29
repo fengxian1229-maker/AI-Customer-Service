@@ -382,3 +382,58 @@ def test_external_command_worker_execute_backend_disabled_returns_failed_config(
 
     assert result[0]["status"] == "FAILED_CONFIG"
     assert "backend_query_enabled is false" in result[0]["error"]
+
+
+def test_external_command_worker_execute_backend_config_failure_emits_failed_result():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self):
+            self.statuses = []
+
+        async def lease_pending(self, limit, worker_id, lease_seconds):
+            return [
+                {
+                    "id": 79,
+                    "tenant_id": "tenant-a",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 179,
+                    "command_type": "backend.query",
+                    "payload_json": {"intent": "withdrawal_blocked_or_rollover", "account_or_phone": "andy"},
+                }
+            ]
+
+        async def mark_status(self, command_id, status, error=None):
+            self.statuses.append((command_id, status, error))
+
+    class FakeResultRepository:
+        def __init__(self):
+            self.inserted = []
+
+        async def insert_idempotent(self, result):
+            self.inserted.append(result)
+            return {"inserted": True, "duplicate": False, "id": 90}
+
+    result_repository = FakeResultRepository()
+    result = asyncio.run(
+        process_pending_commands(
+            FakeCommandRepository(),
+            result_repository=result_repository,
+            dry_run=False,
+            execute_backend=True,
+            emit_result=True,
+            settings=Settings(livechat_agent_access_token="unused", livechat_account_id="unused", backend_query_enabled=False),
+            worker_id="worker-a",
+        )
+    )
+
+    assert result[0]["status"] == "FAILED_CONFIG"
+    assert result_repository.inserted[0]["result_type"] == "backend.query.result"
+    assert result_repository.inserted[0]["result_json"] == {
+        "status": "failed",
+        "error_code": "FAILED_CONFIG",
+        "error_message": "backend_query_enabled is false",
+    }

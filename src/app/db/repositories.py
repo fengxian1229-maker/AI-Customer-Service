@@ -147,8 +147,8 @@ class ConversationRepository:
         sql = """
         UPDATE conversation_states
         SET status = COALESCE(%s, status),
-            active_workflow = COALESCE(%s, active_workflow),
-            workflow_stage = COALESCE(%s, workflow_stage),
+            active_workflow = %s,
+            workflow_stage = %s,
             slot_memory = CAST(%s AS JSON)
         WHERE conversation_id = %s
         """

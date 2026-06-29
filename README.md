@@ -144,6 +144,7 @@ PYTHONPATH=src uv run --group dev python -m app.workers.external_result_consumer
 
 See [docs/p9-a-telegram-sop-closed-loop.md](/Users/andy/ai-agent/docs/p9-a-telegram-sop-closed-loop.md).
 See [docs/smoke/p10-a1-tac-backend-query-client-smoke.md](/Users/andy/ai-agent/docs/smoke/p10-a1-tac-backend-query-client-smoke.md).
+See [docs/smoke/p10-a2-withdrawal-blocked-backend-closed-loop-smoke.md](/Users/andy/ai-agent/docs/smoke/p10-a2-withdrawal-blocked-backend-closed-loop-smoke.md).
 
 Human handoff real execution:
 

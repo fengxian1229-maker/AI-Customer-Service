@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from app.db.repositories import (
+    ConversationRepository,
     ConversationMessageRepository,
     ExternalCommandRepository,
     ExternalCommandResultRepository,
@@ -94,6 +95,30 @@ def make_inbound_event() -> InboundEvent:
         payload_json={"ingress_source": "polling"},
         ignored=False,
     )
+
+
+def test_conversation_update_workflow_state_allows_clearing_active_workflow():
+    import asyncio
+
+    cursor = FakeCursor(rowcount=1)
+    repository = ConversationRepository(FakePool(cursor))
+
+    asyncio.run(
+        repository.update_workflow_state(
+            "livechat:chat-1",
+            {
+                "status": "AI_ACTIVE",
+                "active_workflow": None,
+                "workflow_stage": "completed",
+                "slot_memory": {"backend_query_status": "success"},
+            },
+        )
+    )
+
+    assert "active_workflow = %s" in cursor.sql
+    assert "active_workflow = COALESCE" not in cursor.sql
+    assert cursor.args[1] is None
+    assert cursor.args[2] == "completed"
 
 
 async def run_insert(rowcount: int):

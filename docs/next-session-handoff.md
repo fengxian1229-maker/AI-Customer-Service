@@ -28,6 +28,19 @@ Local path: `/Users/andy/ai-agent`
 - Still not implemented: DB-backed tenant backend config, Vision/OCR, Telegram inbound/reply backflow, LiveChat WebSocket/Webhook, LLM tool calling, LLM-generated backend conclusions, and any third-party backend write operation.
 - P9-A.4 follow-up remains important: screenshot slots must not be satisfied by arbitrary attachment URLs; the fix needs attachment download/MIME checks and Vision/OCR or multimodal proof classification.
 
+## Latest P10-A.2 Status
+
+- Added closed-loop diagnostics for `withdrawal_blocked_or_rollover -> backend.query -> backend.query.result -> outbound answer`.
+- Added read-only admin CLI: `python -m app.workers.backend_sop_smoke_admin`.
+  - `latest --chat-id <chat_id>`
+  - `by-inbound --inbound-event-id <id>`
+  - `assert-closed-loop --inbound-event-id <id>`
+- Hardened `external_result_consumer` so `backend.query.result` with `status='failed'` is processed once, writes a safe fallback reply, and does not retry the result queue repeatedly.
+- Fixed conversation state completion semantics so backend success can clear `active_workflow` and set `workflow_stage='completed'`.
+- Extended deterministic identity extraction for Chinese account labels such as `用户名`, `账号`, and `账户`, so the suggested Chinese smoke text can trigger backend query when it includes a username.
+- Added smoke guide: `/Users/andy/ai-agent/docs/smoke/p10-a2-withdrawal-blocked-backend-closed-loop-smoke.md`.
+- Still not implemented: DB-backed tenant backend config, tenant runtime profile, WebSocket/Webhook, Telegram inbound/reply backflow, Vision/OCR, LLM tool calling, LLM backend conclusions, deposit/withdrawal missing backend automation, and backend writes.
+
 ## Copy This Prompt Into A New Codex Session
 
 ```text

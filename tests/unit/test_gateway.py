@@ -381,6 +381,31 @@ def test_gateway_service_human_handoff_keeps_existing_external_command_semantics
     assert outbound_repository.inserted == []
 
 
+def test_gateway_service_withdrawal_blocked_generates_backend_query_without_rag_or_telegram():
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    rag_service = FakeRagService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=rag_service,
+    )
+
+    result = asyncio.run(service.process_event(88, make_event_with_text("提款不了，提示还有流水，用户名 andy123")))
+
+    assert rag_service.calls == []
+    assert result["graph_state"]["intent_result"]["intent"] == "withdrawal_blocked_or_rollover"
+    assert result["graph_state"]["workflow_stage"] == "backend_querying"
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "一般无法提款通常与流水要求或风控限制有关。已收到你的资料，我们正在进一步查询。"
+    assert [command["command_type"] for command in external_repository.inserted] == ["backend.query"]
+    assert external_repository.inserted[0]["payload_json"]["intent"] == "withdrawal_blocked_or_rollover"
+    assert external_repository.inserted[0]["payload_json"]["account_or_phone"] == "andy123"
+
+
 def test_gateway_service_human_active_records_inbound_but_does_not_run_graph_or_enqueue_work():
     conversation_repository = FakeConversationRepository(status="HUMAN_ACTIVE")
     outbound_repository = FakeOutboundRepository()

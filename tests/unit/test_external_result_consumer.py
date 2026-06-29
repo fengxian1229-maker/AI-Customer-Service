@@ -355,31 +355,27 @@ def test_result_consumer_backend_query_result_success_uses_result_answer():
     assert "mock 后台结果" in outbound_repository.inserted[0]["payload_json"]["text"]
 
 
-def test_result_consumer_backend_query_result_failed_is_retryable_failure():
-    from app.workers.external_result_consumer import process_pending_results
+def test_result_consumer_backend_query_result_failed_writes_safe_fallback_without_retry():
+    result = make_result("backend.query.result") | {
+        "result_json": {
+            "status": "failed",
+            "error_code": "FAILED_CONFIG",
+            "error_message": "Authorization Bearer secret-token password=secret",
+        }
+    }
+    processed, result_repository, conversation_repository, outbound_repository = run_consumer_for(result)
 
-    result_repository = FakeResultRepository(
-        [
-            make_result("backend.query.result")
-            | {"result_json": {"status": "failed", "error_code": "NOT_FOUND", "error_message": "找不到订单"}}
-        ]
-    )
-
-    processed = asyncio.run(
-        process_pending_results(
-            result_repository=result_repository,
-            conversation_repository=FakeConversationRepository(),
-            outbound_repository=FakeOutboundRepository(),
-            transaction_repository=FakeTransactionRepository(result_repository, FakeConversationRepository(), FakeOutboundRepository()),
-            limit=20,
-            worker_id="consumer-a",
-            max_retries=2,
-        )
-    )
-
-    assert result_repository.processed == []
-    assert result_repository.failed == [(7, "backend.query.result failed: NOT_FOUND 找不到订单", 2)]
-    assert processed[0]["status"] == "FAILED"
+    assert processed[0]["status"] == "PROCESSED"
+    assert result_repository.processed == [7]
+    assert result_repository.failed == []
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "后台查询暂时无法完成，我们会继续为你人工复核，请稍候。"
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "WAITING_EXTERNAL"
+    assert graph_state["active_workflow"] == "withdrawal_blocked_or_rollover"
+    assert graph_state["workflow_stage"] == "backend_query_failed_waiting_manual"
+    assert graph_state["slot_memory"]["backend_query_status"] == "failed"
+    assert graph_state["slot_memory"]["backend_query_error_code"] == "FAILED_CONFIG"
+    assert "secret-token" not in str(outbound_repository.inserted)
 
 
 def test_result_consumer_marks_failed_when_outbound_write_fails():

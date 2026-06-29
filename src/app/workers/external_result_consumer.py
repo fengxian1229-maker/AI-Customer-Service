@@ -161,6 +161,23 @@ def build_result_handler(row: dict) -> dict:
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)
         return resolved
     if result_type == "backend.query.result":
+        if result_json.get("status") == "failed":
+            resolved = {
+                "text": "后台查询暂时无法完成，我们会继续为你人工复核，请稍候。",
+                "summary_sender_role": "backend",
+                "summary_text": "后台查询失败，已生成安全兜底回复。",
+                "graph_state": {
+                    "status": "WAITING_EXTERNAL",
+                    "active_workflow": "withdrawal_blocked_or_rollover",
+                    "workflow_stage": "backend_query_failed_waiting_manual",
+                    "slot_memory": {
+                        "backend_query_status": "failed",
+                        "backend_query_error_code": result_json.get("error_code") or "UNKNOWN",
+                    },
+                },
+            }
+            resolved["summary_message"] = build_external_result_summary_message(row, resolved)
+            return resolved
         if result_json.get("status") != "success":
             error_code = result_json.get("error_code") or "UNKNOWN"
             error_message = result_json.get("error_message") or ""

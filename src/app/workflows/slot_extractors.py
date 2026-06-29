@@ -35,7 +35,7 @@ def extract_identity(text: str | None) -> dict[str, str] | None:
     if phone:
         return {"type": "phone", "value": re.sub(r"\s+", "", phone.group(0))}
     username = re.search(
-        r"\b(?:usuario|user|username|cuenta|mi usuario es|mi user es)\s*[:：-]?\s*([a-zA-Z][a-zA-Z0-9_.-]{3,30})\b",
+        r"(?:\b(?:usuario|user|username|cuenta|mi usuario es|mi user es)\b|用户名|用戶名|账号|帳號|账户|賬戶)\s*(?:是|为|為)?\s*[:：-]?\s*([a-zA-Z][a-zA-Z0-9_.-]{3,30})\b",
         raw,
         re.I,
     )
