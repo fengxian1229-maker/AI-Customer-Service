@@ -59,7 +59,7 @@ Current RAG limits:
 - Text blocks are sent with `livechat.send_text`.
 - Image blocks currently use sender-worker MVP URL text fallback, not real LiveChat image upload.
 - Buttons blocks currently use `livechat.buttons_preview` and are marked `SKIPPED_PREVIEW`, not real rich buttons.
-- No real backend calls.
+- Backend queries are available only through explicit `external_command_worker --execute-backend` with `BACKEND_QUERY_ENABLED=true`; default runtime does not call real backend systems.
 - Telegram SOP delivery is available only through explicit `external_command_worker --execute-telegram` with `TELEGRAM_SOP_ENABLED=true`; Telegram inbound/webhook/getUpdates is not implemented.
 - DB-backed RAG retrieval is prefetched only for deterministic `route=faq`.
 - SOP, human handoff, emotion care, clarification, and `faq_then_sop` traffic do not prefetch `knowledge_documents`.
@@ -134,7 +134,16 @@ uv run --group dev python -m app.workers.external_command_worker --once --execut
 PYTHONPATH=src uv run --group dev python -m app.workers.external_result_consumer --once
 ```
 
+Backend query real execution:
+
+```bash
+BACKEND_QUERY_ENABLED=true BACKEND_PROVIDER_TYPE=tac BACKEND_BASE_URL=<base_url> BACKEND_AUTHORIZATION=<token> BACKEND_MERCHANT_CODE=<merchant> PYTHONPATH=src \
+uv run --group dev python -m app.workers.external_command_worker --once --execute-backend --emit-result
+PYTHONPATH=src uv run --group dev python -m app.workers.external_result_consumer --once
+```
+
 See [docs/p9-a-telegram-sop-closed-loop.md](/Users/andy/ai-agent/docs/p9-a-telegram-sop-closed-loop.md).
+See [docs/smoke/p10-a1-tac-backend-query-client-smoke.md](/Users/andy/ai-agent/docs/smoke/p10-a1-tac-backend-query-client-smoke.md).
 
 Human handoff real execution:
 

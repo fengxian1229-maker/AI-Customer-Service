@@ -35,6 +35,14 @@ def test_external_command_worker_cli_accepts_execute_telegram():
     assert args.execute_telegram is True
 
 
+def test_external_command_worker_cli_accepts_execute_backend():
+    from app.workers.external_command_worker import build_arg_parser
+
+    args = build_arg_parser().parse_args(["--once", "--execute-backend"])
+
+    assert args.execute_backend is True
+
+
 def test_external_command_worker_cli_accepts_lease_options():
     from app.workers.external_command_worker import build_arg_parser
 

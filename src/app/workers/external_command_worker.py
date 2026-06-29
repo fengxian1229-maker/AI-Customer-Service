@@ -11,8 +11,11 @@ from app.channels.telegram.sender_client import TelegramApiError, TelegramSender
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import ConversationRepository, ExternalCommandRepository, ExternalCommandResultRepository
+from app.services.backend_query_service import BackendQueryService
 from app.services.telegram_case_card import build_telegram_case_append, build_telegram_case_card
 from app.services.telegram_target_resolver import resolve_telegram_target
+from app.backends.factory import BackendProviderFactory
+from app.backends.resolver import TenantBackendConfigResolver
 
 
 SUPPORTED_COMMAND_TYPES = {
@@ -30,7 +33,7 @@ logger = logging.getLogger(__name__)
 HUMAN_HANDOFF_NOTICE_TEXT = "我会为你转接真人客服继续协助。"
 HUMAN_HANDOFF_COMMAND_TYPE = "human_handoff.requested"
 HUMAN_HANDOFF_RESULT_TYPE = "human_handoff.transfer_chat.result"
-NO_EXECUTION_MODE_ERROR = "must pass either --dry-run or --execute-human-handoff or --execute-telegram"
+NO_EXECUTION_MODE_ERROR = "must pass either --dry-run or --execute-human-handoff or --execute-telegram or --execute-backend"
 FAILED_AFTER_EXTERNAL_SUCCESS = "FAILED_AFTER_EXTERNAL_SUCCESS"
 
 
@@ -78,6 +81,7 @@ async def process_pending_commands(
     emit_result: bool = False,
     execute_human_handoff: bool = False,
     execute_telegram: bool = False,
+    execute_backend: bool = False,
     settings: Settings | None = None,
     sender_client_factory=None,
     telegram_client_factory=None,
@@ -85,7 +89,12 @@ async def process_pending_commands(
     lease_seconds: int = 60,
     max_retries: int = 3,
 ) -> list[dict]:
-    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff, execute_telegram=execute_telegram)
+    validate_execution_mode(
+        dry_run=dry_run,
+        execute_human_handoff=execute_human_handoff,
+        execute_telegram=execute_telegram,
+        execute_backend=execute_backend,
+    )
     if emit_result and result_repository is None:
         raise ValueError("result_repository is required when emit_result=True")
 
@@ -113,6 +122,7 @@ async def process_pending_commands(
                     emit_result=emit_result,
                     execute_human_handoff=execute_human_handoff,
                     execute_telegram=execute_telegram,
+                    execute_backend=execute_backend,
                     settings=settings,
                     sender_client_factory=sender_client_factory,
                     telegram_client_factory=telegram_client_factory,
@@ -152,6 +162,7 @@ async def _process_real_command(
     emit_result: bool,
     execute_human_handoff: bool,
     execute_telegram: bool,
+    execute_backend: bool,
     settings: Settings | None,
     sender_client_factory,
     telegram_client_factory,
@@ -167,6 +178,16 @@ async def _process_real_command(
             execute_telegram=execute_telegram,
             settings=settings,
             telegram_client_factory=telegram_client_factory,
+            max_retries=max_retries,
+        )
+    if command_type == "backend.query":
+        return await _process_real_backend_query_command(
+            command,
+            repository=repository,
+            result_repository=result_repository,
+            emit_result=emit_result,
+            execute_backend=execute_backend,
+            settings=settings,
             max_retries=max_retries,
         )
     if command_type != HUMAN_HANDOFF_COMMAND_TYPE:
@@ -345,9 +366,95 @@ async def _process_real_telegram_command(
     return item
 
 
-def validate_execution_mode(dry_run: bool, execute_human_handoff: bool, execute_telegram: bool = False) -> None:
-    if not dry_run and not execute_human_handoff and not execute_telegram:
+async def _process_real_backend_query_command(
+    command: dict,
+    repository: ExternalCommandRepository,
+    result_repository: ExternalCommandResultRepository | None,
+    emit_result: bool,
+    execute_backend: bool,
+    settings: Settings | None,
+    max_retries: int = 3,
+) -> dict:
+    block_reason = _backend_block_reason(settings, execute_backend)
+    if block_reason:
+        result_insert = None
+        result_json = {"status": "failed", "error_code": "FAILED_CONFIG", "error_message": block_reason}
+        if emit_result:
+            if not result_repository:
+                raise ValueError("result_repository is required when emit_result=True")
+            result_insert = await result_repository.insert_idempotent(
+                _build_result_record(command, "backend.query.result", result_json)
+            )
+        await _mark_command_status(repository, command["id"], "FAILED_CONFIG", block_reason, max_retries=max_retries)
+        item = {"id": command["id"], "command_type": command["command_type"], "status": "FAILED_CONFIG", "error": block_reason}
+        if emit_result:
+            item["result_insert"] = result_insert
+        return item
+
+    service = _build_backend_query_service(settings)
+    result_json = service.execute(
+        command.get("payload_json") or {},
+        tenant_id=(command.get("payload_json") or {}).get("tenant_id") or command.get("tenant_id"),
+        channel_type="livechat",
+        channel_instance_id=command.get("chat_id"),
+    )
+    if result_json.get("status") != "success":
+        status = result_json.get("error_code") or "FAILED_BACKEND_QUERY"
+        result_insert = None
+        if emit_result:
+            if not result_repository:
+                raise ValueError("result_repository is required when emit_result=True")
+            result_insert = await result_repository.insert_idempotent(
+                _build_result_record(command, "backend.query.result", result_json)
+            )
+        await _mark_command_status(repository, command["id"], status, result_json.get("error_message"), max_retries=max_retries)
+        item = {
+            "id": command["id"],
+            "command_type": command["command_type"],
+            "status": status,
+            "error": result_json.get("error_message"),
+            "backend_result": result_json,
+        }
+        if emit_result:
+            item["result_insert"] = result_insert
+        return item
+
+    result_insert = None
+    if emit_result:
+        if not result_repository:
+            raise ValueError("result_repository is required when emit_result=True")
+        result_insert = await result_repository.insert_idempotent(
+            _build_result_record(command, "backend.query.result", result_json)
+        )
+    await repository.mark_sent(command["id"])
+    item = {"id": command["id"], "command_type": command["command_type"], "status": "SENT", "backend_result": result_json}
+    if emit_result:
+        item["result_insert"] = result_insert
+    return item
+
+
+def validate_execution_mode(
+    dry_run: bool,
+    execute_human_handoff: bool,
+    execute_telegram: bool = False,
+    execute_backend: bool = False,
+) -> None:
+    if not dry_run and not execute_human_handoff and not execute_telegram and not execute_backend:
         raise ValueError(NO_EXECUTION_MODE_ERROR)
+
+
+def _backend_block_reason(settings: Settings | None, execute_backend: bool) -> str | None:
+    if not execute_backend:
+        return "--execute-backend is required"
+    if settings is None:
+        return "settings are required for backend execution"
+    if not settings.backend_query_enabled:
+        return "backend_query_enabled is false"
+    return None
+
+
+def _build_backend_query_service(settings: Settings) -> BackendQueryService:
+    return BackendQueryService(TenantBackendConfigResolver(settings), BackendProviderFactory())
 
 
 def _telegram_block_reason(command: dict, settings: Settings | None, execute_telegram: bool) -> str | None:
@@ -559,6 +666,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Explicitly allow real LiveChat transfer_chat execution for human_handoff.requested.",
     )
     parser.add_argument("--execute-telegram", action="store_true", help="Explicitly allow real Telegram SOP delivery.")
+    parser.add_argument("--execute-backend", action="store_true", help="Explicitly allow real backend.query execution.")
     parser.add_argument("--emit-result", action="store_true", help="Emit mock external_command_results in dry-run mode.")
     parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
     parser.add_argument("--lease-seconds", type=int, default=60, help="Seconds before a queue lease expires.")
@@ -582,12 +690,18 @@ async def run_once(
     emit_result: bool = False,
     execute_human_handoff: bool = False,
     execute_telegram: bool = False,
+    execute_backend: bool = False,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
 ) -> dict:
-    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff, execute_telegram=execute_telegram)
-    settings = Settings() if (execute_human_handoff or execute_telegram) else Settings(
+    validate_execution_mode(
+        dry_run=dry_run,
+        execute_human_handoff=execute_human_handoff,
+        execute_telegram=execute_telegram,
+        execute_backend=execute_backend,
+    )
+    settings = Settings() if (execute_human_handoff or execute_telegram or execute_backend) else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
     )
@@ -605,6 +719,7 @@ async def run_once(
             emit_result=emit_result,
             execute_human_handoff=execute_human_handoff,
             execute_telegram=execute_telegram,
+            execute_backend=execute_backend,
             settings=settings,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
@@ -616,6 +731,7 @@ async def run_once(
             "dry_run": dry_run,
             "execute_human_handoff": execute_human_handoff,
             "execute_telegram": execute_telegram,
+            "execute_backend": execute_backend,
             "emit_result": emit_result,
             **summarize_results(results),
             "results": results,
@@ -651,13 +767,19 @@ async def run_forever(
     emit_result: bool = False,
     execute_human_handoff: bool = False,
     execute_telegram: bool = False,
+    execute_backend: bool = False,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
     recover_interval_seconds: int = 30,
 ) -> None:
-    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff, execute_telegram=execute_telegram)
-    settings = Settings() if (execute_human_handoff or execute_telegram) else Settings(
+    validate_execution_mode(
+        dry_run=dry_run,
+        execute_human_handoff=execute_human_handoff,
+        execute_telegram=execute_telegram,
+        execute_backend=execute_backend,
+    )
+    settings = Settings() if (execute_human_handoff or execute_telegram or execute_backend) else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
     )
@@ -677,6 +799,7 @@ async def run_forever(
             emit_result=emit_result,
             execute_human_handoff=execute_human_handoff,
             execute_telegram=execute_telegram,
+            execute_backend=execute_backend,
             settings=settings,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
@@ -699,6 +822,7 @@ async def run_polling_loop(
     emit_result: bool = False,
     execute_human_handoff: bool = False,
     execute_telegram: bool = False,
+    execute_backend: bool = False,
     settings: Settings | None = None,
     worker_id: str | None = None,
     lease_seconds: int = 60,
@@ -708,7 +832,12 @@ async def run_polling_loop(
     iterations: int | None = None,
     sleep=asyncio.sleep,
 ) -> None:
-    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff, execute_telegram=execute_telegram)
+    validate_execution_mode(
+        dry_run=dry_run,
+        execute_human_handoff=execute_human_handoff,
+        execute_telegram=execute_telegram,
+        execute_backend=execute_backend,
+    )
     iteration = 0
     while iterations is None or iteration < iterations:
         last_recovered_at = await maybe_recover_expired_leases(
@@ -726,6 +855,7 @@ async def run_polling_loop(
                 emit_result=emit_result,
                 execute_human_handoff=execute_human_handoff,
                 execute_telegram=execute_telegram,
+                execute_backend=execute_backend,
                 settings=settings,
                 worker_id=worker_id,
                 lease_seconds=lease_seconds,
@@ -749,6 +879,7 @@ def main(argv: list[str] | None = None) -> int:
                     emit_result=args.emit_result,
                     execute_human_handoff=args.execute_human_handoff,
                     execute_telegram=args.execute_telegram,
+                    execute_backend=args.execute_backend,
                     worker_id=args.worker_id,
                     lease_seconds=args.lease_seconds,
                     max_retries=args.max_retries,
@@ -763,6 +894,7 @@ def main(argv: list[str] | None = None) -> int:
                     emit_result=args.emit_result,
                     execute_human_handoff=args.execute_human_handoff,
                     execute_telegram=args.execute_telegram,
+                    execute_backend=args.execute_backend,
                     worker_id=args.worker_id,
                     lease_seconds=args.lease_seconds,
                     max_retries=args.max_retries,

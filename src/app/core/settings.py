@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     telegram_upload_attachments_via_download: bool = True
     telegram_attachment_download_timeout_seconds: float = 15.0
     telegram_attachment_max_bytes: int = 10485760
+    backend_query_enabled: bool = False
+    backend_provider_type: str | None = None
+    backend_base_url: str | None = None
+    backend_authorization: str | None = None
+    backend_merchant_code: str | None = None
+    backend_login_operator: str | None = None
+    backend_login_password: str | None = None
+    backend_login_merchant: str | None = None
+    backend_request_timeout_seconds: float = 20.0
+    backend_default_lookback_days: int = 30
+    backend_fallback_lookback_days: int = 90
 
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306

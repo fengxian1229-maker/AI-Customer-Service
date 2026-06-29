@@ -4,6 +4,30 @@ Date: 2026-06-27
 Repository: `https://github.com/fengxian1229-maker/AI-Customer-Service.git`
 Local path: `/Users/andy/ai-agent`
 
+## Latest P10-A.1 Status
+
+- Added a tenant-aware backend provider boundary for `backend.query`:
+  - `BackendQueryService`
+  - `TenantBackendConfigResolver`
+  - `BackendProviderFactory`
+  - `TacBackendClient`
+- Implemented TAC as the first read-only provider with parity for observed `bot66tornado/direct-query.js` behavior:
+  - password login
+  - GET API headers
+  - one-time `INVALID_TOKEN` refresh
+  - player lookup by `USERNAME` then `MOBILE`
+  - deposit lookup
+  - turnover requirement lookup
+  - player contribution lookup using the observed `relay/post` path with GET
+- Added backend settings with safe defaults: `BACKEND_QUERY_ENABLED=false`, no backend access unless explicitly enabled and configured.
+- The resolver currently supports env default fallback only and labels it `source="env_default"`. It accepts `tenant_id` in the API shape but does not yet read a DB-backed tenant backend config.
+- `external_command_worker` now supports `--execute-backend` and emits `backend.query.result` with deterministic answers for `withdrawal_blocked_or_rollover`.
+- `external_result_consumer` already consumes successful `backend.query.result` only when `answer` exists; failed backend results remain safe failures and do not fabricate facts.
+- Added read-only probe CLI: `python -m app.workers.tac_backend_probe`.
+- Added smoke guide: `/Users/andy/ai-agent/docs/smoke/p10-a1-tac-backend-query-client-smoke.md`.
+- Still not implemented: DB-backed tenant backend config, Vision/OCR, Telegram inbound/reply backflow, LiveChat WebSocket/Webhook, LLM tool calling, LLM-generated backend conclusions, and any third-party backend write operation.
+- P9-A.4 follow-up remains important: screenshot slots must not be satisfied by arbitrary attachment URLs; the fix needs attachment download/MIME checks and Vision/OCR or multimodal proof classification.
+
 ## Copy This Prompt Into A New Codex Session
 
 ```text
