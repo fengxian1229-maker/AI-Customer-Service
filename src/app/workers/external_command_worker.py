@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 HUMAN_HANDOFF_NOTICE_TEXT = "我会为你转接真人客服继续协助。"
 HUMAN_HANDOFF_COMMAND_TYPE = "human_handoff.requested"
 HUMAN_HANDOFF_RESULT_TYPE = "human_handoff.transfer_chat.result"
+NO_EXECUTION_MODE_ERROR = "must pass either --dry-run or --execute-human-handoff"
+FAILED_AFTER_EXTERNAL_SUCCESS = "FAILED_AFTER_EXTERNAL_SUCCESS"
 
 
 MOCK_RESULT_BY_COMMAND_TYPE = {
@@ -93,6 +95,7 @@ async def process_pending_commands(
     lease_seconds: int = 60,
     max_retries: int = 3,
 ) -> list[dict]:
+    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff)
     if emit_result and result_repository is None:
         raise ValueError("result_repository is required when emit_result=True")
 
@@ -121,6 +124,7 @@ async def process_pending_commands(
                     execute_human_handoff=execute_human_handoff,
                     settings=settings,
                     sender_client_factory=sender_client_factory,
+                    max_retries=max_retries,
                 )
             results.append(item)
         except Exception as exc:
@@ -157,17 +161,18 @@ async def _process_real_command(
     execute_human_handoff: bool,
     settings: Settings | None,
     sender_client_factory,
+    max_retries: int = 3,
 ) -> dict:
     command_type = command["command_type"]
     if command_type != HUMAN_HANDOFF_COMMAND_TYPE:
         error = f"real execution unsupported for command_type: {command_type}"
-        await _mark_command_status(repository, command["id"], "FAILED_UNSUPPORTED", error)
+        await _mark_command_status(repository, command["id"], "FAILED_UNSUPPORTED", error, max_retries=max_retries)
         return {"id": command["id"], "command_type": command_type, "status": "FAILED_UNSUPPORTED", "error": error}
 
     block_reason = _handoff_block_reason(command, settings, execute_human_handoff)
     if block_reason:
         status = "SKIPPED_DISABLED" if block_reason in {"livechat_handoff_enabled is false", "--execute-human-handoff is required"} else "FAILED_CONFIG"
-        await _mark_command_status(repository, command["id"], status, block_reason)
+        await _mark_command_status(repository, command["id"], status, block_reason, max_retries=max_retries)
         return {"id": command["id"], "command_type": command_type, "status": status, "error": block_reason}
 
     sender_client_factory = sender_client_factory or _build_sender_client
@@ -175,9 +180,26 @@ async def _process_real_command(
     target_group_id = settings.livechat_handoff_target_group_id
     ignore_agents_availability = settings.livechat_handoff_ignore_agents_availability
     ignore_requester_presence = settings.livechat_handoff_ignore_requester_presence
+    handoff_stage = dict((command.get("payload_json") or {}).get("human_handoff_stage") or {})
+
+    if handoff_stage.get("transfer_succeeded"):
+        error = "LiveChat transfer may have succeeded before local completion; manual verification required before retry"
+        await _mark_command_status(
+            repository,
+            command["id"],
+            FAILED_AFTER_EXTERNAL_SUCCESS,
+            error,
+            max_retries=max_retries,
+        )
+        return {"id": command["id"], "command_type": command_type, "status": FAILED_AFTER_EXTERNAL_SUCCESS, "error": error}
 
     try:
-        await sender_client.send_text(command["chat_id"], command.get("thread_id"), HUMAN_HANDOFF_NOTICE_TEXT)
+        if not handoff_stage.get("notice_sent"):
+            await sender_client.send_text(command["chat_id"], command.get("thread_id"), HUMAN_HANDOFF_NOTICE_TEXT)
+            handoff_stage["notice_sent"] = True
+            await _record_handoff_stage(repository, command["id"], handoff_stage)
+        handoff_stage["transfer_attempted"] = True
+        await _record_handoff_stage(repository, command["id"], handoff_stage)
         livechat_response = await sender_client.transfer_chat_to_group(
             command["chat_id"],
             target_group_id,
@@ -186,20 +208,9 @@ async def _process_real_command(
         )
     except Exception as exc:
         status = classify_handoff_error(exc)
-        await _mark_command_status(repository, command["id"], status, str(exc))
+        await _mark_command_status(repository, command["id"], status, str(exc), max_retries=max_retries)
         return {"id": command["id"], "command_type": command_type, "status": status, "error": str(exc)}
 
-    if conversation_repository is not None:
-        await conversation_repository.update_workflow_state(
-            command["conversation_id"],
-            {
-                "status": "HUMAN_ACTIVE",
-                "active_workflow": "human_handoff",
-                "workflow_stage": "transferred",
-                "slot_memory": {},
-            },
-        )
-    result_insert = None
     result_json = {
         "status": "TRANSFERRED",
         "chat_id": command["chat_id"],
@@ -208,15 +219,54 @@ async def _process_real_command(
         "ignore_requester_presence": ignore_requester_presence,
         "livechat_response": livechat_response,
     }
-    if emit_result:
-        result_insert = await result_repository.insert_idempotent(
-            _build_result_record(command, HUMAN_HANDOFF_RESULT_TYPE, result_json)
+    result_insert = None
+    try:
+        handoff_stage["transfer_succeeded"] = True
+        await _record_handoff_stage(repository, command["id"], handoff_stage)
+        if conversation_repository is not None:
+            await conversation_repository.update_workflow_state(
+                command["conversation_id"],
+                {
+                    "status": "HUMAN_ACTIVE",
+                    "active_workflow": "human_handoff",
+                    "workflow_stage": "transferred",
+                    "slot_memory": {},
+                },
+            )
+        handoff_stage["conversation_state_updated"] = True
+        await _record_handoff_stage(repository, command["id"], handoff_stage)
+        if emit_result:
+            result_insert = await result_repository.insert_idempotent(
+                _build_result_record(command, HUMAN_HANDOFF_RESULT_TYPE, result_json)
+            )
+        handoff_stage["result_emitted"] = bool(emit_result)
+        await _record_handoff_stage(repository, command["id"], handoff_stage)
+        await repository.mark_sent(command["id"])
+    except Exception as exc:
+        error = f"LiveChat transfer may have succeeded; local handoff completion failed and manual verification is required: {exc}"
+        await _mark_command_status(
+            repository,
+            command["id"],
+            FAILED_AFTER_EXTERNAL_SUCCESS,
+            error,
+            max_retries=max_retries,
         )
-    await repository.mark_sent(command["id"])
+        return {
+            "id": command["id"],
+            "command_type": command_type,
+            "status": FAILED_AFTER_EXTERNAL_SUCCESS,
+            "error": error,
+            "transfer_result": result_json,
+        }
     item = {"id": command["id"], "command_type": command_type, "status": "SENT", "transfer_result": result_json}
     if emit_result:
         item["result_insert"] = result_insert
     return item
+
+
+def validate_execution_mode(dry_run: bool, execute_human_handoff: bool) -> None:
+    if not dry_run and not execute_human_handoff:
+        raise ValueError(NO_EXECUTION_MODE_ERROR)
 
 
 def _handoff_block_reason(command: dict, settings: Settings | None, execute_human_handoff: bool) -> str | None:
@@ -278,12 +328,27 @@ def _build_result_record(command: dict, result_type: str, result_json: dict) -> 
     }
 
 
-async def _mark_command_status(repository: ExternalCommandRepository, command_id: int, status: str, error: str | None) -> None:
+async def _record_handoff_stage(repository: ExternalCommandRepository, command_id: int, stage: dict) -> None:
+    if hasattr(repository, "merge_payload_json"):
+        await repository.merge_payload_json(command_id, {"human_handoff_stage": dict(stage)})
+
+
+async def _mark_command_status(
+    repository: ExternalCommandRepository,
+    command_id: int,
+    status: str,
+    error: str | None,
+    max_retries: int = 3,
+) -> None:
+    if status == "RETRYABLE":
+        if hasattr(repository, "mark_processing_failed"):
+            await repository.mark_processing_failed(command_id, error or status, max_retries=max_retries)
+            return
+        if hasattr(repository, "mark_retryable"):
+            await repository.mark_retryable(command_id, error or status)
+            return
     if hasattr(repository, "mark_status"):
         await repository.mark_status(command_id, status, error)
-        return
-    if status == "RETRYABLE" and hasattr(repository, "mark_retryable"):
-        await repository.mark_retryable(command_id, error or status)
         return
     if hasattr(repository, "mark_failed"):
         await repository.mark_failed(command_id, error or status)
@@ -327,6 +392,7 @@ async def run_once(
     lease_seconds: int = 60,
     max_retries: int = 3,
 ) -> dict:
+    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff)
     settings = Settings() if execute_human_handoff else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
@@ -355,11 +421,7 @@ async def run_once(
             "dry_run": dry_run,
             "execute_human_handoff": execute_human_handoff,
             "emit_result": emit_result,
-            "processed": len(results),
-            "dry_run_done": sum(1 for result in results if result["status"] == "DRY_RUN_DONE"),
-            "sent": sum(1 for result in results if result["status"] == "SENT"),
-            "results_emitted": sum(1 for result in results if result.get("result_insert")),
-            "failed": sum(1 for result in results if result["status"] == "FAILED"),
+            **summarize_results(results),
             "results": results,
         }
     finally:
@@ -397,6 +459,7 @@ async def run_forever(
     max_retries: int = 3,
     recover_interval_seconds: int = 30,
 ) -> None:
+    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff)
     settings = Settings() if execute_human_handoff else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
@@ -446,6 +509,7 @@ async def run_polling_loop(
     iterations: int | None = None,
     sleep=asyncio.sleep,
 ) -> None:
+    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff)
     iteration = 0
     while iterations is None or iteration < iterations:
         last_recovered_at = await maybe_recover_expired_leases(
@@ -476,33 +540,55 @@ async def run_polling_loop(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    if args.once:
-        result = asyncio.run(
-            run_once(
-                limit=args.limit,
-                dry_run=args.dry_run,
-                emit_result=args.emit_result,
-                execute_human_handoff=args.execute_human_handoff,
-                worker_id=args.worker_id,
-                lease_seconds=args.lease_seconds,
-                max_retries=args.max_retries,
+    try:
+        if args.once:
+            result = asyncio.run(
+                run_once(
+                    limit=args.limit,
+                    dry_run=args.dry_run,
+                    emit_result=args.emit_result,
+                    execute_human_handoff=args.execute_human_handoff,
+                    worker_id=args.worker_id,
+                    lease_seconds=args.lease_seconds,
+                    max_retries=args.max_retries,
+                )
             )
-        )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        asyncio.run(
-            run_forever(
-                limit=args.limit,
-                dry_run=args.dry_run,
-                emit_result=args.emit_result,
-                execute_human_handoff=args.execute_human_handoff,
-                worker_id=args.worker_id,
-                lease_seconds=args.lease_seconds,
-                max_retries=args.max_retries,
-                recover_interval_seconds=args.recover_interval_seconds,
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            asyncio.run(
+                run_forever(
+                    limit=args.limit,
+                    dry_run=args.dry_run,
+                    emit_result=args.emit_result,
+                    execute_human_handoff=args.execute_human_handoff,
+                    worker_id=args.worker_id,
+                    lease_seconds=args.lease_seconds,
+                    max_retries=args.max_retries,
+                    recover_interval_seconds=args.recover_interval_seconds,
+                )
             )
-        )
+    except ValueError as exc:
+        print(json.dumps({"worker": "external_command_worker", "error": str(exc)}, ensure_ascii=False, indent=2))
+        return 2
     return 0
+
+
+def summarize_results(results: list[dict]) -> dict:
+    statuses = [result.get("status") for result in results]
+    terminal_failed = sum(1 for status in statuses if isinstance(status, str) and status.startswith("FAILED"))
+    retryable = sum(1 for status in statuses if status == "RETRYABLE")
+    skipped = sum(1 for status in statuses if isinstance(status, str) and status.startswith("SKIPPED"))
+    return {
+        "processed": len(results),
+        "dry_run_done": sum(1 for status in statuses if status == "DRY_RUN_DONE"),
+        "sent": sum(1 for status in statuses if status == "SENT"),
+        "results_emitted": sum(1 for result in results if result.get("result_insert")),
+        "failed": terminal_failed,
+        "terminal_failed": terminal_failed,
+        "retryable": retryable,
+        "skipped": skipped,
+        "blocked": sum(1 for status in statuses if status == "SKIPPED_DISABLED"),
+    }
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from urllib.parse import quote_plus
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +48,24 @@ class Settings(BaseSettings):
     gemini_timeout_seconds: float | None = None
     gemini_max_retries: int = 2
     gemini_vertexai: bool = True
+
+    @field_validator("livechat_handoff_target_group_id", mode="before")
+    @classmethod
+    def parse_livechat_handoff_target_group_id(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            if not stripped.isdigit():
+                raise ValueError("livechat_handoff_target_group_id must be a positive integer")
+            value = int(stripped)
+        if isinstance(value, int):
+            if value <= 0:
+                raise ValueError("livechat_handoff_target_group_id must be a positive integer")
+            return value
+        return value
 
     @property
     def livechat_self_author_id_set(self) -> set[str]:

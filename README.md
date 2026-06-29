@@ -106,8 +106,10 @@ Current human handoff boundary:
 - `human_handoff.requested` is produced by deterministic graph routing and persisted as an `external_commands` row.
 - Real LiveChat handoff is disabled by default with `LIVECHAT_HANDOFF_ENABLED=false`.
 - Real handoff requires both `LIVECHAT_HANDOFF_ENABLED=true` and the external command worker flag `--execute-human-handoff`.
-- `LIVECHAT_HANDOFF_TARGET_GROUP_ID` must be set for real handoff; missing group id is a configuration failure and does not fall back to text-only handoff.
+- `LIVECHAT_HANDOFF_TARGET_GROUP_ID` must be set to a positive integer for real handoff; blank values parse as unset, and missing/invalid group id is a configuration failure with no text-only fallback.
+- Running `external_command_worker` without either `--dry-run` or `--execute-human-handoff` is rejected before leasing commands.
 - On successful handoff, the worker sends the handoff notice, calls LiveChat `/agent/action/transfer_chat`, and marks the conversation `HUMAN_ACTIVE` / `human_handoff` / `transferred`.
+- The worker records handoff stages in `external_commands.payload_json.human_handoff_stage` so retry after a sent notice does not repeat the notice. If LiveChat transfer succeeds but local state/result updates fail, the command is moved to `FAILED_AFTER_EXTERNAL_SUCCESS` for manual verification instead of retrying transfer.
 - Once a conversation is `HUMAN_ACTIVE`, Gateway records later customer inbound messages but does not run LangGraph, enqueue outbounds, or create new external commands.
 
 Human handoff worker dry-run:
@@ -119,21 +121,23 @@ PYTHONPATH=src uv run --group dev python -m app.workers.external_command_worker 
 Human handoff real execution:
 
 ```bash
-LIVECHAT_HANDOFF_ENABLED=true LIVECHAT_HANDOFF_TARGET_GROUP_ID=<group_id> PYTHONPATH=src \
+LIVECHAT_HANDOFF_ENABLED=true LIVECHAT_HANDOFF_TARGET_GROUP_ID=<positive_group_id> PYTHONPATH=src \
 uv run --group dev python -m app.workers.external_command_worker --once --execute-human-handoff --emit-result
 ```
 
-Scoped handoff smoke, default dry-run:
+Scoped handoff smoke, default plan-only and read-only:
 
 ```bash
 PYTHONPATH=src uv run --group dev python -m app.workers.human_handoff_smoke --inbound-event-id <id>
 PYTHONPATH=src uv run --group dev python -m app.workers.human_handoff_smoke --chat-id <livechat_chat_id>
 ```
 
+The default smoke command does not update `external_commands` and does not write `external_command_results`. Use `--consume-dry-run` only when you intentionally want to mark a scoped command `DRY_RUN_DONE`.
+
 Scoped handoff smoke, real transfer:
 
 ```bash
-LIVECHAT_HANDOFF_ENABLED=true LIVECHAT_HANDOFF_TARGET_GROUP_ID=<group_id> PYTHONPATH=src \
+LIVECHAT_HANDOFF_ENABLED=true LIVECHAT_HANDOFF_TARGET_GROUP_ID=<positive_group_id> PYTHONPATH=src \
 uv run --group dev python -m app.workers.human_handoff_smoke --chat-id <livechat_chat_id> --execute-human-handoff
 ```
 

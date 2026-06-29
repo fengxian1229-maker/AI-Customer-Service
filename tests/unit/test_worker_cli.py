@@ -1201,6 +1201,206 @@ def test_gateway_run_once_does_not_require_livechat_credentials(monkeypatch):
     assert result["enqueued"] == 1
 
 
+def test_human_handoff_smoke_default_is_plan_only(monkeypatch):
+    import asyncio
+
+    from app.workers import human_handoff_smoke
+
+    calls = {}
+
+    class FakeSettings:
+        livechat_handoff_target_group_id = 23
+        livechat_handoff_enabled = False
+
+        def __init__(self, **kwargs) -> None:
+            calls["settings_kwargs"] = kwargs
+
+    class FakePool:
+        def close(self) -> None:
+            calls["closed"] = True
+
+        async def wait_closed(self) -> None:
+            calls["wait_closed"] = True
+
+    async def fake_create_pool(settings):
+        calls["pool_settings"] = settings
+        return FakePool()
+
+    async def fake_fetch_command(pool, inbound_event_id=None, chat_id=None):
+        calls["fetch_scope"] = (inbound_event_id, chat_id)
+        return {
+            "id": 7,
+            "tenant_id": "default",
+            "conversation_id": "livechat:chat-1",
+            "chat_id": "chat-1",
+            "thread_id": "thread-1",
+            "inbound_event_id": 55,
+            "command_type": "human_handoff.requested",
+            "payload_json": {},
+            "status": "PENDING",
+        }
+
+    async def fake_fetch_status(pool, conversation_id):
+        return "AI_ACTIVE"
+
+    async def fail_dry_run(*args, **kwargs):
+        raise AssertionError("plan-only smoke must not consume command")
+
+    async def fail_real(*args, **kwargs):
+        raise AssertionError("plan-only smoke must not execute transfer")
+
+    monkeypatch.setattr(human_handoff_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(human_handoff_smoke, "create_pool", fake_create_pool)
+    monkeypatch.setattr(human_handoff_smoke, "_fetch_scoped_handoff_command", fake_fetch_command)
+    monkeypatch.setattr(human_handoff_smoke, "_fetch_conversation_status", fake_fetch_status)
+    monkeypatch.setattr(human_handoff_smoke, "_process_dry_run_command", fail_dry_run)
+    monkeypatch.setattr(human_handoff_smoke, "_process_real_command", fail_real)
+
+    result = asyncio.run(human_handoff_smoke.run(["--chat-id", "chat-1"]))
+
+    assert calls["settings_kwargs"] == {
+        "livechat_agent_access_token": "unused-for-human-handoff-smoke",
+        "livechat_account_id": "unused-for-human-handoff-smoke",
+    }
+    assert calls["fetch_scope"] == (None, "chat-1")
+    assert result["plan_only"] is True
+    assert result["dry_run"] is True
+    assert result["command_id"] == 7
+    assert result["external_command_status"] == "PENDING"
+    assert result["would_send_notice"] is True
+    assert result["would_transfer"] is False
+    assert result["block_reason"] == "livechat_handoff_enabled is false"
+    assert calls["closed"] is True
+    assert calls["wait_closed"] is True
+
+
+def test_human_handoff_smoke_consume_dry_run_is_explicit(monkeypatch):
+    import asyncio
+
+    from app.workers import human_handoff_smoke
+
+    calls = {}
+
+    class FakeSettings:
+        livechat_handoff_target_group_id = 23
+        livechat_handoff_enabled = False
+
+        def __init__(self, **kwargs) -> None:
+            pass
+
+    class FakePool:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    async def fake_create_pool(settings):
+        return FakePool()
+
+    command = {
+        "id": 8,
+        "tenant_id": "default",
+        "conversation_id": "livechat:chat-1",
+        "chat_id": "chat-1",
+        "thread_id": "thread-1",
+        "inbound_event_id": 56,
+        "command_type": "human_handoff.requested",
+        "payload_json": {},
+        "status": "PENDING",
+    }
+
+    async def fake_fetch_command(pool, inbound_event_id=None, chat_id=None):
+        return command
+
+    async def fake_fetch_status(pool, conversation_id):
+        return "AI_ACTIVE"
+
+    async def fake_dry_run(command_arg, repository, result_repository, emit_result):
+        calls["dry_run"] = (command_arg, emit_result)
+        return {"id": command_arg["id"], "command_type": command_arg["command_type"], "status": "DRY_RUN_DONE"}
+
+    async def fail_real(*args, **kwargs):
+        raise AssertionError("consume dry-run must not execute transfer")
+
+    monkeypatch.setattr(human_handoff_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(human_handoff_smoke, "create_pool", fake_create_pool)
+    monkeypatch.setattr(human_handoff_smoke, "_fetch_scoped_handoff_command", fake_fetch_command)
+    monkeypatch.setattr(human_handoff_smoke, "_fetch_conversation_status", fake_fetch_status)
+    monkeypatch.setattr(human_handoff_smoke, "_process_dry_run_command", fake_dry_run)
+    monkeypatch.setattr(human_handoff_smoke, "_process_real_command", fail_real)
+
+    result = asyncio.run(human_handoff_smoke.run(["--chat-id", "chat-1", "--consume-dry-run"]))
+
+    assert calls["dry_run"] == (command, True)
+    assert result["plan_only"] is False
+    assert result["external_command_status"] == "DRY_RUN_DONE"
+
+
+def test_human_handoff_smoke_execute_calls_real_path(monkeypatch):
+    import asyncio
+
+    from app.workers import human_handoff_smoke
+
+    calls = {}
+
+    class FakeSettings:
+        livechat_handoff_target_group_id = 23
+        livechat_handoff_enabled = True
+
+        def __init__(self, **kwargs) -> None:
+            calls["settings_kwargs"] = kwargs
+
+    class FakePool:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    async def fake_create_pool(settings):
+        return FakePool()
+
+    command = {
+        "id": 9,
+        "tenant_id": "default",
+        "conversation_id": "livechat:chat-1",
+        "chat_id": "chat-1",
+        "thread_id": "thread-1",
+        "inbound_event_id": 57,
+        "command_type": "human_handoff.requested",
+        "payload_json": {},
+        "status": "PENDING",
+    }
+
+    async def fake_fetch_command(pool, inbound_event_id=None, chat_id=None):
+        return command
+
+    async def fake_fetch_status(pool, conversation_id):
+        return "HUMAN_ACTIVE"
+
+    async def fake_real(command_arg, **kwargs):
+        calls["real"] = (command_arg, kwargs["execute_human_handoff"], kwargs["emit_result"])
+        return {"id": command_arg["id"], "command_type": command_arg["command_type"], "status": "SENT"}
+
+    async def fail_dry_run(*args, **kwargs):
+        raise AssertionError("execute smoke must not call dry-run")
+
+    monkeypatch.setattr(human_handoff_smoke, "Settings", FakeSettings)
+    monkeypatch.setattr(human_handoff_smoke, "create_pool", fake_create_pool)
+    monkeypatch.setattr(human_handoff_smoke, "_fetch_scoped_handoff_command", fake_fetch_command)
+    monkeypatch.setattr(human_handoff_smoke, "_fetch_conversation_status", fake_fetch_status)
+    monkeypatch.setattr(human_handoff_smoke, "_process_real_command", fake_real)
+    monkeypatch.setattr(human_handoff_smoke, "_process_dry_run_command", fail_dry_run)
+
+    result = asyncio.run(human_handoff_smoke.run(["--chat-id", "chat-1", "--execute-human-handoff"]))
+
+    assert calls["settings_kwargs"] == {}
+    assert calls["real"] == (command, True, True)
+    assert result["transfer_attempted"] is True
+    assert result["transfer_success"] is True
+
+
 def test_gateway_llm_summary_reports_shadow_and_fallback_flags():
     from app.workers.gateway_consumer import _build_llm_summary
 

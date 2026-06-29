@@ -536,6 +536,17 @@ class ExternalCommandRepository:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (status, error, command_id))
 
+    async def merge_payload_json(self, command_id: int, patch: dict) -> None:
+        sql = """
+        UPDATE external_commands
+        SET payload_json = JSON_MERGE_PATCH(COALESCE(payload_json, JSON_OBJECT()), CAST(%s AS JSON)),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (json_dumps(patch), command_id))
+
     async def mark_processing_failed(self, command_id: int, error: str, max_retries: int = 3) -> None:
         sql = """
         UPDATE external_commands

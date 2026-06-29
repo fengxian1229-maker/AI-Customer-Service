@@ -1,4 +1,5 @@
 from app.core.settings import Settings
+import pytest
 
 
 def test_settings_defaults():
@@ -11,6 +12,36 @@ def test_settings_defaults():
     assert settings.poll_seconds == 5
     assert settings.mysql_port == 3306
     assert settings.langgraph_checkpoint_setup_on_start is False
+
+
+def test_settings_livechat_handoff_target_group_id_accepts_blank_as_none():
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_target_group_id=" ",
+    )
+
+    assert settings.livechat_handoff_target_group_id is None
+
+
+def test_settings_livechat_handoff_target_group_id_parses_positive_string():
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_target_group_id="23",
+    )
+
+    assert settings.livechat_handoff_target_group_id == 23
+
+
+@pytest.mark.parametrize("value", ["abc", "0", -1])
+def test_settings_livechat_handoff_target_group_id_rejects_invalid_values(value):
+    with pytest.raises(ValueError):
+        Settings(
+            livechat_agent_access_token="token",
+            livechat_account_id="account",
+            livechat_handoff_target_group_id=value,
+        )
 
 
 def test_settings_mysql_checkpoint_dsn_url_encodes_password():
