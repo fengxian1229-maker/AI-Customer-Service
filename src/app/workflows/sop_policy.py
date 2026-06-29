@@ -29,12 +29,26 @@ def evaluate_sop_policy(
     stage = workflow_stage or "collecting_slots"
     if stage == "waiting_backend":
         text = str(latest_text or "")
-        if is_explicit_human_request(text):
-            return {"action": "human_handoff", "missing_slots": [], "reason": "customer_requested_human", "allowed": True}
-        if attachment_urls(attachments or []) or extract_identity(text) or extract_order_id(text) or extract_transaction_signal(text):
+        has_supplement = bool(
+            attachment_urls(attachments or [])
+            or extract_identity(text)
+            or extract_order_id(text)
+            or extract_transaction_signal(text)
+        )
+        explicit_human = is_explicit_human_request(text)
+        if has_supplement:
             if slot_memory.get("telegram_case_id") and slot_memory.get("telegram_message_id"):
                 return {"action": "append_to_case", "missing_slots": [], "reason": "customer_sent_supplement", "allowed": True}
+            if explicit_human:
+                return {
+                    "action": "human_handoff",
+                    "missing_slots": [],
+                    "reason": "customer_requested_human_after_supplement",
+                    "allowed": True,
+                }
             return {"action": "waiting_followup", "missing_slots": [], "reason": "case_not_created_yet", "allowed": True}
+        if explicit_human:
+            return {"action": "human_handoff", "missing_slots": [], "reason": "customer_requested_human", "allowed": True}
         return {"action": "waiting_followup", "missing_slots": [], "reason": "customer_asked_status_or_unclear", "allowed": True}
 
     if missing_slots:

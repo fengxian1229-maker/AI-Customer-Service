@@ -35,6 +35,8 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
             slot_memory["forwarded_attachment_urls"] = forwarded
             screenshot_key = "deposit_screenshot" if active_workflow == "deposit_missing" else "withdrawal_screenshot"
             slot_memory.setdefault(screenshot_key, new_urls[0])
+            if policy["action"] == "human_handoff":
+                return _build_handoff_state(state, slot_memory)
             if policy["action"] != "append_to_case":
                 return _waiting_followup_state(state, slot_memory)
             reply = plan_sop_reply(str(active_workflow), policy)
@@ -60,6 +62,8 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
             slot_memory["account_or_phone"] = identity["value"]
         if order_id:
             slot_memory["order_id"] = order_id
+        if policy["action"] == "human_handoff":
+            return _build_handoff_state(state, slot_memory)
         if policy["action"] != "append_to_case":
             return _waiting_followup_state(state, slot_memory)
         reply = plan_sop_reply(str(active_workflow), policy)
@@ -87,18 +91,7 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
         }
 
     if is_explicit_human_request(text):
-        return {
-            **state,
-            "slot_memory": slot_memory,
-            "status": "HANDOFF_REQUESTED",
-            "response_text": "我会为你转接真人客服继续协助。",
-            "commands": [
-                {
-                    "type": CommandType.HUMAN_HANDOFF_REQUESTED,
-                    "payload": {"reason": "explicit_human_request"},
-                }
-            ],
-        }
+        return _build_handoff_state(state, slot_memory)
 
     return {
         **state,
@@ -118,4 +111,19 @@ def _waiting_followup_state(state: dict[str, Any], slot_memory: dict[str, Any]) 
         "sop_action": "waiting_followup",
         "response_text": CASE_PENDING_REPLY,
         "commands": [],
+    }
+
+
+def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **state,
+        "slot_memory": slot_memory,
+        "status": "HANDOFF_REQUESTED",
+        "response_text": "我会为你转接真人客服继续协助。",
+        "commands": [
+            {
+                "type": CommandType.HUMAN_HANDOFF_REQUESTED,
+                "payload": {"reason": "explicit_human_request"},
+            }
+        ],
     }

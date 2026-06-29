@@ -39,6 +39,43 @@ def test_waiting_backend_attachment_with_telegram_case_generates_append_command(
     assert payload["supplement"]["attachment_urls"] == ["https://cdn.example/supplement.png"]
 
 
+def test_waiting_backend_attachment_and_human_with_telegram_case_appends_first():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {
+                "telegram_case_id": "tg:123",
+                "telegram_message_id": 123,
+                "forwarded_attachment_urls": [],
+            },
+            "attachments": [{"url": "https://cdn.example/new.png"}],
+            "raw_user_input": "quiero hablar con un agente humano",
+        }
+    )
+
+    assert state["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE
+    assert state["commands"][0]["payload"]["telegram_message_id"] == 123
+    assert state["commands"][0]["payload"]["supplement"]["attachment_urls"] == ["https://cdn.example/new.png"]
+    assert all(command["type"] != CommandType.HUMAN_HANDOFF_REQUESTED for command in state["commands"])
+
+
+def test_waiting_backend_attachment_and_human_without_telegram_case_handoffs():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {"forwarded_attachment_urls": []},
+            "attachments": [{"url": "https://cdn.example/new.png"}],
+            "raw_user_input": "quiero hablar con un agente humano",
+        }
+    )
+
+    assert state["status"] == "HANDOFF_REQUESTED"
+    assert state["commands"][0]["type"] == CommandType.HUMAN_HANDOFF_REQUESTED
+    assert all(command["type"] != CommandType.TELEGRAM_APPEND_TO_CASE for command in state["commands"])
+
+
 def test_waiting_backend_human_request_generates_handoff_command():
     state = handle_waiting_backend(
         {
@@ -98,3 +135,19 @@ def test_waiting_backend_text_supplement_with_telegram_case_generates_append_com
     assert state["commands"][0]["payload"]["telegram_case_id"] == "tg:123"
     assert state["commands"][0]["payload"]["telegram_message_id"] == 123
     assert state["commands"][0]["payload"]["supplement"]["text"] == "补一下交易号 TX123456"
+
+
+def test_waiting_backend_text_supplement_and_human_with_telegram_case_appends_first():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {"telegram_case_id": "tg:123", "telegram_message_id": 123},
+            "attachments": [],
+            "raw_user_input": "交易号 TX123456, quiero humano",
+        }
+    )
+
+    assert state["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE
+    assert "TX123456" in state["commands"][0]["payload"]["supplement"]["text"]
+    assert all(command["type"] != CommandType.HUMAN_HANDOFF_REQUESTED for command in state["commands"])
