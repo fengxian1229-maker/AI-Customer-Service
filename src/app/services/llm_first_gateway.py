@@ -15,7 +15,10 @@ class LLMFirstGatewayService(GatewayService):
 
     async def _prepare_route_state(self, graph_state: dict) -> dict:
         if self.llm_router_mode == "faq_authoritative":
-            return await self._prepare_faq_authoritative_route_state(graph_state)
+            state = await self._prepare_faq_authoritative_route_state(graph_state)
+            if state.get("route_source") == "llm_faq_authoritative" and state.get("route"):
+                return {**state, "route_locked": True}
+            return state
         if self.llm_router_mode != "guarded_authoritative":
             return prepare_route_state(graph_state)
 
@@ -125,6 +128,7 @@ class LLMFirstGatewayService(GatewayService):
             },
             "route": decision["route"],
             "route_source": source,
+            "route_locked": True,
             "llm_router_result": self._router_result_summary(
                 status="accepted",
                 decision=decision,
@@ -160,6 +164,7 @@ class LLMFirstGatewayService(GatewayService):
             },
             "route": "human_handoff",
             "route_source": "llm_guarded_authoritative_post_guard",
+            "route_locked": True,
             "llm_router_result": self._router_result_summary(
                 status="accepted",
                 decision=decision,
