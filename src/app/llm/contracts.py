@@ -1,6 +1,16 @@
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
+
+LLMRouteLiteral = Literal[
+    "faq",
+    "sop",
+    "faq_then_sop",
+    "human_handoff",
+    "emotion_care",
+    "clarification",
+    "unsupported",
+]
 
 
 class LLMRewriteShadowInput(TypedDict, total=False):
@@ -107,7 +117,7 @@ class LLMIntentShadowSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     intent: str
-    route: str
+    route: LLMRouteLiteral
     confidence: float = 0.0
     reason: str
     sop_name: str | None = None
@@ -122,7 +132,7 @@ class LLMRouterDecisionSchema(BaseModel):
     normalized_query: str | None = None
     language: str = "unknown"
     intent: str
-    route: str
+    route: LLMRouteLiteral
     confidence: float = 0.0
     sop_name: str | None = None
     faq_query: str | None = None

@@ -55,6 +55,13 @@ Allowed routes:
 - clarification
 - unsupported
 
+The schema defines allowed route and intent values. Do not invent new values.
+
+For escalation, take-over requests, specialist review requests, or cases where automated replies are not helping, return:
+- route: human_handoff
+- intent: explicit_human_request
+- requires_human: true
+
 Prefer SOP/human/backend-safe handling for account, order, payment, balance, deposit status, withdrawal status, or other fact-like requests.
 If the customer explicitly asks for a human, route must be human_handoff.
 If the conversation is in an active workflow, continue SOP and do not switch to FAQ.

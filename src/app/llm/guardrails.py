@@ -144,16 +144,21 @@ def normalize_llm_intent(intent: str) -> str:
         "password_reset": "forgot_password_howto",
         "reset_password": "forgot_password_howto",
         "forgot_password": "forgot_password_howto",
-        "human_handoff": "explicit_human_request",
-        "human": "explicit_human_request",
-        "human_agent": "explicit_human_request",
-        "human_support": "explicit_human_request",
-        "transfer_to_human": "explicit_human_request",
-        "handoff": "explicit_human_request",
-        "escalation": "service_frustration",
-        "escalate": "service_frustration",
     }
     return aliases.get(normalized, normalized)
+
+
+def normalize_router_decision_intent(intent: str, route: str, requires_human: bool) -> str:
+    normalized = normalize_llm_intent(intent)
+    if normalized in ALLOWED_LLM_INTENTS:
+        return normalized
+    if route == "human_handoff" and requires_human:
+        return "explicit_human_request"
+    if route == "clarification":
+        return "clarification_needed"
+    if route == "unsupported":
+        return "unsupported_concrete_issue"
+    raise ValueError(f"Unsupported llm intent: {normalized or intent}")
 
 
 def normalize_risk_flags(flags: list[str] | None) -> list[str]:
@@ -216,17 +221,24 @@ def validate_intent_output(payload: dict[str, Any], output: dict[str, Any]) -> d
 
 def validate_router_decision_output(payload: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
     del payload
+    route = validate_llm_route(_require_str(output, "route", "router decision"))
+    requires_human = bool(output.get("requires_human", False))
+    intent = normalize_router_decision_intent(
+        _require_str(output, "intent", "router decision"),
+        route,
+        requires_human,
+    )
     return {
         "rewritten_question": _require_str(output, "rewritten_question", "router decision"),
         "normalized_query": _optional_str(output.get("normalized_query")),
         "language": str(output.get("language") or "unknown"),
-        "intent": validate_llm_intent(_require_str(output, "intent", "router decision")),
-        "route": validate_llm_route(_require_str(output, "route", "router decision")),
+        "intent": intent,
+        "route": route,
         "confidence": normalize_confidence(output.get("confidence")),
         "sop_name": _optional_str(output.get("sop_name")),
         "faq_query": _optional_str(output.get("faq_query")),
         "risk_level": _optional_str(output.get("risk_level")),
-        "requires_human": bool(output.get("requires_human", False)),
+        "requires_human": requires_human,
         "requires_backend": bool(output.get("requires_backend", False)),
         "missing_slots": _string_list(output.get("missing_slots")),
         "preserved_entities": _string_list(output.get("preserved_entities")),

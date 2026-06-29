@@ -887,7 +887,7 @@ def test_gateway_service_guarded_authoritative_uses_llm_human_handoff_route():
             "rewritten_question": "I need a real support agent",
             "normalized_query": "I need a real support agent",
             "language": "en",
-            "intent": "human_handoff",
+            "intent": "human_handoff_request",
             "route": "human_handoff",
             "confidence": 0.96,
             "sop_name": None,
