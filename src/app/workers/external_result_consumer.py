@@ -105,15 +105,22 @@ def build_result_handler(row: dict) -> dict:
         case_id = result_json.get("case_id")
         if not case_id:
             raise ValueError("telegram.case.created result missing case_id")
+        active_workflow = result_json.get("active_workflow") or result_json.get("intent")
         resolved = {
             "text": "案件已建立，我们会继续跟进，请稍候。",
             "summary_sender_role": "telegram",
             "summary_text": f"案件已建立，case_id={case_id}",
             "graph_state": {
                 "status": "WAITING_EXTERNAL",
-                "active_workflow": None,
-                "workflow_stage": "case_created",
-                "slot_memory": {"telegram_case_id": case_id},
+                "active_workflow": active_workflow,
+                "workflow_stage": "waiting_backend",
+                "slot_memory": {
+                    "telegram_case_id": case_id,
+                    "telegram_message_id": result_json.get("telegram_message_id"),
+                    "telegram_target_chat_id": result_json.get("target_chat_id"),
+                    "telegram_message_thread_id": result_json.get("message_thread_id"),
+                    "telegram_case_status": "created",
+                },
             },
         }
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)
@@ -127,9 +134,12 @@ def build_result_handler(row: dict) -> dict:
             "summary_text": result_json.get("message") or "案件补充资料已追加。",
             "graph_state": {
                 "status": "WAITING_EXTERNAL",
-                "active_workflow": None,
-                "workflow_stage": "case_appended",
-                "slot_memory": {"telegram_append_status": result_json.get("status")},
+                "active_workflow": result_json.get("active_workflow") or result_json.get("intent"),
+                "workflow_stage": "waiting_backend",
+                "slot_memory": {
+                    "telegram_append_status": result_json.get("status"),
+                    "last_telegram_append_message_id": result_json.get("telegram_message_id"),
+                },
             },
         }
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)

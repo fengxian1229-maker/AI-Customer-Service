@@ -306,7 +306,7 @@ def test_gateway_splits_livechat_outbox_and_external_commands():
     result = asyncio.run(service.process_event(11, event))
 
     assert [message["action_type"] for message in outbound_repository.inserted] == ["send_event"]
-    assert outbound_repository.inserted[0]["payload_json"]["text"] == "已收到你的存款案件资料，我们会继续确认，有更新会在这里通知你。"
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "已为您转交后台确认，请稍等。"
     assert [command["command_type"] for command in external_repository.inserted] == ["telegram.send_case_card"]
     assert result["external_commands"][0]["command_type"] == "telegram.send_case_card"
 

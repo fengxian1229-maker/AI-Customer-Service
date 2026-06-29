@@ -262,13 +262,24 @@ def test_result_consumer_rag_placeholder_does_not_fabricate_facts():
 
 def test_result_consumer_telegram_case_created_updates_case_id():
     processed, result_repository, conversation_repository, outbound_repository = run_consumer_for(
-        make_result("telegram.case.created") | {"result_json": {"case_id": "mock_case_001", "status": "created"}}
+        make_result("telegram.case.created")
+        | {
+            "result_json": {
+                "case_id": "mock_case_001",
+                "status": "created",
+                "active_workflow": "deposit_missing",
+                "telegram_message_id": 12345,
+                "target_chat_id": "-100test",
+            }
+        }
     )
 
     assert processed[0]["status"] == "PROCESSED"
     assert result_repository.processed == [7]
-    assert conversation_repository.updated[0][1]["workflow_stage"] == "case_created"
+    assert conversation_repository.updated[0][1]["workflow_stage"] == "waiting_backend"
+    assert conversation_repository.updated[0][1]["active_workflow"] == "deposit_missing"
     assert conversation_repository.updated[0][1]["slot_memory"]["telegram_case_id"] == "mock_case_001"
+    assert conversation_repository.updated[0][1]["slot_memory"]["telegram_message_id"] == 12345
     assert "案件已建立" in outbound_repository.inserted[0]["payload_json"]["text"]
 
 

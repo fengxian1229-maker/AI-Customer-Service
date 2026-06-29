@@ -59,7 +59,8 @@ Current RAG limits:
 - Text blocks are sent with `livechat.send_text`.
 - Image blocks currently use sender-worker MVP URL text fallback, not real LiveChat image upload.
 - Buttons blocks currently use `livechat.buttons_preview` and are marked `SKIPPED_PREVIEW`, not real rich buttons.
-- No real backend or Telegram calls.
+- No real backend calls.
+- Telegram SOP delivery is available only through explicit `external_command_worker --execute-telegram` with `TELEGRAM_SOP_ENABLED=true`; Telegram inbound/webhook/getUpdates is not implemented.
 - DB-backed RAG retrieval is prefetched only for deterministic `route=faq`.
 - SOP, human handoff, emotion care, clarification, and `faq_then_sop` traffic do not prefetch `knowledge_documents`.
 - Backend-fact questions may still enter RagService guardrail handling, but they do not query `knowledge_documents` and still return a safe fallback.
@@ -107,7 +108,7 @@ Current human handoff boundary:
 - Real LiveChat handoff is disabled by default with `LIVECHAT_HANDOFF_ENABLED=false`.
 - Real handoff requires both `LIVECHAT_HANDOFF_ENABLED=true` and the external command worker flag `--execute-human-handoff`.
 - `LIVECHAT_HANDOFF_TARGET_GROUP_ID` must be set to a positive integer for real handoff; blank values parse as unset, and missing/invalid group id is a configuration failure with no text-only fallback.
-- Running `external_command_worker` without either `--dry-run` or `--execute-human-handoff` is rejected before leasing commands.
+- Running `external_command_worker` without `--dry-run`, `--execute-human-handoff`, or `--execute-telegram` is rejected before leasing commands.
 - On successful handoff, the worker sends the handoff notice, calls LiveChat `/agent/action/transfer_chat`, and marks the conversation `HUMAN_ACTIVE` / `human_handoff` / `transferred`.
 - The worker records handoff stages in `external_commands.payload_json.human_handoff_stage` so retry after a sent notice does not repeat the notice. If LiveChat transfer succeeds but local state/result updates fail, the command is moved to `FAILED_AFTER_EXTERNAL_SUCCESS` for manual verification instead of retrying transfer.
 - Once a conversation is `HUMAN_ACTIVE`, Gateway records later customer inbound messages but does not run LangGraph, enqueue outbounds, or create new external commands.
@@ -117,6 +118,23 @@ Human handoff worker dry-run:
 ```bash
 PYTHONPATH=src uv run --group dev python -m app.workers.external_command_worker --once --dry-run --emit-result
 ```
+
+Telegram SOP dry-run:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.external_command_worker --once --dry-run --emit-result
+PYTHONPATH=src uv run --group dev python -m app.workers.external_result_consumer --once
+```
+
+Telegram SOP real execution:
+
+```bash
+TELEGRAM_SOP_ENABLED=true TELEGRAM_BOT_TOKEN=<bot_token> TELEGRAM_TEST_GROUP=<test_group_chat_id> PYTHONPATH=src \
+uv run --group dev python -m app.workers.external_command_worker --once --execute-telegram --emit-result
+PYTHONPATH=src uv run --group dev python -m app.workers.external_result_consumer --once
+```
+
+See [docs/p9-a-telegram-sop-closed-loop.md](/Users/andy/ai-agent/docs/p9-a-telegram-sop-closed-loop.md).
 
 Human handoff real execution:
 

@@ -7,9 +7,12 @@ import socket
 import time
 
 from app.channels.livechat.sender_client import LiveChatApiError, LiveChatSenderClient
+from app.channels.telegram.sender_client import TelegramApiError, TelegramSenderClient
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import ConversationRepository, ExternalCommandRepository, ExternalCommandResultRepository
+from app.services.telegram_case_card import build_telegram_case_append, build_telegram_case_card
+from app.services.telegram_target_resolver import resolve_telegram_target
 
 
 SUPPORTED_COMMAND_TYPES = {
@@ -27,7 +30,7 @@ logger = logging.getLogger(__name__)
 HUMAN_HANDOFF_NOTICE_TEXT = "我会为你转接真人客服继续协助。"
 HUMAN_HANDOFF_COMMAND_TYPE = "human_handoff.requested"
 HUMAN_HANDOFF_RESULT_TYPE = "human_handoff.transfer_chat.result"
-NO_EXECUTION_MODE_ERROR = "must pass either --dry-run or --execute-human-handoff"
+NO_EXECUTION_MODE_ERROR = "must pass either --dry-run or --execute-human-handoff or --execute-telegram"
 FAILED_AFTER_EXTERNAL_SUCCESS = "FAILED_AFTER_EXTERNAL_SUCCESS"
 
 
@@ -38,6 +41,7 @@ MOCK_RESULT_BY_COMMAND_TYPE = {
             "status": "created",
             "case_id": "mock_case",
             "message": "telegram.send_case_card dry-run completed",
+            "active_workflow": "deposit_missing",
         },
     ),
     "telegram.append_to_case": (
@@ -89,13 +93,15 @@ async def process_pending_commands(
     dry_run: bool = True,
     emit_result: bool = False,
     execute_human_handoff: bool = False,
+    execute_telegram: bool = False,
     settings: Settings | None = None,
     sender_client_factory=None,
+    telegram_client_factory=None,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
 ) -> list[dict]:
-    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff)
+    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff, execute_telegram=execute_telegram)
     if emit_result and result_repository is None:
         raise ValueError("result_repository is required when emit_result=True")
 
@@ -122,8 +128,10 @@ async def process_pending_commands(
                     conversation_repository=conversation_repository,
                     emit_result=emit_result,
                     execute_human_handoff=execute_human_handoff,
+                    execute_telegram=execute_telegram,
                     settings=settings,
                     sender_client_factory=sender_client_factory,
+                    telegram_client_factory=telegram_client_factory,
                     max_retries=max_retries,
                 )
             results.append(item)
@@ -159,11 +167,24 @@ async def _process_real_command(
     conversation_repository: ConversationRepository | None,
     emit_result: bool,
     execute_human_handoff: bool,
+    execute_telegram: bool,
     settings: Settings | None,
     sender_client_factory,
+    telegram_client_factory,
     max_retries: int = 3,
 ) -> dict:
     command_type = command["command_type"]
+    if command_type in {"telegram.send_case_card", "telegram.append_to_case"}:
+        return await _process_real_telegram_command(
+            command,
+            repository=repository,
+            result_repository=result_repository,
+            emit_result=emit_result,
+            execute_telegram=execute_telegram,
+            settings=settings,
+            telegram_client_factory=telegram_client_factory,
+            max_retries=max_retries,
+        )
     if command_type != HUMAN_HANDOFF_COMMAND_TYPE:
         error = f"real execution unsupported for command_type: {command_type}"
         await _mark_command_status(repository, command["id"], "FAILED_UNSUPPORTED", error, max_retries=max_retries)
@@ -264,9 +285,103 @@ async def _process_real_command(
     return item
 
 
-def validate_execution_mode(dry_run: bool, execute_human_handoff: bool) -> None:
-    if not dry_run and not execute_human_handoff:
+async def _process_real_telegram_command(
+    command: dict,
+    repository: ExternalCommandRepository,
+    result_repository: ExternalCommandResultRepository | None,
+    emit_result: bool,
+    execute_telegram: bool,
+    settings: Settings | None,
+    telegram_client_factory,
+    max_retries: int = 3,
+) -> dict:
+    block_reason = _telegram_block_reason(command, settings, execute_telegram)
+    if block_reason:
+        status = "SKIPPED_DISABLED" if block_reason == "--execute-telegram is required" else "FAILED_CONFIG"
+        if block_reason.startswith("unsupported"):
+            status = "FAILED_UNSUPPORTED"
+        await _mark_command_status(repository, command["id"], status, block_reason, max_retries=max_retries)
+        return {"id": command["id"], "command_type": command["command_type"], "status": status, "error": block_reason}
+
+    target = resolve_telegram_target(command, settings)
+    if not target.get("chat_id"):
+        await _mark_command_status(repository, command["id"], "FAILED_CONFIG", "telegram target chat_id is missing", max_retries=max_retries)
+        return {"id": command["id"], "command_type": command["command_type"], "status": "FAILED_CONFIG", "error": "telegram target chat_id is missing"}
+    telegram_client_factory = telegram_client_factory or _build_telegram_client
+    client = telegram_client_factory(settings)
+    payload = command.get("payload_json") or {}
+    intent = payload.get("intent") or payload.get("active_workflow")
+    try:
+        if command["command_type"] == "telegram.send_case_card":
+            card = build_telegram_case_card(command, target)
+            delivery = client.send_case_card(card)
+            result_type = "telegram.case.created"
+            result_json = {
+                "status": "created",
+                "case_id": f"tg:{delivery['message_id']}",
+                "telegram_message_id": delivery["message_id"],
+                "target_chat_id": target["chat_id"],
+                "message_thread_id": target.get("message_thread_id"),
+                "target_source": target.get("target_source"),
+                "delivery_mode": "text_with_attachments",
+                "attachment_results": delivery.get("attachment_results", []),
+                "intent": intent,
+                "active_workflow": payload.get("active_workflow") or intent,
+            }
+        else:
+            append = build_telegram_case_append(command, target, reply_to_message_id=payload.get("telegram_message_id"))
+            delivery = client.append_to_case(append)
+            result_type = "telegram.append_to_case.result"
+            result_json = {
+                "status": "appended",
+                "telegram_message_id": delivery["message_id"],
+                "reply_to_message_id": delivery.get("reply_to_message_id") or payload.get("telegram_message_id"),
+                "target_chat_id": target["chat_id"],
+                "message_thread_id": target.get("message_thread_id"),
+                "target_source": target.get("target_source"),
+                "attachment_results": delivery.get("attachment_results", []),
+                "intent": intent,
+                "active_workflow": payload.get("active_workflow") or intent,
+            }
+    except Exception as exc:
+        status = classify_telegram_error(exc)
+        final_status = await _mark_command_status(repository, command["id"], status, str(exc), max_retries=max_retries)
+        return {"id": command["id"], "command_type": command["command_type"], "status": final_status, "error": str(exc)}
+
+    result_insert = None
+    if emit_result:
+        result_insert = await result_repository.insert_idempotent(_build_result_record(command, result_type, result_json))
+    await repository.mark_sent(command["id"])
+    item = {"id": command["id"], "command_type": command["command_type"], "status": "SENT", "telegram_result": result_json}
+    if emit_result:
+        item["result_insert"] = result_insert
+    return item
+
+
+def validate_execution_mode(dry_run: bool, execute_human_handoff: bool, execute_telegram: bool = False) -> None:
+    if not dry_run and not execute_human_handoff and not execute_telegram:
         raise ValueError(NO_EXECUTION_MODE_ERROR)
+
+
+def _telegram_block_reason(command: dict, settings: Settings | None, execute_telegram: bool) -> str | None:
+    if command.get("command_type") not in {"telegram.send_case_card", "telegram.append_to_case"}:
+        return f"unsupported telegram command_type: {command.get('command_type')}"
+    if not execute_telegram:
+        return "--execute-telegram is required"
+    if settings is None:
+        return "settings are required for telegram execution"
+    if not settings.telegram_sop_enabled:
+        return "telegram_sop_enabled is false"
+    if not settings.telegram_bot_token:
+        return "telegram_bot_token is required"
+    if not command.get("conversation_id") or not command.get("chat_id"):
+        return "command conversation_id and chat_id are required"
+    if not (command.get("payload_json") or {}).get("slot_memory"):
+        return "command payload.slot_memory is required"
+    target = resolve_telegram_target(command, settings)
+    if not target.get("chat_id"):
+        return "telegram target chat_id is missing"
+    return None
 
 
 def _handoff_block_reason(command: dict, settings: Settings | None, execute_human_handoff: bool) -> str | None:
@@ -306,11 +421,35 @@ def classify_handoff_error(exc: Exception) -> str:
     return "FAILED_UNKNOWN"
 
 
+def classify_telegram_error(exc: Exception) -> str:
+    if isinstance(exc, TelegramApiError):
+        if exc.status in {401, 403} or exc.error_code in {401, 403}:
+            return "FAILED_CONFIG"
+        if exc.status in {429, 500, 502, 503, 504} or exc.retryable:
+            return "RETRYABLE"
+        text = json.dumps(exc.data or {"description": exc.description}, ensure_ascii=False).lower()
+        business_tokens = ("chat not found", "bot was blocked", "not enough rights", "message thread not found", "thread not found")
+        if any(token in text for token in business_tokens):
+            return "FAILED_BUSINESS"
+        return "FAILED_UNKNOWN"
+    if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
+        return "RETRYABLE"
+    return "FAILED_UNKNOWN"
+
+
 def _build_sender_client(settings: Settings) -> LiveChatSenderClient:
     return LiveChatSenderClient(
         settings.livechat_api_base,
         settings.livechat_account_id,
         settings.livechat_agent_access_token,
+    )
+
+
+def _build_telegram_client(settings: Settings) -> TelegramSenderClient:
+    return TelegramSenderClient(
+        settings.telegram_bot_token or "",
+        api_base=settings.telegram_api_base,
+        timeout_seconds=settings.telegram_request_timeout_seconds,
     )
 
 
@@ -377,6 +516,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicitly allow real LiveChat transfer_chat execution for human_handoff.requested.",
     )
+    parser.add_argument("--execute-telegram", action="store_true", help="Explicitly allow real Telegram SOP delivery.")
     parser.add_argument("--emit-result", action="store_true", help="Emit mock external_command_results in dry-run mode.")
     parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
     parser.add_argument("--lease-seconds", type=int, default=60, help="Seconds before a queue lease expires.")
@@ -399,12 +539,13 @@ async def run_once(
     dry_run: bool,
     emit_result: bool = False,
     execute_human_handoff: bool = False,
+    execute_telegram: bool = False,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
 ) -> dict:
-    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff)
-    settings = Settings() if execute_human_handoff else Settings(
+    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff, execute_telegram=execute_telegram)
+    settings = Settings() if (execute_human_handoff or execute_telegram) else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
     )
@@ -421,6 +562,7 @@ async def run_once(
             dry_run=dry_run,
             emit_result=emit_result,
             execute_human_handoff=execute_human_handoff,
+            execute_telegram=execute_telegram,
             settings=settings,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
@@ -431,6 +573,7 @@ async def run_once(
             "mode": "once",
             "dry_run": dry_run,
             "execute_human_handoff": execute_human_handoff,
+            "execute_telegram": execute_telegram,
             "emit_result": emit_result,
             **summarize_results(results),
             "results": results,
@@ -465,13 +608,14 @@ async def run_forever(
     dry_run: bool,
     emit_result: bool = False,
     execute_human_handoff: bool = False,
+    execute_telegram: bool = False,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
     recover_interval_seconds: int = 30,
 ) -> None:
-    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff)
-    settings = Settings() if execute_human_handoff else Settings(
+    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff, execute_telegram=execute_telegram)
+    settings = Settings() if (execute_human_handoff or execute_telegram) else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
     )
@@ -490,6 +634,7 @@ async def run_forever(
             dry_run=dry_run,
             emit_result=emit_result,
             execute_human_handoff=execute_human_handoff,
+            execute_telegram=execute_telegram,
             settings=settings,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
@@ -511,6 +656,7 @@ async def run_polling_loop(
     conversation_repository: ConversationRepository | None = None,
     emit_result: bool = False,
     execute_human_handoff: bool = False,
+    execute_telegram: bool = False,
     settings: Settings | None = None,
     worker_id: str | None = None,
     lease_seconds: int = 60,
@@ -520,7 +666,7 @@ async def run_polling_loop(
     iterations: int | None = None,
     sleep=asyncio.sleep,
 ) -> None:
-    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff)
+    validate_execution_mode(dry_run=dry_run, execute_human_handoff=execute_human_handoff, execute_telegram=execute_telegram)
     iteration = 0
     while iterations is None or iteration < iterations:
         last_recovered_at = await maybe_recover_expired_leases(
@@ -537,6 +683,7 @@ async def run_polling_loop(
                 dry_run=dry_run,
                 emit_result=emit_result,
                 execute_human_handoff=execute_human_handoff,
+                execute_telegram=execute_telegram,
                 settings=settings,
                 worker_id=worker_id,
                 lease_seconds=lease_seconds,
@@ -559,6 +706,7 @@ def main(argv: list[str] | None = None) -> int:
                     dry_run=args.dry_run,
                     emit_result=args.emit_result,
                     execute_human_handoff=args.execute_human_handoff,
+                    execute_telegram=args.execute_telegram,
                     worker_id=args.worker_id,
                     lease_seconds=args.lease_seconds,
                     max_retries=args.max_retries,
@@ -572,6 +720,7 @@ def main(argv: list[str] | None = None) -> int:
                     dry_run=args.dry_run,
                     emit_result=args.emit_result,
                     execute_human_handoff=args.execute_human_handoff,
+                    execute_telegram=args.execute_telegram,
                     worker_id=args.worker_id,
                     lease_seconds=args.lease_seconds,
                     max_retries=args.max_retries,

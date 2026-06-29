@@ -27,6 +27,14 @@ def test_external_command_worker_cli_accepts_execute_human_handoff():
     assert args.execute_human_handoff is True
 
 
+def test_external_command_worker_cli_accepts_execute_telegram():
+    from app.workers.external_command_worker import build_arg_parser
+
+    args = build_arg_parser().parse_args(["--once", "--execute-telegram"])
+
+    assert args.execute_telegram is True
+
+
 def test_external_command_worker_cli_accepts_lease_options():
     from app.workers.external_command_worker import build_arg_parser
 
@@ -276,6 +284,82 @@ def test_external_command_worker_human_handoff_dry_run_keeps_mock_behavior():
     assert result[0]["status"] == "DRY_RUN_DONE"
     assert result_repository.inserted[0]["result_type"] == "human_handoff.requested.mock_result"
     assert result_repository.inserted[0]["result_json"]["status"] == "MOCKED"
+
+
+def test_external_command_worker_real_telegram_sends_case_and_emits_result():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.sent = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 41,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 141,
+                    "command_type": "telegram.send_case_card",
+                    "payload_json": {
+                        "intent": "deposit_missing",
+                        "active_workflow": "deposit_missing",
+                        "conversation_id": "livechat:chat-1",
+                        "chat_id": "chat-1",
+                        "thread_id": "thread-1",
+                        "slot_memory": {"account_or_phone": "andy123", "deposit_screenshot": "https://cdn.example/a.png"},
+                    },
+                }
+            ]
+
+        async def mark_sent(self, command_id: int) -> None:
+            self.sent.append(command_id)
+
+    class FakeResultRepository:
+        def __init__(self) -> None:
+            self.inserted = []
+
+        async def insert_idempotent(self, result: dict) -> dict:
+            self.inserted.append(result)
+            return {"inserted": True, "duplicate": False, "id": 9}
+
+    class FakeTelegramClient:
+        def send_case_card(self, card: dict):
+            assert card["chat_id"] == "-100test"
+            assert "[Deposit not credited]" in card["card_text"]
+            return {"ok": True, "message_id": 555, "attachment_results": []}
+
+    repository = FakeCommandRepository()
+    result_repository = FakeResultRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        telegram_sop_enabled=True,
+        telegram_bot_token="secret",
+        telegram_test_group="-100test",
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            result_repository=result_repository,
+            dry_run=False,
+            execute_telegram=True,
+            emit_result=True,
+            settings=settings,
+            telegram_client_factory=lambda _settings: FakeTelegramClient(),
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.sent == [41]
+    assert result[0]["status"] == "SENT"
+    assert result_repository.inserted[0]["result_type"] == "telegram.case.created"
+    assert result_repository.inserted[0]["result_json"]["active_workflow"] == "deposit_missing"
+    assert result_repository.inserted[0]["result_json"]["telegram_message_id"] == 555
 
 
 def test_external_command_worker_real_handoff_disabled_does_not_call_livechat():

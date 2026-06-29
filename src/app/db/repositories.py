@@ -1622,6 +1622,14 @@ class ExternalResultTransactionRepository:
                 if summary_message is not None:
                     summary_message["conversation_id"] = conversation["conversation_id"]
                     message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(conn, summary_message)
+                if "slot_memory" in graph_state:
+                    graph_state = {
+                        **graph_state,
+                        "slot_memory": {
+                            **(conversation.get("slot_memory") or {}),
+                            **(graph_state.get("slot_memory") or {}),
+                        },
+                    }
                 await self.conversation_repository.update_workflow_state_on_connection(
                     conn,
                     conversation["conversation_id"],

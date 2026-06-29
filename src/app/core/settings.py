@@ -19,6 +19,15 @@ class Settings(BaseSettings):
     livechat_handoff_ignore_agents_availability: bool = True
     livechat_handoff_ignore_requester_presence: bool = True
     livechat_handoff_enabled: bool = False
+    telegram_bot_token: str | None = None
+    telegram_api_base: str = "https://api.telegram.org"
+    telegram_sop_enabled: bool = False
+    telegram_test_group: str | None = None
+    telegram_finance_group: str | None = None
+    telegram_sop_target_chat_id: str | None = None
+    telegram_sop_message_thread_id: int | None = None
+    telegram_force_no_topic: bool = False
+    telegram_request_timeout_seconds: float = 15.0
 
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
