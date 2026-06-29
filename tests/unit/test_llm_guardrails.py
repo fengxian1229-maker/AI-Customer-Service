@@ -208,3 +208,59 @@ def test_validate_rewrite_output_flags_spanish_missing_deposit_as_backend_fact_l
     )
 
     assert "backend_fact_like" in output["risk_flags"]
+
+
+def test_validate_sop_slot_extraction_rejects_protected_fields_and_forged_attachment_urls():
+    from app.llm.guardrails import validate_sop_slot_extraction_output
+
+    result = validate_sop_slot_extraction_output(
+        {
+            "intent": "deposit_missing",
+            "latest_user_text": "mi usuario es andy123 monto 500",
+            "current_slot_memory": {},
+            "attachments_summary": [{"url": "https://cdn.example/allowed.png"}],
+        },
+        {
+            "intent": "deposit_missing",
+            "extracted_slots": {
+                "account_or_phone": "andy123",
+                "amount": "500",
+                "telegram_message_id": "999",
+                "deposit_screenshot": "https://evil.example/forged.png",
+            },
+            "attachment_classification": {"deposit_screenshot": "https://evil.example/forged.png"},
+            "missing_slots": [],
+            "confidence": {"account_or_phone": 0.9, "amount": 0.8, "deposit_screenshot": 0.9},
+            "reason": "slots",
+        },
+    )
+
+    assert result["extracted_slots"]["account_or_phone"] == "andy123"
+    assert result["extracted_slots"]["amount"] == "500"
+    assert "telegram_message_id" not in result["extracted_slots"]
+    assert result["extracted_slots"].get("deposit_screenshot") is None
+    assert result["missing_slots"] == ["deposit_screenshot"]
+
+
+def test_validate_sop_slot_extraction_rejects_text_values_not_visible_to_model():
+    from app.llm.guardrails import validate_sop_slot_extraction_output
+
+    result = validate_sop_slot_extraction_output(
+        {
+            "intent": "deposit_missing",
+            "latest_user_text": "mi deposito no llego",
+            "recent_messages": [],
+            "attachments_summary": [{"url": "https://cdn.example/allowed.png"}],
+        },
+        {
+            "intent": "deposit_missing",
+            "extracted_slots": {"account_or_phone": "inventedUser", "deposit_screenshot": "https://cdn.example/allowed.png"},
+            "attachment_classification": {"deposit_screenshot": "https://cdn.example/allowed.png"},
+            "missing_slots": [],
+            "confidence": {"account_or_phone": 0.9, "deposit_screenshot": 0.9},
+            "reason": "slots",
+        },
+    )
+
+    assert result["extracted_slots"].get("account_or_phone") is None
+    assert result["missing_slots"] == ["account_or_phone"]

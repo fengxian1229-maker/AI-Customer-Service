@@ -245,6 +245,28 @@ class FakeLLMRouterService:
         return self.result
 
 
+class FakeLLMSopSlotService:
+    def __init__(self, result: dict | None = None, error: Exception | None = None) -> None:
+        self.result = result or {
+            "intent": "deposit_missing",
+            "extracted_slots": {"account_or_phone": "andy123", "amount": "500"},
+            "attachment_classification": {},
+            "missing_slots": ["deposit_screenshot"],
+            "confidence": {"account_or_phone": 0.9, "amount": 0.8},
+            "reason": "extracted slots",
+            "provider": "mock",
+            "mode": "sop_slot",
+        }
+        self.error = error
+        self.calls = []
+
+    async def extract_sop_slots(self, payload: dict) -> dict:
+        self.calls.append(payload)
+        if self.error:
+            raise self.error
+        return self.result
+
+
 class ExplodingLLMService:
     async def rewrite(self, payload: dict) -> dict:
         raise RuntimeError("shadow failed with api_key=hidden")
@@ -879,6 +901,75 @@ def test_gateway_service_guarded_authoritative_uses_llm_sop_route():
     assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
     assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
+
+
+def test_gateway_service_llm_sop_slot_extractor_merges_slots_before_sop():
+    slot_service = FakeLLMSopSlotService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_sop_slot_service=slot_service,
+        llm_sop_slot_enabled=True,
+        llm_sop_slot_min_confidence=0.7,
+    )
+
+    result = asyncio.run(service.process_event(64, make_event_with_text("mi deposito no llegó usuario andy123 monto 500")))
+
+    assert slot_service.calls
+    assert result["graph_state"]["sop_slot_source"] == "llm_guarded"
+    assert result["graph_state"]["llm_sop_slot_result"]["status"] == "accepted"
+    assert result["graph_state"]["slot_memory"]["account_or_phone"] == "andy123"
+    assert result["graph_state"]["slot_memory"]["amount"] == "500"
+
+
+def test_gateway_service_llm_sop_slot_extractor_invalid_attachment_falls_back():
+    slot_service = FakeLLMSopSlotService(
+        {
+            "intent": "deposit_missing",
+            "extracted_slots": {"account_or_phone": "andy123", "deposit_screenshot": "https://evil.example/x.png"},
+            "attachment_classification": {"deposit_screenshot": "https://evil.example/x.png"},
+            "missing_slots": [],
+            "confidence": {"account_or_phone": 0.9, "deposit_screenshot": 0.9},
+            "reason": "bad attachment",
+        }
+    )
+    event = make_event_with_text("mi deposito no llegó usuario andy123")
+    event.payload_json["attachments"] = [{"url": "https://cdn.example/allowed.png"}]
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_sop_slot_service=slot_service,
+        llm_sop_slot_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(65, event))
+
+    assert result["graph_state"]["llm_sop_slot_result"]["status"] == "fallback"
+    assert result["graph_state"]["slot_memory"]["deposit_screenshot"] == "https://cdn.example/allowed.png"
+
+
+def test_gateway_service_llm_sop_slot_extractor_exception_fallback_does_not_block_gateway():
+    slot_service = FakeLLMSopSlotService(error=RuntimeError("slot failed with api_key=hidden"))
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_sop_slot_service=slot_service,
+        llm_sop_slot_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(66, make_event_with_text("mi deposito no llegó usuario andy123")))
+
+    assert result["graph_state"]["llm_sop_slot_result"]["status"] == "fallback"
+    assert "hidden" not in str(result["graph_state"]["llm_sop_slot_result"])
 
 
 def test_gateway_service_guarded_authoritative_uses_llm_human_handoff_route():

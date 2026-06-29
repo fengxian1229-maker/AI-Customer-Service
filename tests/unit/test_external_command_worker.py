@@ -286,6 +286,111 @@ def test_external_command_worker_human_handoff_dry_run_keeps_mock_behavior():
     assert result_repository.inserted[0]["result_json"]["status"] == "MOCKED"
 
 
+def test_external_command_worker_dry_run_telegram_case_created_has_realistic_result():
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.done = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 42,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 142,
+                    "command_type": "telegram.send_case_card",
+                    "payload_json": {"intent": "withdrawal_missing", "active_workflow": "withdrawal_missing"},
+                }
+            ]
+
+        async def mark_dry_run_done(self, command_id: int) -> None:
+            self.done.append(command_id)
+
+    class FakeResultRepository:
+        def __init__(self) -> None:
+            self.inserted = []
+
+        async def insert_idempotent(self, result: dict) -> dict:
+            self.inserted.append(result)
+            return {"inserted": True, "duplicate": False, "id": 100}
+
+    result_repository = FakeResultRepository()
+
+    asyncio.run(
+        process_pending_commands(
+            FakeCommandRepository(),
+            result_repository=result_repository,
+            dry_run=True,
+            emit_result=True,
+            worker_id="worker-a",
+        )
+    )
+
+    result_json = result_repository.inserted[0]["result_json"]
+    assert result_repository.inserted[0]["result_type"] == "telegram.case.created"
+    assert result_json["case_id"] == "mock_tg:42"
+    assert result_json["telegram_message_id"] == 900042
+    assert result_json["target_chat_id"] == "mock_target"
+    assert result_json["active_workflow"] == "withdrawal_missing"
+
+
+def test_external_command_worker_dry_run_telegram_append_has_reply_to_message_id():
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 43,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 143,
+                    "command_type": "telegram.append_to_case",
+                    "payload_json": {
+                        "intent": "deposit_missing",
+                        "active_workflow": "deposit_missing",
+                        "telegram_message_id": 12345,
+                        "telegram_target_chat_id": "-100test",
+                    },
+                }
+            ]
+
+        async def mark_dry_run_done(self, command_id: int) -> None:
+            pass
+
+    class FakeResultRepository:
+        def __init__(self) -> None:
+            self.inserted = []
+
+        async def insert_idempotent(self, result: dict) -> dict:
+            self.inserted.append(result)
+            return {"inserted": True, "duplicate": False, "id": 101}
+
+    result_repository = FakeResultRepository()
+
+    asyncio.run(
+        process_pending_commands(
+            FakeCommandRepository(),
+            result_repository=result_repository,
+            dry_run=True,
+            emit_result=True,
+            worker_id="worker-a",
+        )
+    )
+
+    result_json = result_repository.inserted[0]["result_json"]
+    assert result_repository.inserted[0]["result_type"] == "telegram.append_to_case.result"
+    assert result_json["telegram_message_id"] == 910043
+    assert result_json["reply_to_message_id"] == 12345
+    assert result_json["target_chat_id"] == "-100test"
+
+
 def test_external_command_worker_real_telegram_sends_case_and_emits_result():
     from app.core.settings import Settings
     from app.workers.external_command_worker import process_pending_commands
@@ -360,6 +465,146 @@ def test_external_command_worker_real_telegram_sends_case_and_emits_result():
     assert result_repository.inserted[0]["result_type"] == "telegram.case.created"
     assert result_repository.inserted[0]["result_json"]["active_workflow"] == "deposit_missing"
     assert result_repository.inserted[0]["result_json"]["telegram_message_id"] == 555
+
+
+def test_external_command_worker_real_telegram_rejects_orphan_append_without_case_id():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.statuses = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 51,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 151,
+                    "command_type": "telegram.append_to_case",
+                    "payload_json": {
+                        "intent": "deposit_missing",
+                        "active_workflow": "deposit_missing",
+                        "telegram_message_id": 123,
+                        "slot_memory": {"telegram_message_id": 123},
+                    },
+                }
+            ]
+
+        async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+            self.statuses.append((command_id, status, error))
+
+    class FakeTelegramClient:
+        def append_to_case(self, append):
+            raise AssertionError("Telegram client must not be called")
+
+    repository = FakeCommandRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        telegram_sop_enabled=True,
+        telegram_bot_token="secret",
+        telegram_test_group="-100test",
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            dry_run=False,
+            execute_telegram=True,
+            settings=settings,
+            telegram_client_factory=lambda _settings: FakeTelegramClient(),
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.statuses == [
+        (51, "FAILED_BUSINESS", "telegram append requires existing telegram_case_id and telegram_message_id")
+    ]
+    assert result[0]["status"] == "FAILED_BUSINESS"
+
+
+def test_external_command_worker_real_telegram_append_uses_existing_message_id():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.sent = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 52,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 152,
+                    "command_type": "telegram.append_to_case",
+                    "payload_json": {
+                        "intent": "deposit_missing",
+                        "active_workflow": "deposit_missing",
+                        "telegram_case_id": "tg:123",
+                        "telegram_message_id": 123,
+                        "telegram_target_chat_id": "-100test",
+                        "slot_memory": {"telegram_case_id": "tg:123", "telegram_message_id": 123},
+                        "supplement": {"text": "TX123456", "attachment_urls": []},
+                    },
+                }
+            ]
+
+        async def mark_sent(self, command_id: int) -> None:
+            self.sent.append(command_id)
+
+    class FakeResultRepository:
+        def __init__(self) -> None:
+            self.inserted = []
+
+        async def insert_idempotent(self, result: dict) -> dict:
+            self.inserted.append(result)
+            return {"inserted": True, "duplicate": False, "id": 10}
+
+    class FakeTelegramClient:
+        def __init__(self) -> None:
+            self.append = None
+
+        def append_to_case(self, append):
+            self.append = append
+            return {"ok": True, "message_id": 556, "reply_to_message_id": append["reply_to_message_id"], "attachment_results": []}
+
+    client = FakeTelegramClient()
+    result_repository = FakeResultRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        telegram_sop_enabled=True,
+        telegram_bot_token="secret",
+        telegram_test_group="-100test",
+    )
+
+    asyncio.run(
+        process_pending_commands(
+            FakeCommandRepository(),
+            result_repository=result_repository,
+            dry_run=False,
+            execute_telegram=True,
+            emit_result=True,
+            settings=settings,
+            telegram_client_factory=lambda _settings: client,
+            worker_id="worker-a",
+        )
+    )
+
+    assert client.append["reply_to_message_id"] == 123
+    result_json = result_repository.inserted[0]["result_json"]
+    assert result_json["telegram_message_id"] == 556
+    assert result_json["reply_to_message_id"] == 123
+    assert result_json["target_chat_id"] == "-100test"
+    assert result_json["active_workflow"] == "deposit_missing"
 
 
 def test_external_command_worker_real_handoff_disabled_does_not_call_livechat():

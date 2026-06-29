@@ -1508,6 +1508,8 @@ def test_gateway_llm_summary_reports_shadow_and_fallback_flags():
         "router_mode": "shadow",
         "router_min_confidence": 0.75,
         "router_fallback_to_deterministic": True,
+        "sop_slot_enabled": False,
+        "sop_slot_min_confidence": 0.7,
         "fallback_enabled": False,
         "shadow_active": True,
     }

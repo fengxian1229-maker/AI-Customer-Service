@@ -27,8 +27,13 @@ def run_sop(state: dict[str, Any]) -> dict[str, Any]:
 
 def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) -> dict[str, Any]:
     text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")
-    extraction = extract_sop_slots(intent, state.get("slot_memory") or {}, text, state.get("attachments", []))
+    initial_slot_memory = dict(state.get("slot_memory") or {})
+    extraction = extract_sop_slots(intent, initial_slot_memory, text, state.get("attachments", []))
     slot_memory = extraction["slot_memory"]
+    if (state.get("llm_sop_slot_result") or {}).get("status") == "accepted":
+        for key, value in initial_slot_memory.items():
+            if value and key in {"account_or_phone", "amount", "payment_channel", "order_id", "deposit_screenshot", "withdrawal_screenshot"}:
+                slot_memory[key] = value
     if slot_memory.get("order_id"):
         legacy_order_key = "deposit_order_id" if intent == "deposit_missing" else "withdrawal_order_id"
         slot_memory.setdefault(legacy_order_key, slot_memory["order_id"])

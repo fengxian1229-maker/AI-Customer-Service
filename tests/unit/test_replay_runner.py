@@ -87,7 +87,12 @@ def initial_conversation(case_name: str) -> dict:
                 "status": "WAITING_EXTERNAL",
                 "active_workflow": "deposit_missing",
                 "workflow_stage": "waiting_backend",
-                "slot_memory": {"account_or_phone": "user123", "deposit_screenshot": "https://example.test/old.jpg"},
+                "slot_memory": {
+                    "account_or_phone": "user123",
+                    "deposit_screenshot": "https://example.test/old.jpg",
+                    "telegram_case_id": "tg:900001",
+                    "telegram_message_id": 900001,
+                },
             }
         )
     return conversation

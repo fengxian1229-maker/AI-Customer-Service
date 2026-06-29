@@ -100,6 +100,26 @@ class LLMRouterDecisionOutput(TypedDict, total=False):
     mode: str
 
 
+class LLMSopSlotExtractionInput(TypedDict, total=False):
+    intent: str
+    current_slot_memory: dict[str, Any]
+    latest_user_text: str
+    attachments_summary: list[dict[str, Any]]
+    recent_messages: list[dict[str, Any]]
+    language: str
+
+
+class LLMSopSlotExtractionOutput(TypedDict, total=False):
+    intent: str
+    extracted_slots: dict[str, str | None]
+    attachment_classification: dict[str, Any]
+    missing_slots: list[str]
+    confidence: dict[str, float]
+    reason: str
+    provider: str
+    mode: str
+
+
 class LLMRewriteShadowSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -141,4 +161,15 @@ class LLMRouterDecisionSchema(BaseModel):
     requires_backend: bool = False
     missing_slots: list[str] = Field(default_factory=list)
     preserved_entities: list[str] = Field(default_factory=list)
+    reason: str
+
+
+class LLMSopSlotExtractionSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent: str
+    extracted_slots: dict[str, str | None] = Field(default_factory=dict)
+    attachment_classification: dict[str, Any] = Field(default_factory=dict)
+    missing_slots: list[str] = Field(default_factory=list)
+    confidence: dict[str, float] = Field(default_factory=dict)
     reason: str

@@ -39,7 +39,7 @@ def build_telegram_case_append(command: dict[str, Any], target: dict[str, Any], 
     supplement = dict(payload.get("supplement") or {})
     slot_memory = dict(payload.get("slot_memory") or {})
     intent = payload.get("intent") or payload.get("active_workflow") or "customer_case"
-    attachment_urls = supplement.get("attachment_urls") or []
+    attachment_urls = list(dict.fromkeys(str(url) for url in (supplement.get("attachment_urls") or []) if url))
     text = "\n".join(
         [
             "[Customer update]",
@@ -51,8 +51,6 @@ def build_telegram_case_append(command: dict[str, Any], target: dict[str, Any], 
         ]
     )
     attachments = [{"url": url, "name": "supplement", "kind": "screenshot"} for url in attachment_urls]
-    if not attachments:
-        attachments = _case_attachments(intent, slot_memory)
     return {
         "target": {"group_id": target.get("chat_id"), "topic_id": target.get("message_thread_id")},
         "chat_id": target.get("chat_id"),

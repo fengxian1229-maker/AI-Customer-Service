@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.workflows.sop_definitions import get_sop_definition
+
 
 ALLOWED_LLM_ROUTES = (
     "faq",
@@ -85,6 +87,21 @@ _USER_FACT_TOKENS = (
     "teléfono",
     "手机号",
 )
+
+SOP_SLOT_FIELDS = {
+    "account_or_phone",
+    "amount",
+    "payment_channel",
+    "order_id",
+    "deposit_screenshot",
+    "withdrawal_screenshot",
+}
+PROTECTED_SOP_SLOT_FIELDS = {
+    "telegram_case_id",
+    "telegram_message_id",
+    "telegram_target_chat_id",
+    "telegram_message_thread_id",
+}
 
 
 def normalize_confidence(value) -> float:
@@ -246,6 +263,65 @@ def validate_router_decision_output(payload: dict[str, Any], output: dict[str, A
     }
 
 
+def validate_sop_slot_extraction_output(payload: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
+    expected_intent = str(payload.get("intent") or "")
+    output_intent = _require_str(output, "intent", "sop slot extraction")
+    if output_intent != expected_intent:
+        raise ValueError(f"SOP slot extraction intent mismatch: {output_intent} != {expected_intent}")
+    reason = _require_str(output, "reason", "sop slot extraction")
+    allowed_urls = _allowed_attachment_urls(payload)
+    visible_text = _visible_sop_text(payload)
+    extracted = {}
+    confidence = {}
+    dropped_fields = []
+    for key, value in dict(output.get("extracted_slots") or {}).items():
+        if key in PROTECTED_SOP_SLOT_FIELDS:
+            dropped_fields.append(key)
+            continue
+        if key not in SOP_SLOT_FIELDS:
+            dropped_fields.append(key)
+            continue
+        normalized_value = _optional_str(value)
+        if normalized_value is None:
+            extracted[key] = None
+            confidence[key] = normalize_confidence((output.get("confidence") or {}).get(key))
+            continue
+        if key in {"deposit_screenshot", "withdrawal_screenshot"}:
+            if normalized_value not in allowed_urls:
+                extracted[key] = None
+                confidence[key] = 0.0
+                dropped_fields.append(key)
+                continue
+        elif not _text_value_is_visible(normalized_value, visible_text):
+            extracted[key] = None
+            confidence[key] = 0.0
+            dropped_fields.append(key)
+            continue
+        extracted[key] = normalized_value
+        confidence[key] = normalize_confidence((output.get("confidence") or {}).get(key))
+
+    slot_memory = {**(payload.get("current_slot_memory") or {}), **{k: v for k, v in extracted.items() if v}}
+    definition = get_sop_definition(expected_intent)
+    missing_slots = [slot for slot in (definition.required_slots if definition else ()) if not slot_memory.get(slot)]
+    attachment_classification = {
+        key: value
+        for key, value in dict(output.get("attachment_classification") or {}).items()
+        if key in {"deposit_screenshot", "withdrawal_screenshot", "unknown_attachments"}
+    }
+    for key in ("deposit_screenshot", "withdrawal_screenshot"):
+        if attachment_classification.get(key) not in allowed_urls:
+            attachment_classification[key] = None
+    return {
+        "intent": expected_intent,
+        "extracted_slots": extracted,
+        "attachment_classification": attachment_classification,
+        "missing_slots": missing_slots,
+        "confidence": confidence,
+        "reason": reason,
+        "dropped_fields": dropped_fields,
+    }
+
+
 def _require_str(output: dict[str, Any], field: str, output_name: str) -> str:
     value = output.get(field)
     if value is None:
@@ -261,6 +337,36 @@ def _optional_str(value) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _allowed_attachment_urls(payload: dict[str, Any]) -> set[str]:
+    urls = {
+        str(item.get("url"))
+        for item in payload.get("attachments_summary") or []
+        if item.get("url")
+    }
+    current = payload.get("current_slot_memory") or {}
+    for key in ("deposit_screenshot", "withdrawal_screenshot"):
+        if current.get(key):
+            urls.add(str(current[key]))
+    return urls
+
+
+def _visible_sop_text(payload: dict[str, Any]) -> str:
+    parts = [str(payload.get("latest_user_text") or "")]
+    for message in payload.get("recent_messages") or []:
+        parts.append(str(message.get("text_content") or message.get("text") or message.get("content") or ""))
+    return "\n".join(parts).lower()
+
+
+def _text_value_is_visible(value: str, visible_text: str) -> bool:
+    lowered = value.lower()
+    if lowered in visible_text:
+        return True
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if digits and digits in "".join(ch for ch in visible_text if ch.isdigit()):
+        return True
+    return False
 
 
 def _string_list(value) -> list[str]:

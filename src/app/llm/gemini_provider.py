@@ -12,8 +12,11 @@ from app.llm.contracts import (
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
     LLMRewriteShadowSchema,
+    LLMSopSlotExtractionInput,
+    LLMSopSlotExtractionOutput,
+    LLMSopSlotExtractionSchema,
 )
-from app.llm.guardrails import validate_intent_output, validate_rewrite_output, validate_router_decision_output
+from app.llm.guardrails import validate_intent_output, validate_rewrite_output, validate_router_decision_output, validate_sop_slot_extraction_output
 from app.llm.gemini_model import build_gemini_chat_model
 
 REWRITE_SYSTEM_PROMPT = """You are a rewrite shadow model for an AI customer service routing system.
@@ -126,6 +129,19 @@ Return only structured JSON matching the schema."""
 
 ROUTER_SYSTEM_PROMPT = GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
+SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT = """You are a SOP slot extraction node for a customer service system.
+
+Your only job is to extract structured slots for deposit_missing or withdrawal_missing workflows.
+Do not reply to the customer.
+Do not generate tool calls.
+Do not generate external commands.
+Do not decide whether Telegram should be sent.
+Do not promise that anything was processed, credited, successful, or failed.
+Do not invent usernames, phone numbers, amounts, order IDs, or screenshot URLs.
+Screenshot URLs must be selected only from attachments_summary or current_slot_memory.
+If uncertain, return null for that slot and low confidence.
+Return only structured JSON matching the schema."""
+
 
 class GeminiLLMProvider:
     provider_name = "gemini"
@@ -191,6 +207,19 @@ class GeminiLLMProvider:
             **result,
             "provider": self.provider_name,
             "mode": router_mode,
+        }
+
+    async def extract_sop_slots(self, payload: LLMSopSlotExtractionInput) -> LLMSopSlotExtractionOutput:
+        structured_model = self.model.with_structured_output(
+            schema=LLMSopSlotExtractionSchema,
+            method="json_schema",
+        )
+        response = await structured_model.ainvoke(_build_chat_messages(SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT, payload))
+        result = validate_sop_slot_extraction_output(payload, _model_dump(response))
+        return {
+            **result,
+            "provider": self.provider_name,
+            "mode": "sop_slot",
         }
 
 

@@ -35,22 +35,6 @@ FAILED_AFTER_EXTERNAL_SUCCESS = "FAILED_AFTER_EXTERNAL_SUCCESS"
 
 
 MOCK_RESULT_BY_COMMAND_TYPE = {
-    "telegram.send_case_card": (
-        "telegram.case.created",
-        {
-            "status": "created",
-            "case_id": "mock_case",
-            "message": "telegram.send_case_card dry-run completed",
-            "active_workflow": "deposit_missing",
-        },
-    ),
-    "telegram.append_to_case": (
-        "telegram.append_to_case.result",
-        {
-            "status": "appended",
-            "message": "telegram.append_to_case dry-run completed",
-        },
-    ),
     "backend.query": (
         "backend.query.result",
         {
@@ -151,7 +135,7 @@ async def _process_dry_run_command(
     print(json.dumps({"dry_run": True, "command": command}, ensure_ascii=False, default=str))
     result_insert = None
     if emit_result:
-        result_type, result_json = MOCK_RESULT_BY_COMMAND_TYPE[command_type]
+        result_type, result_json = _build_mock_result_for_command(command)
         result_insert = await result_repository.insert_idempotent(_build_result_record(command, result_type, result_json))
     await repository.mark_dry_run_done(command["id"])
     item = {"id": command["id"], "command_type": command_type, "status": "DRY_RUN_DONE"}
@@ -300,6 +284,8 @@ async def _process_real_telegram_command(
         status = "SKIPPED_DISABLED" if block_reason == "--execute-telegram is required" else "FAILED_CONFIG"
         if block_reason.startswith("unsupported"):
             status = "FAILED_UNSUPPORTED"
+        if block_reason == "telegram append requires existing telegram_case_id and telegram_message_id":
+            status = "FAILED_BUSINESS"
         await _mark_command_status(repository, command["id"], status, block_reason, max_retries=max_retries)
         return {"id": command["id"], "command_type": command["command_type"], "status": status, "error": block_reason}
 
@@ -329,7 +315,8 @@ async def _process_real_telegram_command(
                 "active_workflow": payload.get("active_workflow") or intent,
             }
         else:
-            append = build_telegram_case_append(command, target, reply_to_message_id=payload.get("telegram_message_id"))
+            reply_to_message_id = payload.get("telegram_message_id") or (payload.get("slot_memory") or {}).get("telegram_message_id")
+            append = build_telegram_case_append(command, target, reply_to_message_id=reply_to_message_id)
             delivery = client.append_to_case(append)
             result_type = "telegram.append_to_case.result"
             result_json = {
@@ -378,10 +365,54 @@ def _telegram_block_reason(command: dict, settings: Settings | None, execute_tel
         return "command conversation_id and chat_id are required"
     if not (command.get("payload_json") or {}).get("slot_memory"):
         return "command payload.slot_memory is required"
+    if command.get("command_type") == "telegram.append_to_case":
+        payload = command.get("payload_json") or {}
+        slot_memory = payload.get("slot_memory") or {}
+        case_id = payload.get("telegram_case_id") or slot_memory.get("telegram_case_id")
+        message_id = payload.get("telegram_message_id") or slot_memory.get("telegram_message_id")
+        if not case_id or not message_id:
+            return "telegram append requires existing telegram_case_id and telegram_message_id"
     target = resolve_telegram_target(command, settings)
     if not target.get("chat_id"):
         return "telegram target chat_id is missing"
     return None
+
+
+def _build_mock_result_for_command(command: dict) -> tuple[str, dict]:
+    command_type = command["command_type"]
+    payload = command.get("payload_json") or {}
+    if command_type == "telegram.send_case_card":
+        return (
+            "telegram.case.created",
+            {
+                "status": "created",
+                "case_id": f"mock_tg:{command['id']}",
+                "telegram_message_id": 900000 + int(command["id"]),
+                "target_chat_id": "mock_target",
+                "message_thread_id": None,
+                "target_source": "dry_run",
+                "delivery_mode": "dry_run",
+                "attachment_results": [],
+                "intent": payload.get("intent"),
+                "active_workflow": payload.get("active_workflow") or payload.get("intent"),
+            },
+        )
+    if command_type == "telegram.append_to_case":
+        return (
+            "telegram.append_to_case.result",
+            {
+                "status": "appended",
+                "telegram_message_id": 910000 + int(command["id"]),
+                "reply_to_message_id": payload.get("telegram_message_id"),
+                "target_chat_id": payload.get("telegram_target_chat_id") or "mock_target",
+                "message_thread_id": payload.get("telegram_message_thread_id"),
+                "target_source": "dry_run",
+                "attachment_results": [],
+                "intent": payload.get("intent"),
+                "active_workflow": payload.get("active_workflow") or payload.get("intent"),
+            },
+        )
+    return MOCK_RESULT_BY_COMMAND_TYPE[command_type]
 
 
 def _handoff_block_reason(command: dict, settings: Settings | None, execute_human_handoff: bool) -> str | None:
@@ -446,10 +477,21 @@ def _build_sender_client(settings: Settings) -> LiveChatSenderClient:
 
 
 def _build_telegram_client(settings: Settings) -> TelegramSenderClient:
+    attachment_auth_header = None
+    if settings.livechat_account_id and settings.livechat_agent_access_token:
+        attachment_auth_header = LiveChatSenderClient(
+            settings.livechat_api_base,
+            settings.livechat_account_id,
+            settings.livechat_agent_access_token,
+        ).auth_header()
     return TelegramSenderClient(
         settings.telegram_bot_token or "",
         api_base=settings.telegram_api_base,
         timeout_seconds=settings.telegram_request_timeout_seconds,
+        attachment_auth_header=attachment_auth_header,
+        attachment_download_timeout_seconds=settings.telegram_attachment_download_timeout_seconds,
+        attachment_max_bytes=settings.telegram_attachment_max_bytes,
+        upload_attachments_via_download=settings.telegram_upload_attachments_via_download,
     )
 
 

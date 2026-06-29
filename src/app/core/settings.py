@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     telegram_sop_message_thread_id: int | None = None
     telegram_force_no_topic: bool = False
     telegram_request_timeout_seconds: float = 15.0
+    telegram_upload_attachments_via_download: bool = True
+    telegram_attachment_download_timeout_seconds: float = 15.0
+    telegram_attachment_max_bytes: int = 10485760
 
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
@@ -49,6 +52,9 @@ class Settings(BaseSettings):
     llm_router_mode: str = "shadow"
     llm_router_min_confidence: float = 0.75
     llm_router_fallback_to_deterministic: bool = True
+    llm_sop_slot_enabled: bool = False
+    llm_sop_slot_min_confidence: float = 0.70
+    llm_sop_slot_fallback_to_deterministic: bool = True
     gemini_model: str = "gemini-3.1-flash-lite"
     gemini_project: str = "project-gemini-0306"
     gemini_location: str = "global"

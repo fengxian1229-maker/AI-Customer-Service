@@ -3,8 +3,8 @@ import re
 from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
 from app.graph.builder import build_workflow_graph
 from app.graph.nodes import build_graph_state_from_event, prepare_route_state
-from app.llm.contracts import LLMIntentShadowInput, LLMRewriteShadowInput, LLMRouterInput
-from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output
+from app.llm.contracts import LLMIntentShadowInput, LLMRewriteShadowInput, LLMRouterInput, LLMSopSlotExtractionInput
+from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output, validate_sop_slot_extraction_output
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.faq_outbound_plan import build_faq_outbound_plan_from_rag_context, faq_plan_to_outbound_rows
@@ -65,6 +65,10 @@ class GatewayService:
         llm_router_mode: str = "shadow",
         llm_router_min_confidence: float = 0.75,
         llm_router_fallback_to_deterministic: bool = True,
+        llm_sop_slot_service=None,
+        llm_sop_slot_enabled: bool = False,
+        llm_sop_slot_min_confidence: float = 0.70,
+        llm_sop_slot_fallback_to_deterministic: bool = True,
         recent_message_limit: int = 10,
     ) -> None:
         self.inbound_repository = inbound_repository
@@ -94,6 +98,10 @@ class GatewayService:
         self.llm_router_mode = normalized_router_mode if normalized_router_mode in LLM_ROUTER_MODES else "shadow"
         self.llm_router_min_confidence = float(llm_router_min_confidence)
         self.llm_router_fallback_to_deterministic = bool(llm_router_fallback_to_deterministic)
+        self.llm_sop_slot_service = llm_sop_slot_service
+        self.llm_sop_slot_enabled = bool(llm_sop_slot_enabled)
+        self.llm_sop_slot_min_confidence = float(llm_sop_slot_min_confidence)
+        self.llm_sop_slot_fallback_to_deterministic = bool(llm_sop_slot_fallback_to_deterministic)
         self.recent_message_limit = recent_message_limit
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
@@ -204,6 +212,9 @@ class GatewayService:
         try:
             routed_state = await self._prepare_route_state(graph_state)
             active_state = routed_state
+            if self._should_run_sop_slot_extraction(routed_state):
+                routed_state = await self._run_sop_slot_extraction(routed_state)
+                active_state = routed_state
             if self.llm_rewrite_shadow_enabled and self.llm_rewrite_service:
                 routed_state["llm_rewrite_result"] = await self._run_rewrite_shadow(routed_state)
             if self.llm_intent_shadow_enabled and self.llm_intent_service:
@@ -352,6 +363,86 @@ class GatewayService:
             return sanitized
         except Exception as exc:
             return self._shadow_error_result(exc)
+
+    def _should_run_sop_slot_extraction(self, graph_state: dict) -> bool:
+        intent = (graph_state.get("intent_result") or {}).get("intent")
+        return bool(
+            self.llm_sop_slot_enabled
+            and self.llm_sop_slot_service
+            and hasattr(self.llm_sop_slot_service, "extract_sop_slots")
+            and graph_state.get("route") == "sop"
+            and intent in {"deposit_missing", "withdrawal_missing"}
+            and graph_state.get("workflow_stage") not in {"waiting_backend", "backend_querying"}
+        )
+
+    async def _run_sop_slot_extraction(self, graph_state: dict) -> dict:
+        payload = self._build_llm_sop_slot_input(graph_state)
+        try:
+            raw_result = await self.llm_sop_slot_service.extract_sop_slots(payload)
+            sanitized_raw = self._sanitize_value(raw_result or {})
+            result = validate_sop_slot_extraction_output(payload, sanitized_raw)
+            if result.get("dropped_fields"):
+                return self._sop_slot_fallback_state(graph_state, "guardrail_dropped_fields", result=result)
+            if self._sop_slot_low_confidence(result):
+                return self._sop_slot_fallback_state(graph_state, "low_confidence", result=result)
+            slot_memory = dict(graph_state.get("slot_memory") or {})
+            for key, value in (result.get("extracted_slots") or {}).items():
+                if value:
+                    slot_memory[key] = value
+            return {
+                **graph_state,
+                "slot_memory": slot_memory,
+                "llm_sop_slot_result": self._sop_slot_result_summary("accepted", result=result, provider=sanitized_raw.get("provider"), mode=sanitized_raw.get("mode")),
+                "sop_slot_source": "llm_guarded",
+            }
+        except Exception as exc:
+            return self._sop_slot_fallback_state(graph_state, "exception" if not isinstance(exc, ValueError) else "validation_error", exc=exc)
+
+    def _sop_slot_low_confidence(self, result: dict) -> bool:
+        extracted = result.get("extracted_slots") or {}
+        confidence = result.get("confidence") or {}
+        for key, value in extracted.items():
+            if value and float(confidence.get(key) or 0.0) < self.llm_sop_slot_min_confidence:
+                return True
+        return False
+
+    def _sop_slot_fallback_state(self, graph_state: dict, fallback_reason: str, result: dict | None = None, exc: Exception | None = None) -> dict:
+        return {
+            **graph_state,
+            "llm_sop_slot_result": self._sop_slot_result_summary(
+                "fallback",
+                result=result,
+                fallback_reason=fallback_reason,
+                error_type=type(exc).__name__ if exc else None,
+                error_message=str(exc) if exc else None,
+            ),
+            "sop_slot_source": "deterministic",
+        }
+
+    def _sop_slot_result_summary(
+        self,
+        status: str,
+        result: dict | None = None,
+        provider: str | None = None,
+        mode: str | None = None,
+        fallback_reason: str | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> dict:
+        result = result or {}
+        summary = {
+            "status": status,
+            "provider": provider or result.get("provider"),
+            "mode": mode or result.get("mode") or "sop_slot",
+            "intent": result.get("intent"),
+            "missing_slots": result.get("missing_slots"),
+            "confidence": result.get("confidence"),
+            "reason": result.get("reason"),
+            "fallback_reason": fallback_reason,
+            "error_type": error_type,
+            "error_message": error_message,
+        }
+        return self._sanitize_value({key: value for key, value in summary.items() if value is not None})
 
     async def _prepare_route_state(self, graph_state: dict) -> dict:
         if self.llm_router_mode == "faq_authoritative":
@@ -682,6 +773,8 @@ class GatewayService:
         intent = graph_state.get("llm_intent_result")
         router = graph_state.get("llm_router_result")
         if not rewrite and not intent and not router:
+            if graph_state.get("llm_sop_slot_result"):
+                return {"llm_sop_slot": self._sanitize_value(graph_state["llm_sop_slot_result"])}
             return {}
         metadata = {}
         if rewrite or intent:
@@ -693,6 +786,8 @@ class GatewayService:
             }
         if router:
             metadata["llm_router"] = self._router_checkpoint_summary(router, graph_state)
+        if graph_state.get("llm_sop_slot_result"):
+            metadata["llm_sop_slot"] = self._sanitize_value(graph_state["llm_sop_slot_result"])
         if graph_state.get("rag_context"):
             metadata["rag"] = self._rag_checkpoint_summary(graph_state["rag_context"])
         return self._sanitize_value(metadata)
@@ -866,6 +961,16 @@ class GatewayService:
             "workflow_stage": graph_state.get("workflow_stage"),
             "slot_memory": dict(graph_state.get("slot_memory") or {}),
             "attachments_summary": self._attachments_summary(graph_state),
+        }
+
+    def _build_llm_sop_slot_input(self, graph_state: dict) -> LLMSopSlotExtractionInput:
+        return {
+            "intent": (graph_state.get("intent_result") or {}).get("intent"),
+            "current_slot_memory": dict(graph_state.get("slot_memory") or {}),
+            "latest_user_text": normalize_text(graph_state.get("rewritten_question") or graph_state.get("raw_user_input")),
+            "attachments_summary": self._attachments_summary(graph_state),
+            "recent_messages": list(graph_state.get("recent_messages") or []),
+            "language": ((graph_state.get("rewrite_result") or {}).get("language")) or "unknown",
         }
 
     def _attachments_summary(self, graph_state: dict) -> list[dict]:

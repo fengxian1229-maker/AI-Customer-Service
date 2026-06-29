@@ -79,6 +79,7 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
             getattr(settings, "llm_intent_shadow_enabled", False),
             getattr(settings, "llm_intent_fallback_enabled", False),
             getattr(settings, "llm_router_mode", "shadow") != "shadow",
+            getattr(settings, "llm_sop_slot_enabled", False),
         ]
     ):
         service_kwargs.update(
@@ -93,6 +94,10 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
                 "llm_router_mode": getattr(settings, "llm_router_mode", "shadow"),
                 "llm_router_min_confidence": getattr(settings, "llm_router_min_confidence", 0.75),
                 "llm_router_fallback_to_deterministic": getattr(settings, "llm_router_fallback_to_deterministic", True),
+                "llm_sop_slot_service": llm_provider if getattr(settings, "llm_sop_slot_enabled", False) else None,
+                "llm_sop_slot_enabled": getattr(settings, "llm_sop_slot_enabled", False),
+                "llm_sop_slot_min_confidence": getattr(settings, "llm_sop_slot_min_confidence", 0.70),
+                "llm_sop_slot_fallback_to_deterministic": getattr(settings, "llm_sop_slot_fallback_to_deterministic", True),
             }
         )
     service = GatewayService(**service_kwargs)
@@ -143,6 +148,8 @@ def _build_llm_summary(settings) -> dict:
         "router_mode": getattr(settings, "llm_router_mode", "shadow"),
         "router_min_confidence": getattr(settings, "llm_router_min_confidence", 0.75),
         "router_fallback_to_deterministic": bool(getattr(settings, "llm_router_fallback_to_deterministic", True)),
+        "sop_slot_enabled": bool(getattr(settings, "llm_sop_slot_enabled", False)),
+        "sop_slot_min_confidence": getattr(settings, "llm_sop_slot_min_confidence", 0.70),
     }
     summary["fallback_enabled"] = bool(summary["rewrite_fallback_enabled"] or summary["intent_fallback_enabled"])
     summary["shadow_active"] = bool(

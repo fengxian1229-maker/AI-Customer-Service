@@ -499,8 +499,10 @@ def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monke
         "rewrite_fallback_enabled": False,
         "intent_fallback_enabled": False,
         "router_mode": "guarded_authoritative",
-        "router_min_confidence": 0.82,
-        "router_fallback_to_deterministic": True,
-        "fallback_enabled": False,
-        "shadow_active": True,
-    }
+            "router_min_confidence": 0.82,
+            "router_fallback_to_deterministic": True,
+            "sop_slot_enabled": False,
+            "sop_slot_min_confidence": 0.7,
+            "fallback_enabled": False,
+            "shadow_active": True,
+        }

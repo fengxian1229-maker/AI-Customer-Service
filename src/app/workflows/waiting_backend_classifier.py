@@ -6,6 +6,8 @@ from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
 from app.workflows.slot_extractors import attachment_urls, extract_identity, extract_order_id, extract_transaction_signal, is_explicit_human_request
 
+CASE_PENDING_REPLY = "案件仍在建立或确认中，我们会继续跟进，请稍候。"
+
 
 def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     slot_memory = dict(state.get("slot_memory") or {})
@@ -33,7 +35,9 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
             slot_memory["forwarded_attachment_urls"] = forwarded
             screenshot_key = "deposit_screenshot" if active_workflow == "deposit_missing" else "withdrawal_screenshot"
             slot_memory.setdefault(screenshot_key, new_urls[0])
-            reply = plan_sop_reply(str(active_workflow), {"action": "append_to_case"})
+            if policy["action"] != "append_to_case":
+                return _waiting_followup_state(state, slot_memory)
+            reply = plan_sop_reply(str(active_workflow), policy)
             return {
                 **state,
                 "slot_memory": slot_memory,
@@ -56,7 +60,9 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
             slot_memory["account_or_phone"] = identity["value"]
         if order_id:
             slot_memory["order_id"] = order_id
-        reply = plan_sop_reply(str(active_workflow), {"action": "append_to_case"})
+        if policy["action"] != "append_to_case":
+            return _waiting_followup_state(state, slot_memory)
+        reply = plan_sop_reply(str(active_workflow), policy)
         return {
             **state,
             "slot_memory": slot_memory,
@@ -100,5 +106,16 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
         "workflow_stage": "waiting_backend",
         "sop_action": "waiting_followup",
         "response_text": plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"],
+        "commands": [],
+    }
+
+
+def _waiting_followup_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **state,
+        "slot_memory": slot_memory,
+        "workflow_stage": "waiting_backend",
+        "sop_action": "waiting_followup",
+        "response_text": CASE_PENDING_REPLY,
         "commands": [],
     }

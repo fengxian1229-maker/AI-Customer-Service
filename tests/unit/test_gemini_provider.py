@@ -271,6 +271,51 @@ def test_gemini_provider_route_uses_prompt_and_mode_from_router_mode(monkeypatch
     ]
 
 
+def test_gemini_provider_extract_sop_slots_uses_structured_output(monkeypatch):
+    from app.core.settings import Settings
+    from app.llm.gemini_provider import GeminiLLMProvider, SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT
+
+    captured = {}
+
+    class FakeStructuredModel:
+        async def ainvoke(self, payload):
+            captured["payload"] = payload
+            return {
+                "intent": "deposit_missing",
+                "extracted_slots": {"account_or_phone": "andy123", "amount": "500"},
+                "attachment_classification": {},
+                "missing_slots": ["deposit_screenshot"],
+                "confidence": {"account_or_phone": 0.9, "amount": 0.8},
+                "reason": "slots",
+            }
+
+    class FakeModel:
+        def with_structured_output(self, schema=None, method=None):
+            captured["schema"] = schema
+            captured["method"] = method
+            return FakeStructuredModel()
+
+    monkeypatch.setattr("app.llm.gemini_provider.build_gemini_chat_model", lambda settings: FakeModel())
+
+    provider = GeminiLLMProvider(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
+    result = asyncio.run(
+        provider.extract_sop_slots(
+            {
+                "intent": "deposit_missing",
+                "latest_user_text": "usuario andy123 monto 500",
+                "attachments_summary": [],
+                "current_slot_memory": {},
+            }
+        )
+    )
+
+    assert captured["method"] == "json_schema"
+    assert captured["payload"][0][1] == SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT
+    assert result["provider"] == "gemini"
+    assert result["mode"] == "sop_slot"
+    assert result["extracted_slots"]["account_or_phone"] == "andy123"
+
+
 def test_gemini_provider_build_chat_messages_serializes_datetime_recent_messages():
     import json
 

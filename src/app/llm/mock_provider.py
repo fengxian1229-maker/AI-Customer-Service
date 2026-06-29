@@ -5,7 +5,10 @@ from app.llm.contracts import (
     LLMRouterInput,
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
+    LLMSopSlotExtractionInput,
+    LLMSopSlotExtractionOutput,
 )
+from app.workflows.sop_slot_extractor import extract_sop_slots
 from app.workflows.slot_extractors import extract_identity, extract_order_id, normalize_text
 
 
@@ -75,6 +78,24 @@ class MockLLMProvider:
             "reason": "Mock guarded router mirrors deterministic decision for offline validation.",
             "provider": self.provider_name,
             "mode": router_mode,
+        }
+
+    async def extract_sop_slots(self, payload: LLMSopSlotExtractionInput) -> LLMSopSlotExtractionOutput:
+        result = extract_sop_slots(
+            str(payload.get("intent") or ""),
+            payload.get("current_slot_memory") or {},
+            payload.get("latest_user_text") or "",
+            payload.get("attachments_summary") or [],
+        )
+        return {
+            "intent": result["intent"],
+            "extracted_slots": result["extracted_slots"],
+            "attachment_classification": result["attachment_classification"],
+            "missing_slots": result["missing_slots"],
+            "confidence": result["confidence"],
+            "reason": "Mock SOP slot extractor mirrors deterministic fallback for offline validation.",
+            "provider": self.provider_name,
+            "mode": "sop_slot",
         }
 
 
