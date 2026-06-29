@@ -923,6 +923,50 @@ def test_gateway_service_guarded_authoritative_uses_llm_human_handoff_route():
     assert [command["command_type"] for command in external_repository.inserted] == ["human_handoff.requested"]
 
 
+def test_gateway_service_guarded_authoritative_forces_requires_human_for_llm_handoff_route():
+    router_service = FakeLLMRouterService(
+        {
+            "rewritten_question": "I need a real support agent",
+            "normalized_query": "I need a real support agent",
+            "language": "en",
+            "intent": "explicit_human_request",
+            "route": "human_handoff",
+            "confidence": 0.96,
+            "sop_name": None,
+            "faq_query": None,
+            "risk_level": "elevated",
+            "requires_human": False,
+            "requires_backend": False,
+            "missing_slots": [],
+            "preserved_entities": [],
+            "reason": "requires human",
+            "provider": "mock",
+            "mode": "guarded_authoritative",
+        }
+    )
+    external_repository = FakeExternalCommandRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=external_repository,
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="guarded_authoritative",
+    )
+
+    result = asyncio.run(service.process_event(40, make_event_with_text("how to deposit")))
+
+    assert result["graph_state"]["route"] == "human_handoff"
+    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["intent_result"]["intent"] == "explicit_human_request"
+    assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
+    assert result["graph_state"]["llm_router_result"]["requires_human"] is True
+    assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
+    assert [command["command_type"] for command in external_repository.inserted] == ["human_handoff.requested"]
+    assert result["outbound_messages"] == []
+
+
 def test_gateway_service_guarded_authoritative_falls_back_for_low_confidence_invalid_route_and_exception():
     for router_service, reason in [
         (FakeLLMRouterService({**FakeLLMRouterService().result, "confidence": 0.2}), "low_confidence"),

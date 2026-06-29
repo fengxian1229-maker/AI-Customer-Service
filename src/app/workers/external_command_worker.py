@@ -237,7 +237,7 @@ async def _process_real_command(
         await _record_handoff_stage(repository, command["id"], handoff_stage)
         if emit_result:
             result_insert = await result_repository.insert_idempotent(
-                _build_result_record(command, HUMAN_HANDOFF_RESULT_TYPE, result_json)
+                _build_result_record(command, HUMAN_HANDOFF_RESULT_TYPE, result_json, status="PROCESSED")
             )
         handoff_stage["result_emitted"] = bool(emit_result)
         await _record_handoff_stage(repository, command["id"], handoff_stage)
@@ -314,8 +314,8 @@ def _build_sender_client(settings: Settings) -> LiveChatSenderClient:
     )
 
 
-def _build_result_record(command: dict, result_type: str, result_json: dict) -> dict:
-    return {
+def _build_result_record(command: dict, result_type: str, result_json: dict, status: str | None = None) -> dict:
+    record = {
         "external_command_id": command["id"],
         "tenant_id": command.get("tenant_id") or "default",
         "conversation_id": command["conversation_id"],
@@ -326,6 +326,10 @@ def _build_result_record(command: dict, result_type: str, result_json: dict) -> 
         "result_type": result_type,
         "result_json": result_json,
     }
+    if status is not None:
+        # Real handoff transfer already applied its side effects in this worker; keep this as an audit row.
+        record["status"] = status
+    return record
 
 
 async def _record_handoff_stage(repository: ExternalCommandRepository, command_id: int, stage: dict) -> None:

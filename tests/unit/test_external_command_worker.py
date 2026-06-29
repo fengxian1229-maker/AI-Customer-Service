@@ -463,6 +463,7 @@ def test_external_command_worker_real_handoff_success_transfers_emits_result_and
     assert result_repository.inserted[0]["result_type"] == "human_handoff.transfer_chat.result"
     assert result_repository.inserted[0]["result_json"]["status"] == "TRANSFERRED"
     assert result_repository.inserted[0]["result_json"]["livechat_response"] == {}
+    assert result_repository.inserted[0]["status"] == "PROCESSED"
     assert conversation_repository.updated == [
         (
             "livechat:chat-1",

@@ -222,7 +222,7 @@ def validate_intent_output(payload: dict[str, Any], output: dict[str, Any]) -> d
 def validate_router_decision_output(payload: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
     del payload
     route = validate_llm_route(_require_str(output, "route", "router decision"))
-    requires_human = bool(output.get("requires_human", False))
+    requires_human = True if route == "human_handoff" else bool(output.get("requires_human", False))
     intent = normalize_router_decision_intent(
         _require_str(output, "intent", "router decision"),
         route,

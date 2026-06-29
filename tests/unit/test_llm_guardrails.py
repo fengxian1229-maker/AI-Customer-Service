@@ -72,6 +72,40 @@ def test_validate_router_decision_normalizes_invalid_handoff_intent_when_route_r
     assert specialist_decision["route"] == "human_handoff"
 
 
+def test_validate_router_decision_forces_requires_human_for_handoff_route():
+    from app.llm.guardrails import validate_router_decision_output
+
+    decision = validate_router_decision_output(
+        {},
+        _router_output(
+            intent="explicit_human_request",
+            route="human_handoff",
+            requires_human=False,
+        ),
+    )
+
+    assert decision["route"] == "human_handoff"
+    assert decision["intent"] == "explicit_human_request"
+    assert decision["requires_human"] is True
+
+
+def test_validate_router_decision_normalizes_handoff_intent_when_model_omits_requires_human():
+    from app.llm.guardrails import validate_router_decision_output
+
+    decision = validate_router_decision_output(
+        {},
+        _router_output(
+            intent="human_handoff_request",
+            route="human_handoff",
+            requires_human=False,
+        ),
+    )
+
+    assert decision["route"] == "human_handoff"
+    assert decision["intent"] == "explicit_human_request"
+    assert decision["requires_human"] is True
+
+
 def test_validate_router_decision_normalizes_invalid_intent_for_clarification_and_unsupported_routes():
     from app.llm.guardrails import validate_router_decision_output
 

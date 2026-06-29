@@ -57,6 +57,15 @@ async def process_pending_message(
     message_repository=None,
     transaction_repository=None,
 ) -> dict:
+    if _is_human_active_conversation(message):
+        result = {
+            "status": "SKIPPED_HUMAN_ACTIVE",
+            "last_error": "conversation is HUMAN_ACTIVE or human_handoff; bot outbound skipped",
+            "retryable": False,
+        }
+        await outbound_repository.mark_failed(message["id"], result["status"], result["last_error"], retryable=False)
+        return result
+
     payload = message["payload_json"]
     message_type = message.get("message_type") or message.get("message_kind") or "text"
     if message_type == "buttons":
@@ -121,6 +130,12 @@ async def process_pending_message(
             retryable=result["retryable"],
         )
     return result
+
+
+def _is_human_active_conversation(message: dict) -> bool:
+    conversation_status = str(message.get("conversation_status") or "").upper()
+    active_workflow = str(message.get("conversation_active_workflow") or "")
+    return conversation_status == "HUMAN_ACTIVE" or active_workflow == "human_handoff"
 
 
 def _image_mvp_fallback_text(payload: dict) -> str:

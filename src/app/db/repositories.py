@@ -249,7 +249,10 @@ class OutboundMessageRepository:
                COALESCE(c.channel_type, 'livechat') AS channel_type,
                m.conversation_id, m.inbound_event_id, m.chat_id, m.thread_id,
                m.action_type, m.message_type, m.payload_json, m.status,
-               m.dedup_key, m.block_index, m.message_kind, m.command_type
+               m.dedup_key, m.block_index, m.message_kind, m.command_type,
+               c.status AS conversation_status,
+               c.active_workflow AS conversation_active_workflow,
+               c.workflow_stage AS conversation_workflow_stage
         FROM outbound_messages m
         LEFT JOIN conversation_states c ON c.conversation_id = m.conversation_id
         WHERE m.status = 'PENDING'
@@ -270,7 +273,10 @@ class OutboundMessageRepository:
                COALESCE(c.channel_type, 'livechat') AS channel_type,
                m.conversation_id, m.inbound_event_id, m.chat_id, m.thread_id,
                m.action_type, m.message_type, m.payload_json, m.status,
-               m.dedup_key, m.block_index, m.message_kind, m.command_type
+               m.dedup_key, m.block_index, m.message_kind, m.command_type,
+               c.status AS conversation_status,
+               c.active_workflow AS conversation_active_workflow,
+               c.workflow_stage AS conversation_workflow_stage
         FROM outbound_messages m
         LEFT JOIN conversation_states c ON c.conversation_id = m.conversation_id
         WHERE m.status = 'PENDING'

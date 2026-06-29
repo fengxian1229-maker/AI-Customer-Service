@@ -117,20 +117,57 @@ def make_message_of_type(message_type: str, payload: dict, message_id: int = 7) 
 
 def test_process_pending_message_marks_success_with_event_id():
     class SenderClient:
+        def __init__(self) -> None:
+            self.calls = []
+
         async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            self.calls.append((chat_id, thread_id, text))
             return {"event_id": "event-1"}
 
     repository = FakeOutboundRepository()
     message_repository = FakeConversationMessageRepository()
+    client = SenderClient()
+    message = {
+        **make_message(),
+        "conversation_status": "AI_ACTIVE",
+        "conversation_active_workflow": None,
+    }
 
-    result = asyncio.run(process_pending_message(repository, SenderClient(), make_message(), message_repository=message_repository))
+    result = asyncio.run(process_pending_message(repository, client, message, message_repository=message_repository))
 
     assert result["status"] == "SENT"
+    assert client.calls == [("chat-1", "thread-1", "hello")]
     assert repository.sent == [7]
     assert repository.failures == []
     assert message_repository.inserted[0]["outbound_message_id"] == 7
     assert message_repository.inserted[0]["sender_role"] == "assistant"
     assert message_repository.inserted[0]["text_content"] == "hello"
+
+
+def test_process_pending_message_skips_when_conversation_human_active():
+    class SenderClient:
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            raise AssertionError("bot outbound must not send after human handoff")
+
+    repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository()
+    message = {
+        **make_message(),
+        "conversation_status": "HUMAN_ACTIVE",
+        "conversation_active_workflow": "human_handoff",
+    }
+    expected_error = "conversation is HUMAN_ACTIVE or human_handoff; bot outbound skipped"
+
+    result = asyncio.run(process_pending_message(repository, SenderClient(), message, message_repository=message_repository))
+
+    assert result == {
+        "status": "SKIPPED_HUMAN_ACTIVE",
+        "last_error": expected_error,
+        "retryable": False,
+    }
+    assert repository.failures == [(7, "SKIPPED_HUMAN_ACTIVE", expected_error, False)]
+    assert repository.sent == []
+    assert message_repository.inserted == []
 
 
 def test_process_pending_for_inbound_event_only_fetches_target_inbound(monkeypatch):
