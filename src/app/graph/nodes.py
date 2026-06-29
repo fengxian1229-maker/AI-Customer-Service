@@ -15,7 +15,11 @@ from app.workflows.sop_handlers import run_sop
 from app.workflows.waiting_backend_classifier import handle_waiting_backend
 
 
-LLM_AUTHORITATIVE_SOURCES = {"llm_guarded_authoritative", "llm_faq_authoritative"}
+LLM_AUTHORITATIVE_SOURCES = {
+    "llm_guarded_authoritative",
+    "llm_guarded_authoritative_post_guard",
+    "llm_faq_authoritative",
+}
 
 
 def build_graph_state_from_event(
@@ -45,6 +49,7 @@ def build_graph_state_from_event(
         "llm_intent_result": None,
         "route": None,
         "route_source": "deterministic",
+        "route_locked": False,
         "rewrite_source": "deterministic",
         "rag_context": None,
         "rag_result": None,
@@ -56,6 +61,8 @@ def build_graph_state_from_event(
 
 
 def rewrite_question_node(state: GraphState) -> GraphState:
+    if state.get("route_locked") and state.get("rewritten_question"):
+        return state
     if state.get("rewrite_source") in LLM_AUTHORITATIVE_SOURCES and state.get("rewritten_question"):
         return state
     raw = normalize_text(state.get("raw_user_input"))
@@ -83,6 +90,8 @@ def prepare_route_state(state: GraphState) -> GraphState:
 
 
 def intent_router_node(state: GraphState) -> GraphState:
+    if state.get("route_locked") and state.get("route"):
+        return state
     if state.get("route_source") in LLM_AUTHORITATIVE_SOURCES and state.get("route"):
         return state
     if (state.get("llm_router_result") or {}).get("hard_guard") == "backend_fact" and state.get("route"):
