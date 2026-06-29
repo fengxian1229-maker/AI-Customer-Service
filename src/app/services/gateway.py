@@ -568,6 +568,38 @@ class GatewayService:
         exc: Exception | None = None,
         hard_guard: str | None = None,
     ) -> dict:
+        if not self.llm_router_fallback_to_deterministic and hard_guard is None:
+            raw = normalize_text(deterministic_state.get("raw_user_input"))
+            return {
+                **deterministic_state,
+                "rewritten_question": raw,
+                "rewrite_result": {
+                    "rewritten_question": raw,
+                    "normalized_query": raw,
+                    "language": "unknown",
+                    "preserved_entities": [],
+                    "source": "llm_guarded_authoritative_fallback",
+                },
+                "rewrite_source": "llm_guarded_authoritative",
+                "intent_result": {
+                    "intent": "clarification_needed",
+                    "route": "clarification",
+                    "confidence": 0.0,
+                    "reason": "Guarded-authoritative router failed and deterministic fallback is disabled.",
+                },
+                "route": "clarification",
+                "route_source": "llm_guarded_authoritative",
+                "llm_router_result": self._router_result_summary(
+                    status="fallback",
+                    decision=decision,
+                    provider=provider,
+                    mode=mode or "guarded_authoritative",
+                    fallback_reason=fallback_reason,
+                    error_type=type(exc).__name__ if exc else None,
+                    error_message=str(exc) if exc else None,
+                    fallback_to_deterministic=False,
+                ),
+            }
         state = dict(deterministic_state)
         if hard_guard == "backend_fact" and state.get("route") == "faq":
             state.update(

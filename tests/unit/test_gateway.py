@@ -881,6 +881,48 @@ def test_gateway_service_guarded_authoritative_uses_llm_sop_route():
     assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
 
 
+def test_gateway_service_guarded_authoritative_uses_llm_human_handoff_route():
+    router_service = FakeLLMRouterService(
+        {
+            "rewritten_question": "I need a real support agent",
+            "normalized_query": "I need a real support agent",
+            "language": "en",
+            "intent": "human_handoff",
+            "route": "human_handoff",
+            "confidence": 0.96,
+            "sop_name": None,
+            "faq_query": None,
+            "risk_level": "elevated",
+            "requires_human": True,
+            "requires_backend": False,
+            "missing_slots": [],
+            "preserved_entities": [],
+            "reason": "requires human",
+            "provider": "mock",
+            "mode": "guarded_authoritative",
+        }
+    )
+    external_repository = FakeExternalCommandRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=external_repository,
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="guarded_authoritative",
+    )
+
+    result = asyncio.run(service.process_event(38, make_event_with_text("how to deposit")))
+
+    assert result["graph_state"]["route"] == "human_handoff"
+    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["intent_result"]["intent"] == "explicit_human_request"
+    assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
+    assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
+    assert [command["command_type"] for command in external_repository.inserted] == ["human_handoff.requested"]
+
+
 def test_gateway_service_guarded_authoritative_falls_back_for_low_confidence_invalid_route_and_exception():
     for router_service, reason in [
         (FakeLLMRouterService({**FakeLLMRouterService().result, "confidence": 0.2}), "low_confidence"),
@@ -908,6 +950,30 @@ def test_gateway_service_guarded_authoritative_falls_back_for_low_confidence_inv
             assert "api_key=[redacted]" in str(result["graph_state"]["llm_router_result"])
         assert "hidden" not in str(result["graph_state"]["llm_router_result"])
         assert graph_error_repository.inserted == []
+
+
+def test_gateway_service_guarded_authoritative_fallback_disabled_does_not_use_deterministic_faq():
+    router_service = FakeLLMRouterService({**FakeLLMRouterService().result, "route": "bad_route"})
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+        llm_router_mode="guarded_authoritative",
+        llm_router_fallback_to_deterministic=False,
+    )
+
+    result = asyncio.run(service.process_event(39, make_event_with_text("how to deposit")))
+
+    assert result["graph_state"]["route"] == "clarification"
+    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["intent_result"]["intent"] == "clarification_needed"
+    assert result["graph_state"]["llm_router_result"]["status"] == "fallback"
+    assert result["graph_state"]["llm_router_result"]["fallback_reason"] == "validation_error"
+    assert result["graph_state"]["llm_router_result"]["fallback_to_deterministic"] is False
+    assert result["external_commands"] == []
 
 
 def test_gateway_service_guarded_authoritative_hard_guards_active_workflow_human_and_backend_fact():

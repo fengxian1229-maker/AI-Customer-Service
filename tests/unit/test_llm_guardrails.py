@@ -32,6 +32,38 @@ def test_validate_llm_intent_normalizes_common_aliases():
     assert validate_llm_intent("deposit-guide") == "deposit_howto"
     assert validate_llm_intent("reset password") == "forgot_password_howto"
     assert validate_llm_intent("withdraw") == "withdrawal_howto"
+    assert validate_llm_intent("human_handoff") == "explicit_human_request"
+    assert validate_llm_intent("human") == "explicit_human_request"
+    assert validate_llm_intent("human_agent") == "explicit_human_request"
+    assert validate_llm_intent("human_support") == "explicit_human_request"
+    assert validate_llm_intent("transfer_to_human") == "explicit_human_request"
+    assert validate_llm_intent("handoff") == "explicit_human_request"
+    assert validate_llm_intent("escalation") == "service_frustration"
+    assert validate_llm_intent("escalate") == "service_frustration"
+
+
+def test_validate_router_decision_accepts_human_handoff_intent_alias():
+    from app.llm.guardrails import validate_router_decision_output
+
+    decision = validate_router_decision_output(
+        {},
+        {
+            "rewritten_question": "I need a real support agent",
+            "normalized_query": "I need a real support agent",
+            "language": "en",
+            "intent": "human_handoff",
+            "route": "human_handoff",
+            "confidence": 0.96,
+            "requires_human": True,
+            "requires_backend": False,
+            "missing_slots": [],
+            "preserved_entities": [],
+            "reason": "The user wants a human.",
+        },
+    )
+
+    assert decision["intent"] == "explicit_human_request"
+    assert decision["route"] == "human_handoff"
 
 
 def test_normalize_confidence_clamps_to_range():

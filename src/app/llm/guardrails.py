@@ -144,6 +144,14 @@ def normalize_llm_intent(intent: str) -> str:
         "password_reset": "forgot_password_howto",
         "reset_password": "forgot_password_howto",
         "forgot_password": "forgot_password_howto",
+        "human_handoff": "explicit_human_request",
+        "human": "explicit_human_request",
+        "human_agent": "explicit_human_request",
+        "human_support": "explicit_human_request",
+        "transfer_to_human": "explicit_human_request",
+        "handoff": "explicit_human_request",
+        "escalation": "service_frustration",
+        "escalate": "service_frustration",
     }
     return aliases.get(normalized, normalized)
 
