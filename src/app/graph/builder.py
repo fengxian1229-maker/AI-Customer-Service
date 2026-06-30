@@ -42,7 +42,7 @@ def build_workflow_graph(
     llm_sop_slot_enabled: bool = False,
     llm_sop_slot_min_confidence: float = 0.70,
     llm_sop_slot_fallback_to_deterministic: bool = True,
-    llm_final_reply_enabled: bool = False,
+    llm_final_reply_enabled: bool = True,
 ):
     graph = StateGraph(GraphState)
     graph.add_node(
