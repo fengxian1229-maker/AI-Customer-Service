@@ -30,6 +30,8 @@ class LLMRewriteShadowOutput(TypedDict, total=False):
     rewritten_question: str
     normalized_query: str
     language: str
+    detected_language: str
+    language_confidence: float
     preserved_entities: list[str]
     missing_or_ambiguous: list[str]
     risk_flags: list[str]
@@ -37,6 +39,10 @@ class LLMRewriteShadowOutput(TypedDict, total=False):
     reason: str
     provider: str
     mode: str
+
+
+LLMRewriteAuthoritativeInput = LLMRewriteShadowInput
+LLMRewriteAuthoritativeOutput = LLMRewriteShadowOutput
 
 
 class LLMIntentShadowInput(TypedDict, total=False):
@@ -168,6 +174,21 @@ class LLMRewriteShadowSchema(BaseModel):
     rewritten_question: str
     normalized_query: str
     language: str = "unknown"
+    preserved_entities: list[str] = Field(default_factory=list)
+    missing_or_ambiguous: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    reason: str
+
+
+class LLMRewriteAuthoritativeSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rewritten_question: str
+    normalized_query: str
+    detected_language: str = "unknown"
+    language: str = "unknown"
+    language_confidence: float = 0.0
     preserved_entities: list[str] = Field(default_factory=list)
     missing_or_ambiguous: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
