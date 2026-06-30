@@ -9,9 +9,9 @@ from app.llm.contracts import (
     LLMRouterDecisionOutput,
     LLMRouterDecisionSchema,
     LLMRouterInput,
+    LLMRewriteAuthoritativeSchema,
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
-    LLMRewriteShadowSchema,
     LLMSopSlotExtractionInput,
     LLMSopSlotExtractionOutput,
     LLMSopSlotExtractionSchema,
@@ -19,9 +19,11 @@ from app.llm.contracts import (
 from app.llm.guardrails import validate_intent_output, validate_rewrite_output, validate_router_decision_output, validate_sop_slot_extraction_output
 from app.llm.gemini_model import build_gemini_chat_model
 
-REWRITE_SYSTEM_PROMPT = """You are a rewrite shadow model for an AI customer service routing system.
+REWRITE_SYSTEM_PROMPT = """You are an authoritative rewrite model for an AI customer service routing system.
 Your task is to normalize the user's message for downstream routing and retrieval.
 You must preserve user-provided facts exactly, including usernames, phone numbers, order IDs, amounts, dates, and attachment references.
+Detect the user's language with one of zh-Hans, zh-Hant, en, es, tl, th, my, ms, unknown.
+Use unknown only when the message has no meaningful language signal.
 Do not invent facts.
 Do not answer the customer.
 Do not decide real backend/account/payment/order facts.
@@ -202,22 +204,25 @@ class GeminiLLMProvider:
 
     async def rewrite(self, payload: LLMRewriteShadowInput) -> LLMRewriteShadowOutput:
         structured_model = self.model.with_structured_output(
-            schema=LLMRewriteShadowSchema,
+            schema=LLMRewriteAuthoritativeSchema,
             method="json_schema",
         )
-        response = await structured_model.ainvoke(_build_chat_messages(REWRITE_SYSTEM_PROMPT, payload))
-        result = validate_rewrite_output(payload, _model_dump(response))
+        raw = _model_dump(await structured_model.ainvoke(_build_chat_messages(REWRITE_SYSTEM_PROMPT, payload)))
+        language = str(raw.get("detected_language") or raw.get("language") or "unknown")
+        result = validate_rewrite_output(payload, {**raw, "language": language})
         return {
             "rewritten_question": result["rewritten_question"],
             "normalized_query": result["normalized_query"],
-            "language": result.get("language") or "unknown",
+            "detected_language": language,
+            "language": language,
+            "language_confidence": float(raw.get("language_confidence") or 0.0),
             "preserved_entities": list(result.get("preserved_entities") or []),
             "missing_or_ambiguous": list(result.get("missing_or_ambiguous") or []),
             "risk_flags": list(result.get("risk_flags") or []),
             "confidence": float(result.get("confidence") or 0.0),
             "reason": result["reason"],
             "provider": self.provider_name,
-            "mode": "shadow",
+            "mode": "rewrite_authoritative",
         }
 
     async def classify_intent(self, payload: LLMIntentShadowInput) -> LLMIntentShadowOutput:
