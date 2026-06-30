@@ -32,13 +32,15 @@ def build_command_outbox(
 ) -> dict:
     command_type = str(command["type"])
     if command_type == "livechat.send_text":
+        payload = dict(command.get("payload") or {})
+        payload["text"] = str(payload.get("text") or "")
         return build_text_outbox(
             chat_id=chat_id,
             thread_id=thread_id,
             conversation_id=conversation_id,
             inbound_event_id=inbound_event_id,
-            text=str((command.get("payload") or {}).get("text") or ""),
-        )
+            text=payload["text"],
+        ) | {"payload_json": {"type": "message", **payload}}
     raise ValueError(f"Unsupported outbound command type: {command_type}")
 
 

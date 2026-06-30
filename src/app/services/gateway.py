@@ -1108,7 +1108,7 @@ class GatewayService:
     ) -> list[dict]:
         if not graph_state:
             return []
-        if graph_state.get("route") == "human_handoff":
+        if graph_state.get("route") == "human_handoff" and not self._has_handoff_ack_command(graph_state):
             return []
         if graph_state.get("route") == "faq" and graph_state.get("rag_context"):
             plan = build_faq_outbound_plan_from_rag_context(
@@ -1142,6 +1142,17 @@ class GatewayService:
             for command in graph_state.get("commands", [])
             if str(command["type"]) == str(CommandType.LIVECHAT_SEND_TEXT)
         ]
+
+    def _has_handoff_ack_command(self, graph_state: dict | None) -> bool:
+        if not graph_state:
+            return False
+        for command in graph_state.get("commands", []):
+            if str(command.get("type")) != str(CommandType.LIVECHAT_SEND_TEXT):
+                continue
+            payload = command.get("payload") or {}
+            if payload.get("handoff_ack") is True:
+                return True
+        return False
 
     def _command_with_final_text(self, command: dict, graph_state: dict) -> dict:
         final_text = graph_state.get("final_response_text")

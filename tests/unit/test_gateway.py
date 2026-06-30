@@ -4,6 +4,7 @@ import pytest
 
 from app.schemas.events import InboundEvent
 from app.services.gateway import GatewayService, build_fixed_reply, should_enqueue_reply
+from app.workflows.command_contracts import CommandType
 
 
 def make_inbound_event() -> InboundEvent:
@@ -442,8 +443,12 @@ def test_gateway_service_human_handoff_keeps_existing_external_command_semantics
     assert rag_service.calls == []
     assert result["graph_state"]["route"] == "human_handoff"
     assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
-    assert result["outbound_messages"] == []
-    assert outbound_repository.inserted == []
+    assert result["outbound_messages"][0]["payload_json"] == {
+        "type": "message",
+        "text": "我会为你转接真人客服继续协助。",
+        "handoff_ack": True,
+    }
+    assert outbound_repository.inserted[0]["payload_json"] == result["outbound_messages"][0]["payload_json"]
 
 
 def test_gateway_service_withdrawal_blocked_generates_backend_query_without_rag_or_telegram():
@@ -991,6 +996,53 @@ def test_gateway_faq_multiblock_uses_reply_language_for_outbound_plan(monkeypatc
     assert rows[0]["payload_json"]["text"] == "FAQ text"
 
 
+def test_gateway_allows_handoff_route_only_for_handoff_ack_command():
+    service = GatewayService()
+    event = make_inbound_event()
+
+    rows = service._build_outbound_messages(
+        77,
+        event,
+        "livechat:chat-1",
+        {
+            "route": "human_handoff",
+            "final_response_text": "我会为你转接真人客服继续协助。",
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_TEXT,
+                    "payload": {"text": "fallback", "handoff_ack": True},
+                }
+            ],
+        },
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["payload_json"]["text"] == "我会为你转接真人客服继续协助。"
+    assert rows[0]["payload_json"]["handoff_ack"] is True
+
+
+def test_gateway_blocks_handoff_route_without_handoff_ack_command():
+    service = GatewayService()
+    event = make_inbound_event()
+
+    rows = service._build_outbound_messages(
+        77,
+        event,
+        "livechat:chat-1",
+        {
+            "route": "human_handoff",
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_TEXT,
+                    "payload": {"text": "ordinary bot reply"},
+                }
+            ],
+        },
+    )
+
+    assert rows == []
+
+
 def test_gateway_service_guarded_authoritative_uses_llm_sop_route():
     router_service = FakeLLMRouterService(
         {
@@ -1201,7 +1253,11 @@ def test_gateway_service_guarded_authoritative_forces_requires_human_for_llm_han
     assert result["graph_state"]["llm_router_result"]["requires_human"] is True
     assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
     assert [command["command_type"] for command in external_repository.inserted] == ["human_handoff.requested"]
-    assert result["outbound_messages"] == []
+    assert result["outbound_messages"][0]["payload_json"] == {
+        "type": "message",
+        "text": "我会为你转接真人客服继续协助。",
+        "handoff_ack": True,
+    }
 
 
 def test_gateway_service_guarded_authoritative_falls_back_for_low_confidence_invalid_route_and_exception():

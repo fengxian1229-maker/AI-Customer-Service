@@ -1,11 +1,13 @@
 from app.graph.nodes import (
     build_graph_state_from_event,
     command_planner_node,
+    human_handoff_node,
     intent_router_node,
     prepare_route_state,
     rewrite_question_node,
 )
 from app.schemas.events import InboundEvent
+from app.workflows.command_contracts import CommandType
 
 
 def make_event(text: str = "hola", event_type: str = "MESSAGE_CREATED", payload: dict | None = None) -> InboundEvent:
@@ -156,3 +158,35 @@ def test_command_planner_node_prefers_final_response_text():
     )
 
     assert result["commands"][0]["payload"]["text"] == "final composed text"
+
+
+def test_human_handoff_node_emits_ack_text_before_handoff_request():
+    result = human_handoff_node({"intent_result": {"intent": "service_frustration"}})
+
+    assert result["active_workflow"] == "human_handoff"
+    assert result["commands"] == [
+        {
+            "type": CommandType.LIVECHAT_SEND_TEXT,
+            "payload": {"text": "我会为你转接真人客服继续协助。", "handoff_ack": True},
+        },
+        {
+            "type": CommandType.HUMAN_HANDOFF_REQUESTED,
+            "payload": {"reason": "service_frustration"},
+        },
+    ]
+
+
+def test_command_planner_node_preserves_handoff_ack_when_updating_text():
+    result = command_planner_node(
+        {
+            "final_response_text": "final handoff text",
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_TEXT,
+                    "payload": {"text": "fallback", "handoff_ack": True},
+                }
+            ],
+        }
+    )
+
+    assert result["commands"][0]["payload"] == {"text": "final handoff text", "handoff_ack": True}

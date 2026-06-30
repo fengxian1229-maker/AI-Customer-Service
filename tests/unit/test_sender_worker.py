@@ -170,6 +170,34 @@ def test_process_pending_message_skips_when_conversation_human_active():
     assert message_repository.inserted == []
 
 
+def test_process_pending_message_allows_handoff_ack_when_conversation_human_active():
+    class SenderClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            self.calls.append((chat_id, thread_id, text))
+            return {"event_id": "event-1"}
+
+    repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository()
+    client = SenderClient()
+    message = {
+        **make_message(),
+        "conversation_status": "HUMAN_ACTIVE",
+        "conversation_active_workflow": "human_handoff",
+        "payload_json": {"type": "message", "text": "我会为你转接真人客服继续协助。", "handoff_ack": True},
+    }
+
+    result = asyncio.run(process_pending_message(repository, client, message, message_repository=message_repository))
+
+    assert result["status"] == "SENT"
+    assert client.calls == [("chat-1", "thread-1", "我会为你转接真人客服继续协助。")]
+    assert repository.sent == [7]
+    assert repository.failures == []
+    assert message_repository.inserted[0]["text_content"] == "我会为你转接真人客服继续协助。"
+
+
 def test_process_pending_for_inbound_event_only_fetches_target_inbound(monkeypatch):
     class SenderClient:
         async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:

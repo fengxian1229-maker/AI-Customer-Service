@@ -476,22 +476,32 @@ def make_final_reply_node(final_reply_service=None, *, llm_final_reply_enabled: 
 def human_handoff_node(state: GraphState) -> GraphState:
     intent = (state.get("intent_result") or {}).get("intent")
     reason = intent or "explicit_human_request"
+    handoff_text = "我会为你转接真人客服继续协助。"
     return {
         **state,
         "status": "HANDOFF_REQUESTED",
         "active_workflow": "human_handoff",
         "workflow_stage": "handoff_requested",
-        "response_text": "我会为你转接真人客服继续协助。",
-        "response_text_fallback": "我会为你转接真人客服继续协助。",
+        "response_text": handoff_text,
+        "response_text_fallback": handoff_text,
         "reply_plan": build_reply_plan(
             kind="human_handoff",
-            fallback_text="我会为你转接真人客服继续协助。",
+            fallback_text=handoff_text,
             must_say=["转接真人客服"],
             semantic_required_items=["human_handoff_notice"],
             must_not_say=["已接入", "马上处理", "已处理", "已到账", "已完成"],
             allowed_facts=["客户需要真人客服", "系统将提出转接请求"],
         ),
-        "commands": [{"type": CommandType.HUMAN_HANDOFF_REQUESTED, "payload": {"reason": reason}}],
+        "commands": [
+            {
+                "type": CommandType.LIVECHAT_SEND_TEXT,
+                "payload": {"text": handoff_text, "handoff_ack": True},
+            },
+            {
+                "type": CommandType.HUMAN_HANDOFF_REQUESTED,
+                "payload": {"reason": reason},
+            },
+        ],
     }
 
 

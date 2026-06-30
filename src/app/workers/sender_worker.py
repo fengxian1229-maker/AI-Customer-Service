@@ -133,6 +133,8 @@ async def process_pending_message(
 
 
 def _is_human_active_conversation(message: dict) -> bool:
+    if (message.get("payload_json") or {}).get("handoff_ack") is True:
+        return False
     conversation_status = str(message.get("conversation_status") or "").upper()
     active_workflow = str(message.get("conversation_active_workflow") or "")
     return conversation_status == "HUMAN_ACTIVE" or active_workflow == "human_handoff"
