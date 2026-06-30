@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import logging
 
 from app.core.settings import Settings
 from app.db.mysql import create_pool
@@ -17,6 +18,14 @@ from app.schemas.events import InboundEvent
 from app.services.gateway import GatewayService
 from app.services.final_reply_service import FinalReplyService
 from app.services.rag import RagService
+
+
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def configure_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    logging.getLogger("app.graph.nodes").setLevel(logging.INFO)
 
 
 async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off", settings=None) -> dict:
@@ -250,6 +259,7 @@ async def run_once(limit: int) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()
     args = build_arg_parser().parse_args(argv)
     result = asyncio.run(run_once(limit=args.limit))
     print(json.dumps(result, ensure_ascii=False, indent=2))
