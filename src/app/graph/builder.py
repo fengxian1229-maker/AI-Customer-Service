@@ -1,6 +1,7 @@
 from langgraph.graph import END, StateGraph
 
 from app.graph.language_policy_node import make_language_policy_node
+from app.graph.node_logging import wrap_graph_node
 from app.graph.nodes import (
     clarification_node,
     command_planner_node,
@@ -47,49 +48,64 @@ def build_workflow_graph(
     graph = StateGraph(GraphState)
     graph.add_node(
         "rewrite_question_node",
-        make_rewrite_question_node(llm_rewrite_service, min_confidence=llm_rewrite_min_confidence),
+        wrap_graph_node(
+            "rewrite_question_node",
+            make_rewrite_question_node(llm_rewrite_service, min_confidence=llm_rewrite_min_confidence),
+        ),
     )
     graph.add_node(
         "language_policy_node",
-        make_language_policy_node(
-            language_detection_enabled=language_detection_enabled,
-            language_detection_min_confidence=language_detection_min_confidence,
-            tenant_persona_default_language=tenant_persona_default_language,
-            tenant_supported_languages=tenant_supported_languages,
-            language_fallback=language_fallback,
-            language_persist_to_slot_memory=language_persist_to_slot_memory,
+        wrap_graph_node(
+            "language_policy_node",
+            make_language_policy_node(
+                language_detection_enabled=language_detection_enabled,
+                language_detection_min_confidence=language_detection_min_confidence,
+                tenant_persona_default_language=tenant_persona_default_language,
+                tenant_supported_languages=tenant_supported_languages,
+                language_fallback=language_fallback,
+                language_persist_to_slot_memory=language_persist_to_slot_memory,
+            ),
         ),
     )
     graph.add_node(
         "intent_router_node",
-        make_intent_router_node(
-            llm_intent_service,
-            llm_router_mode=llm_router_mode,
-            llm_router_min_confidence=llm_router_min_confidence,
-            llm_router_fallback_to_deterministic=llm_router_fallback_to_deterministic,
+        wrap_graph_node(
+            "intent_router_node",
+            make_intent_router_node(
+                llm_intent_service,
+                llm_router_mode=llm_router_mode,
+                llm_router_min_confidence=llm_router_min_confidence,
+                llm_router_fallback_to_deterministic=llm_router_fallback_to_deterministic,
+            ),
         ),
     )
     graph.add_node(
         "sop_node",
-        make_sop_node(
-            llm_sop_slot_service,
-            llm_sop_slot_enabled=llm_sop_slot_enabled,
-            llm_sop_slot_min_confidence=llm_sop_slot_min_confidence,
+        wrap_graph_node(
+            "sop_node",
+            make_sop_node(
+                llm_sop_slot_service,
+                llm_sop_slot_enabled=llm_sop_slot_enabled,
+                llm_sop_slot_min_confidence=llm_sop_slot_min_confidence,
+            ),
         ),
     )
-    graph.add_node("rag_node", make_rag_node(rag_service))
-    graph.add_node("emotion_care_node", emotion_care_node)
-    graph.add_node("human_handoff_node", human_handoff_node)
-    graph.add_node("clarification_node", clarification_node)
+    graph.add_node("rag_node", wrap_graph_node("rag_node", make_rag_node(rag_service)))
+    graph.add_node("emotion_care_node", wrap_graph_node("emotion_care_node", emotion_care_node))
+    graph.add_node("human_handoff_node", wrap_graph_node("human_handoff_node", human_handoff_node))
+    graph.add_node("clarification_node", wrap_graph_node("clarification_node", clarification_node))
     graph.add_node(
         "final_reply_node",
-        make_final_reply_node(
-            final_reply_service if llm_final_reply_enabled else None,
-            llm_final_reply_enabled=llm_final_reply_enabled,
+        wrap_graph_node(
+            "final_reply_node",
+            make_final_reply_node(
+                final_reply_service if llm_final_reply_enabled else None,
+                llm_final_reply_enabled=llm_final_reply_enabled,
+            ),
         ),
     )
-    graph.add_node("command_planner_node", command_planner_node)
-    graph.add_node("persist_state_node", persist_state_node)
+    graph.add_node("command_planner_node", wrap_graph_node("command_planner_node", command_planner_node))
+    graph.add_node("persist_state_node", wrap_graph_node("persist_state_node", persist_state_node))
 
     graph.set_entry_point("rewrite_question_node")
     graph.add_edge("rewrite_question_node", "language_policy_node")
