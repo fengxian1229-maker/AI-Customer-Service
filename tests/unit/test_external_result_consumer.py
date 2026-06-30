@@ -212,6 +212,57 @@ def test_result_consumer_case_card_generates_waiting_reply_before_processed():
     assert processed[0]["status"] == "PROCESSED"
 
 
+def test_external_result_consumer_process_result_by_id_leases_only_requested_result():
+    from app.workers.external_result_consumer import process_result_by_id
+
+    row = make_result("backend.query.result") | {"result_json": {"status": "success", "answer": "scoped ok"}}
+
+    class ScopedResultRepository(FakeResultRepository):
+        async def lease_pending_by_id(self, result_id: int, worker_id: str, lease_seconds: int):
+            self.leased.append((result_id, worker_id, lease_seconds))
+            assert result_id == 700
+            return row
+
+    result_repository = ScopedResultRepository([])
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+
+    result = asyncio.run(
+        process_result_by_id(
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            result_id=700,
+            transaction_repository=FakeTransactionRepository(result_repository, conversation_repository, outbound_repository),
+            worker_id="consumer-scoped",
+        )
+    )
+
+    assert result_repository.leased == [(700, "consumer-scoped", 60)]
+    assert result["status"] == "PROCESSED"
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "scoped ok"
+
+
+def test_external_result_consumer_process_result_by_id_reports_locked():
+    from app.workers.external_result_consumer import process_result_by_id
+
+    class ScopedResultRepository(FakeResultRepository):
+        async def lease_pending_by_id(self, result_id: int, worker_id: str, lease_seconds: int):
+            return None
+
+    result = asyncio.run(
+        process_result_by_id(
+            result_repository=ScopedResultRepository([]),
+            conversation_repository=FakeConversationRepository(),
+            outbound_repository=FakeOutboundRepository(),
+            result_id=701,
+            worker_id="consumer-scoped",
+        )
+    )
+
+    assert result == {"id": 701, "status": "RESULT_LOCKED_OR_NOT_PENDING"}
+
+
 def test_result_consumer_append_to_case_generates_supplement_reply():
     _processed, _result_repository, _conversation_repository, outbound_repository = run_consumer_for(
         make_result("telegram.append_to_case.mock_result")

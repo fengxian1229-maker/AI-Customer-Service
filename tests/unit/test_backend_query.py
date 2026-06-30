@@ -111,6 +111,101 @@ def test_tac_login_password_posts_login_endpoint_and_redacts_token():
     assert "new-secret-token" not in repr(client)
 
 
+def test_tac_backend_preflight_disabled_does_not_login(monkeypatch):
+    from app.core.settings import Settings
+    from app.workers import tac_backend_probe
+
+    class FailingFactory:
+        def create(self, config):
+            raise AssertionError("preflight must not create TAC client when disabled")
+
+    monkeypatch.setenv("ENABLE_BACKEND_LOOKUP", "true")
+    result = tac_backend_probe.run_preflight(
+        Settings(
+            livechat_agent_access_token="unused",
+            livechat_account_id="unused",
+            backend_query_enabled=False,
+        ),
+        factory=FailingFactory(),
+    )
+
+    assert result["backend_query_enabled"] is False
+    assert result["has_authorization"] is False
+    assert result["has_login_password"] is False
+    assert result["login_attempted"] is False
+    assert result["safe_to_probe"] is False
+    assert result["settings_warning"] == [
+        "ENABLE_BACKEND_LOOKUP is not used by this app; set BACKEND_QUERY_ENABLED=true"
+    ]
+
+
+def test_tac_backend_preflight_login_success_is_sanitized():
+    from app.core.settings import Settings
+    from app.workers import tac_backend_probe
+
+    class FakeClient:
+        def login_password(self):
+            return "secret-login-token"
+
+    class FakeFactory:
+        def create(self, config):
+            return FakeClient()
+
+    result = tac_backend_probe.run_preflight(
+        Settings(
+            livechat_agent_access_token="unused",
+            livechat_account_id="unused",
+            backend_query_enabled=True,
+            backend_provider_type="tac",
+            backend_base_url="https://secret.example",
+            backend_merchant_code="MERCHANT",
+            backend_login_operator="operator-secret",
+            backend_login_password="password-secret",
+            backend_login_merchant="MERCHANT",
+            backend_authorization=None,
+        ),
+        factory=FakeFactory(),
+    )
+
+    assert result["login_attempted"] is True
+    assert result["login_success"] is True
+    assert result["safe_to_probe"] is True
+    rendered = str(result)
+    assert "secret-login-token" not in rendered
+    assert "password-secret" not in rendered
+    assert "operator-secret" not in rendered
+    assert "https://secret.example" not in rendered
+
+
+def test_tac_backend_preflight_missing_config_fails_without_login():
+    from app.core.settings import Settings
+    from app.workers import tac_backend_probe
+
+    class FailingFactory:
+        def create(self, config):
+            raise AssertionError("preflight must not login when required config is missing")
+
+    result = tac_backend_probe.run_preflight(
+        Settings(
+            livechat_agent_access_token="unused",
+            livechat_account_id="unused",
+            backend_query_enabled=True,
+            backend_provider_type="tac",
+            backend_base_url="",
+            backend_merchant_code="MERCHANT",
+            backend_authorization=None,
+            backend_login_operator="operator",
+            backend_login_password="password",
+        ),
+        factory=FailingFactory(),
+    )
+
+    assert result["preflight_status"] == "FAILED_CONFIG"
+    assert result["login_attempted"] is False
+    assert result["safe_to_probe"] is False
+    assert "backend_base_url" in result["missing_config"]
+
+
 def test_tac_api_get_builds_headers_refreshes_invalid_token_once():
     from app.backends.tac_client import TacBackendClient
 

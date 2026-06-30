@@ -137,9 +137,19 @@ PYTHONPATH=src uv run --group dev python -m app.workers.external_result_consumer
 Backend query real execution:
 
 ```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.tac_backend_probe preflight
+
 BACKEND_QUERY_ENABLED=true BACKEND_PROVIDER_TYPE=tac BACKEND_BASE_URL=<base_url> BACKEND_AUTHORIZATION=<token> BACKEND_MERCHANT_CODE=<merchant> PYTHONPATH=src \
 uv run --group dev python -m app.workers.external_command_worker --once --execute-backend --emit-result
 PYTHONPATH=src uv run --group dev python -m app.workers.external_result_consumer --once
+```
+
+Scoped withdrawal backend smoke:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.withdrawal_backend_smoke_runner --inbound-event-id <id> --plan-only
+PYTHONPATH=src uv run --group dev python -m app.workers.withdrawal_backend_smoke_runner --inbound-event-id <id> --execute-backend --send-livechat --assert-closed-loop
+PYTHONPATH=src uv run --group dev python -m app.workers.backend_sop_smoke_admin latest-backend --chat-id <chat_id>
 ```
 
 See [docs/p9-a-telegram-sop-closed-loop.md](/Users/andy/ai-agent/docs/p9-a-telegram-sop-closed-loop.md).

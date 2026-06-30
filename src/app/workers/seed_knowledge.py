@@ -12,6 +12,7 @@ from app.services.knowledge_blocks import (
     normalize_question_aliases,
     validate_answer_blocks,
 )
+from app.services.rag import ALLOWED_FAQ_INTENTS
 
 
 DEFAULT_SEED_SOURCE_FILE = Path(__file__).resolve().parents[3] / "data" / "knowledge" / "default_multimodal_faq_seed.json"
@@ -113,6 +114,8 @@ def prepare_seed_document(document: dict) -> dict:
     prepared = dict(document)
     prepared["question_aliases"] = normalize_question_aliases(prepared.get("question_aliases"))
     prepared["metadata_json"] = normalize_metadata_json(prepared.get("metadata_json"))
+    if prepared["metadata_json"].get("intent_id") in ALLOWED_FAQ_INTENTS:
+        prepared["metadata_json"]["is_canonical"] = True
     if prepared.get("answer_blocks") is None:
         prepared["answer_blocks"] = default_text_answer_blocks(prepared.get("content") or "")
     else:

@@ -156,8 +156,9 @@ class FakeRagService:
             "documents": [
                 {
                     "id": 1,
-                    "title": "Bonus rules",
-                    "content": "奖金规则以活动页面说明为准。",
+                    "title": "充值教程",
+                    "content": "按页面提示完成充值。",
+                    "metadata_json": {"intent_id": "deposit_howto"},
                     "score": 5,
                 }
             ],
@@ -450,7 +451,7 @@ def test_gateway_service_prefetches_rag_context_only_for_faq_route():
 
     state, _config = graph.calls[0]
     assert rag_service.calls[0]["conversation_id"] == "livechat:chat-1"
-    assert state["rag_context"]["documents"][0]["title"] == "Bonus rules"
+    assert state["rag_context"]["documents"][0]["title"] == "充值教程"
 
 
 def test_gateway_service_does_not_prefetch_rag_context_for_sop_route():

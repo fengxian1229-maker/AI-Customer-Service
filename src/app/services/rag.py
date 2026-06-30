@@ -5,6 +5,26 @@ from app.workflows.slot_extractors import normalize_text
 RAG_FALLBACK_ANSWER = "我暂时没有在知识库中找到对应答案。请补充更具体的问题，或我可以为你转接真人客服。"
 BACKEND_FACT_FALLBACK_ANSWER = "这个问题需要查询账户或订单状态，我不能只根据知识库判断。请补充资料，或我可以为你转接真人客服。"
 
+ALLOWED_FAQ_INTENTS = {
+    "deposit_howto",
+    "withdrawal_howto",
+    "forgot_password_howto",
+    "screenshot_upload_howto",
+}
+
+_TITLE_INTENT_MAP = {
+    "充值教程": "deposit_howto",
+    "充值方式说明": "deposit_howto",
+    "deposit guide": "deposit_howto",
+    "提款教程": "withdrawal_howto",
+    "提款方式说明": "withdrawal_howto",
+    "withdrawal guide": "withdrawal_howto",
+    "忘记密码说明": "forgot_password_howto",
+    "forgot password": "forgot_password_howto",
+    "上传截图说明": "screenshot_upload_howto",
+    "upload screenshot": "screenshot_upload_howto",
+}
+
 
 DEFAULT_KNOWLEDGE_DOCUMENTS = [
     {
@@ -119,6 +139,7 @@ class RagService:
                 kb_scope=kb_scope,
                 limit=self.max_docs,
             )
+            documents = filter_allowed_faq_documents(documents)
             source = "knowledge_documents"
         else:
             documents = search_static_knowledge(
@@ -128,6 +149,7 @@ class RagService:
                 limit=self.max_docs,
                 language=language,
             )
+            documents = filter_allowed_faq_documents(documents)
             source = "static_knowledge"
 
         if not documents:
@@ -182,6 +204,7 @@ def answer_from_static_knowledge(state: dict) -> dict:
         limit=3,
         language=((state.get("rewrite_result") or {}).get("language")) or None,
     )
+    documents = filter_allowed_faq_documents(documents)
     if not documents:
         return _fallback_answer("no_match", RAG_FALLBACK_ANSWER)
     return _build_answer_from_context(
@@ -210,6 +233,8 @@ def search_static_knowledge(
 ) -> list[dict]:
     scored = []
     for document in DEFAULT_KNOWLEDGE_DOCUMENTS:
+        if not is_allowed_faq_document(document):
+            continue
         if document.get("tenant_id") not in {tenant_id, "default"}:
             continue
         if document.get("kb_scope", "default") != kb_scope:
@@ -310,6 +335,25 @@ def score_knowledge_document(document: dict, query: str) -> int:
     return rank_knowledge_document(document, query).get("score", 0)
 
 
+def filter_allowed_faq_documents(documents: list[dict]) -> list[dict]:
+    return [document for document in documents if is_allowed_faq_document(document)]
+
+
+def is_allowed_faq_document(document: dict) -> bool:
+    return document_faq_intent(document) in ALLOWED_FAQ_INTENTS
+
+
+def document_faq_intent(document: dict) -> str | None:
+    metadata = document.get("metadata_json") or {}
+    if isinstance(metadata, str):
+        metadata = {}
+    intent = metadata.get("intent_id") or metadata.get("intent")
+    if intent:
+        return str(intent)
+    title = normalize_text(document.get("title")).lower()
+    return _TITLE_INTENT_MAP.get(title)
+
+
 def _fallback_context(
     answer: str,
     fallback_reason: str,
@@ -357,7 +401,7 @@ def _build_answer_from_context(context: dict) -> dict:
         return _fallback_answer("empty_query", RAG_FALLBACK_ANSWER)
 
     answer = context.get("answer")
-    documents = context.get("documents") or []
+    documents = filter_allowed_faq_documents(context.get("documents") or [])
     if answer and documents:
         return {
             "matched": True,

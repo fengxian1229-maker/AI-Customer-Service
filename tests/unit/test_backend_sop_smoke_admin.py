@@ -80,6 +80,55 @@ def test_backend_sop_smoke_admin_parser_accepts_commands():
     assert assert_loop.inbound_event_id == 11
 
 
+def test_backend_sop_smoke_admin_parser_accepts_latest_backend():
+    from app.workers.backend_sop_smoke_admin import build_arg_parser
+
+    latest_backend = build_arg_parser().parse_args(["latest-backend", "--chat-id", "chat-1"])
+
+    assert latest_backend.command == "latest-backend"
+    assert latest_backend.chat_id == "chat-1"
+
+
+def test_backend_sop_smoke_admin_run_command_latest_backend_uses_repository(monkeypatch):
+    from app.workers import backend_sop_smoke_admin
+
+    calls = {}
+
+    class FakeSettings:
+        def __init__(self, **kwargs):
+            calls["settings_kwargs"] = kwargs
+
+    class FakePool:
+        def close(self):
+            calls["closed"] = True
+
+        async def wait_closed(self):
+            calls["wait_closed"] = True
+
+    class FakeRepository:
+        def __init__(self, pool):
+            calls["repo_pool"] = pool
+
+        async def latest_backend(self, chat_id=None, conversation_id=None, limit=20):
+            calls["latest_backend"] = (chat_id, conversation_id, limit)
+            return complete_snapshot()
+
+    async def fake_create_pool(settings):
+        calls["settings"] = settings
+        return FakePool()
+
+    monkeypatch.setattr(backend_sop_smoke_admin, "Settings", FakeSettings)
+    monkeypatch.setattr(backend_sop_smoke_admin, "create_pool", fake_create_pool)
+    monkeypatch.setattr(backend_sop_smoke_admin, "BackendSopSmokeReadRepository", FakeRepository)
+
+    result = asyncio.run(backend_sop_smoke_admin.run_command("latest-backend", chat_id="chat-1", limit=9))
+
+    assert calls["latest_backend"] == ("chat-1", None, 9)
+    assert result["smoke_status"] == "BACKEND_ANSWER_SENT"
+    assert calls["closed"] is True
+    assert calls["wait_closed"] is True
+
+
 def test_backend_sop_smoke_admin_run_command_uses_repository_and_asserts(monkeypatch):
     from app.workers import backend_sop_smoke_admin
 

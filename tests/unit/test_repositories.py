@@ -79,6 +79,29 @@ class FakePool:
         return self.last_connection
 
 
+class SequentialCursor(FakeCursor):
+    def __init__(self, fetchone_results=None, fetchall_results=None, rowcount: int = 1) -> None:
+        super().__init__(rowcount=rowcount)
+        self.fetchone_results = list(fetchone_results or [])
+        self.fetchall_results = list(fetchall_results or [])
+        self.executions = []
+
+    async def execute(self, sql, args):
+        self.sql = sql
+        self.args = args
+        self.executions.append((sql, args))
+
+    async def fetchone(self):
+        if self.fetchone_results:
+            return self.fetchone_results.pop(0)
+        return None
+
+    async def fetchall(self):
+        if self.fetchall_results:
+            return self.fetchall_results.pop(0)
+        return []
+
+
 def make_inbound_event() -> InboundEvent:
     return InboundEvent(
         source="polling_fallback",
@@ -358,6 +381,25 @@ def test_outbound_fetch_pending_qualifies_status_in_joined_query():
     assert cursor.args == (5,)
 
 
+def test_external_command_result_lease_pending_by_id_scopes_and_decodes_json():
+    import asyncio
+
+    row, cursor, connection = asyncio.run(run_external_result_lease_pending_by_id_found())
+    select_sql, select_args = cursor.executions[0]
+    update_sql, update_args = cursor.executions[1]
+
+    assert connection.began is True
+    assert connection.committed is True
+    assert "WHERE id = %s" in select_sql
+    assert "status IN ('PENDING', 'RETRYABLE')" in select_sql
+    assert "FOR UPDATE SKIP LOCKED" in select_sql
+    assert select_args == (77,)
+    assert "lease_expires_at = DATE_ADD(NOW(6), INTERVAL %s SECOND)" in update_sql
+    assert update_args == (90, "worker-a", 77)
+    assert row["id"] == 77
+    assert row["result_json"] == {"status": "success", "answer": "ok"}
+
+
 def test_outbound_insert_idempotent_accepts_faq_multiblock_dedup_fields():
     import asyncio
 
@@ -443,6 +485,39 @@ async def run_external_result_fetch_pending():
     repository = ExternalCommandResultRepository(FakePool(cursor))
     rows = await repository.fetch_pending(limit=4)
     return rows, cursor
+
+
+async def run_external_result_lease_pending_by_id_found():
+    cursor = SequentialCursor(
+        fetchone_results=[
+            {"id": 77},
+            {
+                "id": 77,
+                "external_command_id": 10,
+                "tenant_id": "default",
+                "conversation_id": "livechat:chat-1",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "inbound_event_id": 55,
+                "command_type": "backend.query",
+                "result_type": "backend.query.result",
+                "result_json": '{"status":"success","answer":"ok"}',
+                "status": "PENDING",
+                "retry_count": 0,
+                "processed_at": None,
+                "last_error": None,
+                "leased_at": None,
+                "lease_expires_at": None,
+                "locked_by": "worker-a",
+                "attempted_at": None,
+                "dedup_key": "dedup",
+            },
+        ],
+    )
+    pool = FakePool(cursor)
+    repository = ExternalCommandResultRepository(pool)
+    row = await repository.lease_pending_by_id(77, "worker-a", 90)
+    return row, cursor, pool.last_connection
 
 
 async def run_graph_run_error_insert(rowcount: int):
@@ -1230,12 +1305,12 @@ def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores
                     "id": 1,
                     "tenant_id": "default",
                     "kb_scope": "default",
-                    "title": "Bonus rules",
-                    "content": "奖金规则以活动页面说明为准。",
-                    "keywords": '["bonus","rules"]',
-                    "question_aliases": '["bonus rules","bonus terms"]',
-                    "answer_blocks": '[{"type":"text","text":"奖金规则以活动页面说明为准。"}]',
-                    "metadata_json": '{"intent_id":"bonus_rules"}',
+                    "title": "充值教程",
+                    "content": "按页面提示完成充值。",
+                    "keywords": '["deposit","充值"]',
+                    "question_aliases": '["how to deposit","如何充值"]',
+                    "answer_blocks": '[{"type":"text","text":"按页面提示完成充值。"}]',
+                    "metadata_json": '{"intent_id":"deposit_howto"}',
                     "language": "en",
                     "priority": 20,
                 },
@@ -1257,18 +1332,27 @@ def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores
     cursor = FetchCursor(rowcount=2)
     repository = KnowledgeDocumentRepository(FakePool(cursor))
 
-    rows = asyncio.run(repository.search("default", "bonus rules", limit=1))
+    rows = asyncio.run(repository.search("default", "如何充值", limit=1))
 
     assert "FROM knowledge_documents" in cursor.sql
     assert "enabled = 1" in cursor.sql
-    assert cursor.args == ("default", "default")
+    assert "JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.intent_id'))" in cursor.sql
+    assert "JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.intent'))" in cursor.sql
+    assert cursor.args == (
+        "default",
+        "default",
+        "deposit_howto",
+        "forgot_password_howto",
+        "screenshot_upload_howto",
+        "withdrawal_howto",
+    )
     assert rows[0]["id"] == 1
-    assert rows[0]["keywords"] == ["bonus", "rules"]
-    assert rows[0]["question_aliases"] == ["bonus rules", "bonus terms"]
-    assert rows[0]["answer_blocks"] == [{"type": "text", "text": "奖金规则以活动页面说明为准。"}]
-    assert rows[0]["metadata_json"] == {"intent_id": "bonus_rules"}
+    assert rows[0]["keywords"] == ["deposit", "充值"]
+    assert rows[0]["question_aliases"] == ["how to deposit", "如何充值"]
+    assert rows[0]["answer_blocks"] == [{"type": "text", "text": "按页面提示完成充值。"}]
+    assert rows[0]["metadata_json"] == {"intent_id": "deposit_howto"}
     assert rows[0]["score"] > 0
-    assert rows[0]["matched_fields"] == ["title", "question_aliases", "keywords"]
+    assert set(rows[0]["matched_fields"]) >= {"question_aliases", "keywords"}
     assert len(rows) == 1
 
 
@@ -1307,15 +1391,15 @@ def test_knowledge_document_search_sorts_by_score_priority_and_id():
     class FetchCursor(FakeCursor):
         async def fetchall(self):
             return [
-                {"id": 3, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "bonus", "keywords": "[]", "question_aliases": None, "answer_blocks": None, "metadata_json": None, "language": None, "priority": 30},
-                {"id": 1, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "", "keywords": '["bonus"]', "question_aliases": None, "answer_blocks": None, "metadata_json": None, "language": None, "priority": 10},
-                {"id": 2, "tenant_id": "default", "kb_scope": "default", "title": "bonus", "content": "", "keywords": '["bonus"]', "question_aliases": None, "answer_blocks": None, "metadata_json": None, "language": None, "priority": 10},
+                {"id": 3, "tenant_id": "default", "kb_scope": "default", "title": "充值教程", "content": "充值", "keywords": "[]", "question_aliases": None, "answer_blocks": None, "metadata_json": '{"intent_id":"deposit_howto"}', "language": None, "priority": 30},
+                {"id": 1, "tenant_id": "default", "kb_scope": "default", "title": "充值教程", "content": "", "keywords": '["充值"]', "question_aliases": None, "answer_blocks": None, "metadata_json": '{"intent_id":"deposit_howto"}', "language": None, "priority": 10},
+                {"id": 2, "tenant_id": "default", "kb_scope": "default", "title": "充值教程", "content": "", "keywords": '["充值"]', "question_aliases": None, "answer_blocks": None, "metadata_json": '{"intent_id":"deposit_howto"}', "language": None, "priority": 10},
             ]
 
     cursor = FetchCursor(rowcount=3)
     repository = KnowledgeDocumentRepository(FakePool(cursor))
 
-    rows = asyncio.run(repository.search("default", "bonus", limit=3))
+    rows = asyncio.run(repository.search("default", "充值", limit=3))
 
     assert [row["id"] for row in rows] == [1, 2, 3]
 

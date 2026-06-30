@@ -17,76 +17,152 @@ def test_rag_service_returns_matched_answer_from_knowledge_document():
     repository = FakeKnowledgeRepository([
         {
             "id": 1,
-            "title": "Bonus rules",
-            "content": "奖金规则以活动页面说明为准。",
+            "title": "充值教程",
+            "content": "按页面提示完成充值。",
+            "metadata_json": {"intent_id": "deposit_howto"},
             "score": 12,
             "priority": 20,
             "matched_fields": ["title", "keywords"],
-            "matched_terms": ["bonus rules"],
+            "matched_terms": ["充值教程"],
         }
     ])
     service = RagService(repository)
 
-    result = asyncio.run(service.answer({"tenant_id": "default", "raw_user_input": "bonus rules"}))
+    result = asyncio.run(service.answer({"tenant_id": "default", "raw_user_input": "充值教程"}))
 
     assert result["matched"] is True
-    assert result["answer"] == "奖金规则以活动页面说明为准。"
+    assert result["answer"] == "按页面提示完成充值。"
     assert result["documents"] == [
         {
             "id": 1,
-            "title": "Bonus rules",
+            "title": "充值教程",
             "score": 12,
             "priority": 20,
             "matched_fields": ["title", "keywords"],
-            "matched_terms": ["bonus rules"],
+            "matched_terms": ["充值教程"],
         }
     ]
-    assert repository.calls == [("default", "bonus rules", "default", 3)]
+    assert repository.calls == [("default", "充值教程", "default", 3)]
 
 
 def test_rag_service_retrieve_uses_repository_search():
     repository = FakeKnowledgeRepository([
         {
             "id": 1,
-            "title": "Bonus rules",
-            "content": "奖金规则以活动页面说明为准。",
+            "title": "充值教程",
+            "content": "按页面提示完成充值。",
+            "metadata_json": {"intent_id": "deposit_howto"},
             "score": 12,
             "priority": 20,
             "matched_fields": ["title", "keywords"],
-            "matched_terms": ["bonus rules"],
-            "answer_blocks": [{"type": "text", "text": "奖金规则以活动页面说明为准。"}],
+            "matched_terms": ["充值教程"],
+            "answer_blocks": [{"type": "text", "text": "按页面提示完成充值。"}],
         }
     ])
     service = RagService(repository)
 
-    context = asyncio.run(service.retrieve({"tenant_id": "default", "raw_user_input": "bonus rules"}))
+    context = asyncio.run(service.retrieve({"tenant_id": "default", "raw_user_input": "充值教程"}))
 
     assert context["matched"] is True
-    assert context["answer"] == "奖金规则以活动页面说明为准。"
+    assert context["answer"] == "按页面提示完成充值。"
     assert context["source"] == "knowledge_documents"
     assert context["fallback_reason"] is None
     assert context["tenant_id"] == "default"
     assert context["kb_scope"] == "default"
-    assert context["query"] == "bonus rules"
+    assert context["query"] == "充值教程"
     assert context["documents"][0]["matched_fields"] == ["title", "keywords"]
-    assert context["answer_blocks"] == [{"type": "text", "text": "奖金规则以活动页面说明为准。"}]
+    assert context["answer_blocks"] == [{"type": "text", "text": "按页面提示完成充值。"}]
     assert context["documents"][0]["has_answer_blocks"] is True
     assert context["documents"][0]["block_types"] == ["text"]
     assert context["documents"][0]["asset_keys"] == []
-    assert repository.calls == [("default", "bonus rules", "default", 3)]
+    assert repository.calls == [("default", "充值教程", "default", 3)]
+
+
+def test_rag_service_filters_legacy_repository_documents_even_when_db_returns_them():
+    repository = FakeKnowledgeRepository([
+        {
+            "id": 10,
+            "title": "奖金规则说明",
+            "content": "旧奖金 FAQ 不应返回。",
+            "metadata_json": {"intent_id": "faq_general"},
+            "score": 99,
+            "priority": 1,
+        },
+        {
+            "id": 11,
+            "title": "菜单导航帮助",
+            "content": "旧菜单 FAQ 不应返回。",
+            "metadata_json": {"intent_id": "menu_help"},
+            "score": 98,
+            "priority": 2,
+        },
+        {
+            "id": 12,
+            "title": "流水要求说明",
+            "content": "旧流水 FAQ 不应返回。",
+            "metadata_json": {"intent_id": "rollover_explanation"},
+            "score": 97,
+            "priority": 3,
+        },
+    ])
+    service = RagService(repository)
+
+    context = asyncio.run(service.retrieve({"tenant_id": "default", "raw_user_input": "奖金规则是什么"}))
+
+    assert context["matched"] is False
+    assert context["documents"] == []
+    assert context["fallback_reason"] == "no_match"
+
+
+def test_rag_service_retrieves_all_canonical_faq_intents_from_repository():
+    cases = [
+        ("如何充值", "充值教程", "deposit_howto"),
+        ("如何提款", "提款教程", "withdrawal_howto"),
+        ("忘记密码", "忘记密码说明", "forgot_password_howto"),
+        ("如何上传截图", "上传截图说明", "screenshot_upload_howto"),
+    ]
+
+    for query, title, intent in cases:
+        repository = FakeKnowledgeRepository([
+            {
+                "id": 1,
+                "title": title,
+                "content": f"{title} answer",
+                "metadata_json": {"intent_id": intent},
+                "score": 12,
+                "priority": 10,
+            }
+        ])
+        service = RagService(repository)
+
+        context = asyncio.run(service.retrieve({"tenant_id": "default", "raw_user_input": query}))
+
+        assert context["matched"] is True
+        assert context["documents"][0]["title"] == title
+
+
+def test_rag_service_does_not_match_legacy_static_faq_questions():
+    service = RagService()
+
+    for query in ("流水为什么没变", "奖金规则是什么", "菜单在哪里", "账户安全问题"):
+        context = asyncio.run(service.retrieve({"tenant_id": "default", "raw_user_input": query}))
+
+        assert context["matched"] is False
+        assert context["documents"] == []
 
 
 def test_rag_service_retrieve_prefers_llm_faq_query_then_normalized_query():
     repository = FakeKnowledgeRepository([
         {
             "id": 1,
-            "title": "Deposit not arrived FAQ",
-            "content": "请打开存款问题 FAQ 查看处理方式。",
+            "title": "充值教程",
+            "content": "请打开充值教程。",
+            "metadata_json": {"intent_id": "deposit_howto"},
             "score": 12,
             "priority": 20,
             "matched_fields": ["question_aliases"],
-            "matched_terms": ["deposit not arrived FAQ"],
-            "answer_blocks": [{"type": "text", "text": "请打开存款问题 FAQ 查看处理方式。"}],
+            "matched_terms": ["怎么存款"],
+            "answer_blocks": [{"type": "text", "text": "请打开充值教程。"}],
         }
     ])
     service = RagService(repository)
@@ -98,15 +174,15 @@ def test_rag_service_retrieve_prefers_llm_faq_query_then_normalized_query():
                 "raw_user_input": "mi deposito no llegó",
                 "rewritten_question": "mi deposito no llegó",
                 "rewrite_result": {"normalized_query": "deposit issue"},
-                "intent_result": {"faq_query": "deposit not arrived FAQ"},
-                "rag_backend_fact_guard_enabled": False,
-            }
+                    "intent_result": {"faq_query": "怎么存款"},
+                    "rag_backend_fact_guard_enabled": False,
+                }
+            )
         )
-    )
 
     assert context["matched"] is True
-    assert context["query"] == "deposit not arrived FAQ"
-    assert repository.calls == [("default", "deposit not arrived FAQ", "default", 3)]
+    assert context["query"] == "怎么存款"
+    assert repository.calls == [("default", "怎么存款", "default", 3)]
 
 
 def test_rag_service_returns_safe_fallback_when_no_match():
@@ -158,34 +234,60 @@ def test_answer_from_rag_context_returns_document_answer_and_summary_without_con
                 "documents": [
                     {
                         "id": 1,
-                        "title": "Bonus rules",
-                        "content": "奖金规则以活动页面说明为准。",
+                        "title": "充值教程",
+                        "content": "按页面提示完成充值。",
+                        "metadata_json": {"intent_id": "deposit_howto"},
                         "score": 5,
                         "priority": 20,
                         "matched_fields": ["title"],
-                        "matched_terms": ["bonus"],
+                        "matched_terms": ["充值"],
                     }
                 ],
                 "source": "knowledge_documents",
                 "fallback_reason": None,
-                "answer": "奖金规则以活动页面说明为准。",
+                "answer": "按页面提示完成充值。",
             }
         }
     )
 
     assert result["matched"] is True
-    assert result["answer"] == "奖金规则以活动页面说明为准。"
+    assert result["answer"] == "按页面提示完成充值。"
     assert result["documents"] == [
         {
             "id": 1,
-            "title": "Bonus rules",
+            "title": "充值教程",
             "score": 5,
             "priority": 20,
             "matched_fields": ["title"],
-            "matched_terms": ["bonus"],
+            "matched_terms": ["充值"],
         }
     ]
     assert "content" not in result["documents"][0]
+
+
+def test_answer_from_rag_context_filters_legacy_documents_before_returning_answer():
+    result = answer_from_rag_context(
+        {
+            "rag_context": {
+                "documents": [
+                    {
+                        "id": 1,
+                        "title": "Bonus rules",
+                        "content": "旧奖金 FAQ 不应返回。",
+                        "metadata_json": {"intent_id": "faq_general"},
+                        "score": 99,
+                    }
+                ],
+                "source": "knowledge_documents",
+                "fallback_reason": None,
+                "answer": "旧奖金 FAQ 不应返回。",
+            }
+        }
+    )
+
+    assert result["matched"] is False
+    assert result["documents"] == []
+    assert result["fallback_reason"] == "no_match"
 
 
 def test_answer_from_rag_context_returns_no_match_fallback_without_documents():
@@ -356,17 +458,18 @@ def test_rag_service_low_score_returns_fallback():
     repository = FakeKnowledgeRepository([
         {
             "id": 1,
-            "title": "General help",
-            "content": "bonus appears once only.",
+            "title": "充值教程",
+            "content": "充值 appears once only.",
+            "metadata_json": {"intent_id": "deposit_howto"},
             "score": 1,
             "priority": 1,
             "matched_fields": ["content"],
-            "matched_terms": ["bonus"],
+            "matched_terms": ["充值"],
         }
     ])
     service = RagService(repository, min_score=2)
 
-    context = asyncio.run(service.retrieve({"tenant_id": "default", "raw_user_input": "bonus"}))
+    context = asyncio.run(service.retrieve({"tenant_id": "default", "raw_user_input": "充值"}))
 
     assert context["matched"] is False
     assert context["answer"] == RAG_FALLBACK_ANSWER

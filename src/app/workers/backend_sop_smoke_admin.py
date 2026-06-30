@@ -31,6 +31,35 @@ class BackendSopSmokeReadRepository:
             return _snapshot(None)
         return await self.by_inbound(int(inbound["id"]))
 
+    async def latest_backend(
+        self,
+        chat_id: str | None = None,
+        conversation_id: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        effective_chat_id = chat_id or _chat_id_from_conversation_id(conversation_id)
+        where = ["c.command_type = 'backend.query'"]
+        args: list[Any] = []
+        if effective_chat_id:
+            where.append("i.chat_id = %s")
+            args.append(effective_chat_id)
+        rows = await self._fetch_all(
+            f"""
+            SELECT i.id
+            FROM inbound_events i
+            JOIN external_commands c ON c.inbound_event_id = i.id
+            WHERE {' AND '.join(where)}
+            ORDER BY i.id DESC
+            LIMIT %s
+            """,
+            (*args, limit),
+        )
+        if not rows:
+            snapshot = _snapshot(None)
+            snapshot["smoke_status"] = "NO_BACKEND_SOP_IN_CHAT"
+            return snapshot
+        return await self.by_inbound(int(rows[0]["id"]))
+
     async def by_inbound(self, inbound_event_id: int) -> dict[str, Any]:
         inbound_rows = await self._fetch_inbound(inbound_event_id=inbound_event_id, limit=1)
         inbound = inbound_rows[0] if inbound_rows else None
@@ -264,6 +293,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     latest.add_argument("--chat-id")
     latest.add_argument("--conversation-id")
     latest.add_argument("--limit", type=int, default=20)
+    latest_backend = subparsers.add_parser("latest-backend")
+    latest_backend.add_argument("--chat-id")
+    latest_backend.add_argument("--conversation-id")
+    latest_backend.add_argument("--limit", type=int, default=20)
     by_inbound = subparsers.add_parser("by-inbound")
     by_inbound.add_argument("--inbound-event-id", type=int, required=True)
     assert_loop = subparsers.add_parser("assert-closed-loop")
@@ -288,6 +321,9 @@ async def run_command(
         if command == "latest":
             snapshot = await repository.latest(chat_id=chat_id, conversation_id=conversation_id, limit=limit)
             return {**snapshot, "smoke_status": infer_smoke_status(snapshot)}
+        if command == "latest-backend":
+            snapshot = await repository.latest_backend(chat_id=chat_id, conversation_id=conversation_id, limit=limit)
+            return {**snapshot, "smoke_status": snapshot.get("smoke_status") or infer_smoke_status(snapshot)}
         if command == "by-inbound":
             if inbound_event_id is None:
                 raise ValueError("inbound_event_id is required")

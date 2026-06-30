@@ -98,6 +98,54 @@ async def process_pending_results(
     return processed
 
 
+async def process_result_by_id(
+    result_repository: ExternalCommandResultRepository,
+    conversation_repository: ConversationRepository,
+    outbound_repository: OutboundMessageRepository,
+    result_id: int,
+    transaction_repository: ExternalResultTransactionRepository | None = None,
+    worker_id: str | None = None,
+    lease_seconds: int = 60,
+    max_retries: int = 3,
+) -> dict:
+    worker_id = worker_id or default_worker_id()
+    row = await result_repository.lease_pending_by_id(
+        result_id=result_id,
+        worker_id=worker_id,
+        lease_seconds=lease_seconds,
+    )
+    if not row:
+        return {"id": result_id, "status": "RESULT_LOCKED_OR_NOT_PENDING"}
+    if transaction_repository is None:
+        transaction_repository = ExternalResultTransactionRepository(
+            result_repository.pool,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            result_repository=result_repository,
+            conversation_message_repository=ConversationMessageRepository(result_repository.pool),
+        )
+    try:
+        handler = build_result_handler(row)
+        outbound = build_text_outbox(
+            chat_id=row["chat_id"],
+            thread_id=row.get("thread_id"),
+            conversation_id=row["conversation_id"],
+            inbound_event_id=row.get("inbound_event_id"),
+            text=handler["text"],
+        )
+        await transaction_repository.process_result_transactionally(
+            row,
+            graph_state=handler["graph_state"],
+            outbound_messages=[outbound],
+            external_commands=[],
+            summary_message=handler["summary_message"],
+        )
+        return {"id": row["id"], "result_type": row["result_type"], "status": "PROCESSED"}
+    except Exception as exc:
+        await result_repository.mark_processing_failed(row["id"], str(exc), max_retries=max_retries)
+        return {"id": row["id"], "result_type": row.get("result_type"), "status": "FAILED", "error": str(exc)}
+
+
 def build_result_handler(row: dict) -> dict:
     result_type = row["result_type"]
     result_json = row.get("result_json") or {}

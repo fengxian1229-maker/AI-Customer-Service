@@ -42,6 +42,14 @@ BACKEND_LOGIN_MERCHANT=...
 
 ## Step 1: Probe TAC
 
+Run config preflight first. It only checks env shape and TAC login readiness, and prints sanitized JSON:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.tac_backend_probe preflight
+```
+
+Expected: `backend_query_enabled=true`, `provider_type=tac`, `has_base_url=true`, `has_merchant_code=true`, login fields present when password login is used, and `login_success=true` when login is attempted. If `ENABLE_BACKEND_LOOKUP` is set but `BACKEND_QUERY_ENABLED` is not true, the preflight warns that this app only reads `BACKEND_QUERY_ENABLED`.
+
 ```bash
 PYTHONPATH=src uv run --group dev python -m app.workers.tac_backend_probe turnover <username_or_phone> <merchantCode>
 ```
@@ -76,6 +84,24 @@ LIMIT 10;
 ```
 
 ## Step 4: Gateway
+
+The scoped runner is preferred for manual smoke because it follows one `inbound_event_id` and does not process old pending queues:
+
+```bash
+PYTHONPATH=src uv run --group dev python -m app.workers.withdrawal_backend_smoke_runner \
+  --inbound-event-id <inbound_event_id> \
+  --plan-only
+
+PYTHONPATH=src uv run --group dev python -m app.workers.withdrawal_backend_smoke_runner \
+  --inbound-event-id <inbound_event_id> \
+  --execute-backend \
+  --send-livechat \
+  --assert-closed-loop
+```
+
+Defaults are safe: no real backend call unless `--execute-backend` is passed, and no LiveChat send unless `--send-livechat` is passed. `--plan-only` is read-only. The runner uses `process_inbound_event_id`, `process_pending_for_inbound_event`, `lease_pending_by_id`, and `process_result_by_id` so it stays scoped to the requested inbound event.
+
+The older manual sequence remains useful for debugging individual steps:
 
 ```bash
 PYTHONPATH=src uv run --group dev python -m app.workers.gateway_consumer --once
@@ -187,9 +213,12 @@ Expected: backend answer outbound becomes `SENT`.
 
 ```bash
 PYTHONPATH=src uv run --group dev python -m app.workers.backend_sop_smoke_admin latest --chat-id <chat_id>
+PYTHONPATH=src uv run --group dev python -m app.workers.backend_sop_smoke_admin latest-backend --chat-id <chat_id>
 PYTHONPATH=src uv run --group dev python -m app.workers.backend_sop_smoke_admin by-inbound --inbound-event-id <inbound_event_id>
 PYTHONPATH=src uv run --group dev python -m app.workers.backend_sop_smoke_admin assert-closed-loop --inbound-event-id <inbound_event_id>
 ```
+
+`latest` means the chat's latest inbound and may not be a backend SOP. `latest-backend` means the chat's latest inbound that has a `backend.query` command. For closed-loop assertions, prefer `assert-closed-loop --inbound-event-id`.
 
 Success status:
 

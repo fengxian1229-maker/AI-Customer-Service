@@ -6,7 +6,7 @@ import aiomysql
 
 from app.schemas.events import InboundEvent
 from app.services.knowledge_blocks import normalize_metadata_json, normalize_question_aliases, validate_answer_blocks
-from app.services.rag import rank_knowledge_document
+from app.services.rag import ALLOWED_FAQ_INTENTS, is_allowed_faq_document, rank_knowledge_document
 from app.workflows.slot_extractors import normalize_text
 
 
@@ -861,6 +861,57 @@ class ExternalCommandResultRepository:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (max_retries, error, result_id))
 
+    async def lease_pending_by_id(self, result_id: int, worker_id: str, lease_seconds: int) -> dict | None:
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                row = await self._lease_pending_by_id_on_connection(conn, result_id, worker_id, lease_seconds)
+                await conn.commit()
+                return row
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def _lease_pending_by_id_on_connection(self, conn, result_id: int, worker_id: str, lease_seconds: int) -> dict | None:
+        select_sql = """
+        SELECT id
+        FROM external_command_results
+        WHERE id = %s
+          AND status IN ('PENDING', 'RETRYABLE')
+          AND (locked_by IS NULL OR lease_expires_at IS NULL OR lease_expires_at < NOW(6))
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+        """
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(select_sql, (result_id,))
+            row = await cur.fetchone()
+            if not row:
+                return None
+            update_sql = """
+            UPDATE external_command_results
+            SET leased_at = NOW(6),
+                lease_expires_at = DATE_ADD(NOW(6), INTERVAL %s SECOND),
+                locked_by = %s,
+                attempted_at = NOW(6),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """
+            await cur.execute(update_sql, (lease_seconds, worker_id, result_id))
+            fetch_sql = """
+            SELECT id, external_command_id, tenant_id, conversation_id, chat_id, thread_id,
+                   inbound_event_id, command_type, result_type, result_json, status, retry_count,
+                   processed_at, last_error, leased_at, lease_expires_at, locked_by,
+                   attempted_at, dedup_key
+            FROM external_command_results
+            WHERE id = %s
+            LIMIT 1
+            """
+            await cur.execute(fetch_sql, (result_id,))
+            leased = await cur.fetchone()
+        if leased:
+            leased["result_json"] = json_loads(leased["result_json"])
+        return leased
+
     async def recover_expired_leases(self) -> int:
         sql = """
         UPDATE external_command_results
@@ -1068,17 +1119,24 @@ class KnowledgeDocumentRepository:
         WHERE tenant_id = %s
           AND kb_scope = %s
           AND enabled = 1
+          AND COALESCE(
+                JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.intent_id')),
+                JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.intent'))
+              ) IN (%s, %s, %s, %s)
         ORDER BY priority ASC, id ASC
         """
+        allowed_intents = tuple(sorted(ALLOWED_FAQ_INTENTS))
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(sql, (tenant_id, kb_scope))
+                await cur.execute(sql, (tenant_id, kb_scope, *allowed_intents))
                 rows = await cur.fetchall()
 
         query_text = normalize_text(query)
         scored = []
         for row in rows:
             decoded = self._decode_document(row)
+            if not is_allowed_faq_document(decoded):
+                continue
             ranked = rank_knowledge_document(decoded, query_text)
             if ranked["score"] > 0:
                 scored.append({**decoded, **ranked})
