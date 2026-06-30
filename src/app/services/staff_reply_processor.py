@@ -138,9 +138,11 @@ def critical_facts(text: str) -> list[str]:
 
 def status_facts(text: str) -> set[str]:
     statuses = set()
-    if re.search(r"\b(procesad\w*|processed|aprobad\w*|approved|acreditad\w*|credited|completad\w*|completed|finalizad\w*|done|success|successful|成功|完成|已处理|已處理|已到账|已到帳)\b", text):
+    western_success = r"\b(procesad\w*|processed|aprobad\w*|approved|acreditad\w*|credited|completad\w*|completed|finalizad\w*|done|success|successful)\b"
+    western_rejected = r"\b(rechazad\w*|rejected|cancelad\w*|cancelled|canceled|devuelt\w*|returned|refund|reembolso)\b"
+    if re.search(western_success, text) or re.search(r"(成功|完成|已处理|已處理|已到账|已到帳)", text):
         statuses.add("success")
-    if re.search(r"\b(rechazad\w*|rejected|cancelad\w*|cancelled|canceled|devuelt\w*|returned|refund|reembolso|退款|退回|取消|拒绝|拒絕)\b", text):
+    if re.search(western_rejected, text) or re.search(r"(退款|退回|取消|拒绝|拒絕)", text):
         statuses.add("rejected_or_returned")
     return statuses
 
