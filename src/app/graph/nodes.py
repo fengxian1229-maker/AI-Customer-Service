@@ -13,6 +13,7 @@ from app.workflows.slot_extractors import (
 )
 from app.workflows.sop_handlers import run_sop
 from app.workflows.waiting_backend_classifier import handle_waiting_backend
+from app.workflows.final_reply_policy import build_reply_plan
 
 
 LLM_AUTHORITATIVE_SOURCES = {
@@ -54,6 +55,10 @@ def build_graph_state_from_event(
         "rag_context": None,
         "rag_result": None,
         "recent_messages": recent_messages or [],
+        "reply_plan": None,
+        "response_text_fallback": None,
+        "final_response_text": None,
+        "final_reply_result": None,
         "response_text": None,
         "commands": [],
         "errors": [],
@@ -201,10 +206,19 @@ def sop_node(state: GraphState) -> GraphState:
 
 def rag_node(state: GraphState) -> GraphState:
     rag_result = answer_from_rag_context(state) if state.get("rag_context") is not None else answer_from_static_knowledge(state)
+    fallback_text = rag_result["answer"]
     return {
         **state,
         "rag_result": rag_result,
-        "response_text": rag_result["answer"],
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
+        "reply_plan": build_reply_plan(
+            kind="faq_answer",
+            fallback_text=fallback_text,
+            must_say=[fallback_text] if fallback_text else [],
+            must_not_say=["已到账", "已完成", "已退款", "保证到账", "手续费全免"],
+            allowed_facts=[fallback_text] if fallback_text else [],
+        ),
         "commands": [],
     }
 
@@ -218,6 +232,14 @@ def human_handoff_node(state: GraphState) -> GraphState:
         "active_workflow": "human_handoff",
         "workflow_stage": "handoff_requested",
         "response_text": "我会为你转接真人客服继续协助。",
+        "response_text_fallback": "我会为你转接真人客服继续协助。",
+        "reply_plan": build_reply_plan(
+            kind="human_handoff",
+            fallback_text="我会为你转接真人客服继续协助。",
+            must_say=["转接真人客服"],
+            must_not_say=["已接入", "马上处理", "已处理", "已到账", "已完成"],
+            allowed_facts=["客户需要真人客服", "系统将提出转接请求"],
+        ),
         "commands": [{"type": CommandType.HUMAN_HANDOFF_REQUESTED, "payload": {"reason": reason}}],
     }
 
@@ -226,22 +248,44 @@ def emotion_care_node(state: GraphState) -> GraphState:
     return {
         **state,
         "response_text": "我理解你现在很着急。我会先尽力说明处理方式；如果你愿意，也可以直接告诉我需要转接真人客服。",
+        "response_text_fallback": "我理解你现在很着急。我会先尽力说明处理方式；如果你愿意，也可以直接告诉我需要转接真人客服。",
+        "reply_plan": build_reply_plan(
+            kind="emotion_care",
+            fallback_text="我理解你现在很着急。我会先尽力说明处理方式；如果你愿意，也可以直接告诉我需要转接真人客服。",
+            must_say=["理解", "转接真人客服"],
+            must_not_say=["已到账", "已完成", "保证"],
+            allowed_facts=["客户情绪较急", "可以请求转接真人客服"],
+        ),
         "commands": [],
     }
 
 
 def clarification_node(state: GraphState) -> GraphState:
-    return {**state, "response_text": "请补充你要咨询的问题，或说明是存款、提款、流水还是需要真人客服。", "commands": []}
+    fallback_text = "请补充你要咨询的问题，或说明是存款、提款、流水还是需要真人客服。"
+    return {
+        **state,
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
+        "reply_plan": build_reply_plan(
+            kind="clarification",
+            fallback_text=fallback_text,
+            must_say=["存款", "提款", "流水", "真人客服"],
+            must_not_say=["已到账", "已完成", "已处理"],
+            allowed_facts=["需要客户补充问题类型"],
+        ),
+        "commands": [],
+    }
 
 
 def command_planner_node(state: GraphState) -> GraphState:
     commands = list(state.get("commands") or [])
-    if state.get("response_text"):
+    text = state.get("final_response_text") or state.get("response_text")
+    if text:
         commands.insert(
             0,
             {
                 "type": CommandType.LIVECHAT_SEND_TEXT,
-                "payload": {"text": state["response_text"]},
+                "payload": {"text": text},
             },
         )
     return {**state, "commands": commands}

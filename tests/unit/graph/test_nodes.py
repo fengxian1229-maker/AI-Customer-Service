@@ -1,5 +1,6 @@
 from app.graph.nodes import (
     build_graph_state_from_event,
+    command_planner_node,
     intent_router_node,
     prepare_route_state,
     rewrite_question_node,
@@ -143,3 +144,15 @@ def test_active_collecting_workflow_routes_directly_to_sop():
 
     assert result["intent_result"]["intent"] == "deposit_missing"
     assert result["route"] == "sop"
+
+
+def test_command_planner_node_prefers_final_response_text():
+    result = command_planner_node(
+        {
+            "response_text": "fallback text",
+            "final_response_text": "final composed text",
+            "commands": [],
+        }
+    )
+
+    assert result["commands"][0]["payload"]["text"] == "final composed text"

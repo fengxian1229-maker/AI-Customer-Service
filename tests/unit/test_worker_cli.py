@@ -1515,6 +1515,22 @@ def test_gateway_llm_summary_reports_shadow_and_fallback_flags():
     }
 
 
+def test_gateway_llm_summary_reports_final_reply_when_enabled():
+    from app.workers.gateway_consumer import _build_llm_summary
+
+    class FakeSettings:
+        llm_provider = "gemini"
+        llm_final_reply_enabled = True
+        llm_final_reply_min_confidence = 0.81
+        llm_final_reply_fallback_enabled = True
+
+    summary = _build_llm_summary(FakeSettings())
+
+    assert summary["final_reply_enabled"] is True
+    assert summary["final_reply_min_confidence"] == 0.81
+    assert summary["final_reply_fallback_enabled"] is True
+
+
 def test_setup_langgraph_checkpoints_skips_when_mode_is_off(monkeypatch):
     import asyncio
 

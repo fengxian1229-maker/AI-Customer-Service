@@ -109,12 +109,44 @@ class LLMSopSlotExtractionInput(TypedDict, total=False):
     language: str
 
 
+class LLMFinalReplyInput(TypedDict, total=False):
+    tenant_id: str
+    channel_type: str
+    conversation_id: str
+    raw_user_input: str
+    rewritten_question: str | None
+    recent_messages: list[dict[str, Any]]
+    route: str | None
+    intent_result: dict[str, Any] | None
+    active_workflow: str | None
+    workflow_stage: str | None
+    status: str | None
+    slot_memory: dict[str, Any]
+    missing_slots: list[str]
+    sop_action: str | None
+    rag_result: dict[str, Any] | None
+    response_text_fallback: str
+    reply_plan: dict[str, Any]
+    tenant_persona: dict[str, Any]
+
+
 class LLMSopSlotExtractionOutput(TypedDict, total=False):
     intent: str
     extracted_slots: dict[str, str | None]
     attachment_classification: dict[str, Any]
     missing_slots: list[str]
     confidence: dict[str, float]
+    reason: str
+    provider: str
+    mode: str
+
+
+class LLMFinalReplyOutput(TypedDict, total=False):
+    text: str
+    language: str
+    tone: str
+    confidence: float
+    safety_flags: list[str]
     reason: str
     provider: str
     mode: str
@@ -172,4 +204,15 @@ class LLMSopSlotExtractionSchema(BaseModel):
     attachment_classification: dict[str, Any] = Field(default_factory=dict)
     missing_slots: list[str] = Field(default_factory=list)
     confidence: dict[str, float] = Field(default_factory=dict)
+    reason: str
+
+
+class LLMFinalReplySchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    language: str = "unknown"
+    tone: str = "neutral"
+    confidence: float = 0.0
+    safety_flags: list[str] = Field(default_factory=list)
     reason: str

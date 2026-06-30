@@ -69,6 +69,10 @@ class GatewayService:
         llm_sop_slot_enabled: bool = False,
         llm_sop_slot_min_confidence: float = 0.70,
         llm_sop_slot_fallback_to_deterministic: bool = True,
+        llm_final_reply_service=None,
+        llm_final_reply_enabled: bool = False,
+        llm_final_reply_min_confidence: float = 0.70,
+        llm_final_reply_fallback_enabled: bool = True,
         recent_message_limit: int = 10,
     ) -> None:
         self.inbound_repository = inbound_repository
@@ -102,6 +106,10 @@ class GatewayService:
         self.llm_sop_slot_enabled = bool(llm_sop_slot_enabled)
         self.llm_sop_slot_min_confidence = float(llm_sop_slot_min_confidence)
         self.llm_sop_slot_fallback_to_deterministic = bool(llm_sop_slot_fallback_to_deterministic)
+        self.llm_final_reply_service = llm_final_reply_service
+        self.llm_final_reply_enabled = bool(llm_final_reply_enabled)
+        self.llm_final_reply_min_confidence = float(llm_final_reply_min_confidence)
+        self.llm_final_reply_fallback_enabled = bool(llm_final_reply_fallback_enabled)
         self.recent_message_limit = recent_message_limit
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
@@ -229,6 +237,7 @@ class GatewayService:
                 routed_state,
                 config={"configurable": {"thread_id": graph_thread_id}},
             )
+            result = await self._run_final_reply(result)
             await self._mark_checkpoint_run_succeeded(checkpoint_run_id, result)
             return result
         except Exception as exc:
@@ -773,9 +782,12 @@ class GatewayService:
         intent = graph_state.get("llm_intent_result")
         router = graph_state.get("llm_router_result")
         if not rewrite and not intent and not router:
+            metadata = {}
             if graph_state.get("llm_sop_slot_result"):
-                return {"llm_sop_slot": self._sanitize_value(graph_state["llm_sop_slot_result"])}
-            return {}
+                metadata["llm_sop_slot"] = self._sanitize_value(graph_state["llm_sop_slot_result"])
+            if graph_state.get("final_reply_result"):
+                metadata["final_reply"] = self._sanitize_value(graph_state["final_reply_result"])
+            return self._sanitize_value(metadata)
         metadata = {}
         if rewrite or intent:
             metadata["llm_shadow"] = {
@@ -788,9 +800,25 @@ class GatewayService:
             metadata["llm_router"] = self._router_checkpoint_summary(router, graph_state)
         if graph_state.get("llm_sop_slot_result"):
             metadata["llm_sop_slot"] = self._sanitize_value(graph_state["llm_sop_slot_result"])
+        if graph_state.get("final_reply_result"):
+            metadata["final_reply"] = self._sanitize_value(graph_state["final_reply_result"])
         if graph_state.get("rag_context"):
             metadata["rag"] = self._rag_checkpoint_summary(graph_state["rag_context"])
         return self._sanitize_value(metadata)
+
+    async def _run_final_reply(self, graph_state: dict) -> dict:
+        if not graph_state.get("response_text"):
+            return graph_state
+        if self.llm_final_reply_service and hasattr(self.llm_final_reply_service, "compose"):
+            return await self.llm_final_reply_service.compose(graph_state)
+        if not self.llm_final_reply_enabled:
+            return graph_state
+        return {
+            **graph_state,
+            "response_text_fallback": graph_state.get("response_text_fallback") or graph_state.get("response_text"),
+            "final_response_text": graph_state.get("response_text"),
+            "final_reply_result": {"status": "fallback", "fallback_reason": "missing_service"},
+        }
 
     def _router_checkpoint_summary(self, router: dict, graph_state: dict) -> dict:
         keys = (
@@ -1041,11 +1069,23 @@ class GatewayService:
                 thread_id=event.thread_id,
                 conversation_id=conversation_id,
                 inbound_event_id=inbound_event_id,
-                command=command,
+                command=self._command_with_final_text(command, graph_state),
             )
             for command in graph_state.get("commands", [])
             if str(command["type"]) == str(CommandType.LIVECHAT_SEND_TEXT)
         ]
+
+    def _command_with_final_text(self, command: dict, graph_state: dict) -> dict:
+        final_text = graph_state.get("final_response_text")
+        if not final_text or str(command.get("type")) != str(CommandType.LIVECHAT_SEND_TEXT):
+            return command
+        return {
+            **command,
+            "payload": {
+                **dict(command.get("payload") or {}),
+                "text": final_text,
+            },
+        }
 
     def _build_external_commands(
         self,

@@ -11,9 +11,11 @@ from app.db.repositories import (
     KnowledgeDocumentRepository,
 )
 from app.graph.checkpointing import build_checkpointer
+from app.llm.final_reply_provider import FinalReplyLLMProvider
 from app.llm.provider import build_llm_provider
 from app.schemas.events import InboundEvent
 from app.services.llm_first_gateway import LLMFirstGatewayService
+from app.services.final_reply_service import FinalReplyService
 from app.services.rag import RagService
 
 GatewayService = LLMFirstGatewayService
@@ -65,6 +67,7 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
     checkpoint_run_repository = GraphCheckpointRunRepository(pool)
     rag_service = RagService(knowledge_repository=knowledge_repository)
     llm_provider = build_llm_provider(getattr(settings, "llm_provider", "off"), settings=settings) if settings else None
+    final_reply_service = _build_final_reply_service(settings)
     managed_checkpointer = build_checkpointer(checkpoint_mode, settings=settings)
     service_kwargs = {
         "transactional_repository": transactional_repository,
@@ -82,6 +85,7 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
             getattr(settings, "llm_intent_fallback_enabled", False),
             getattr(settings, "llm_router_mode", "shadow") != "shadow",
             getattr(settings, "llm_sop_slot_enabled", False),
+            getattr(settings, "llm_final_reply_enabled", False),
         ]
     ):
         service_kwargs.update(
@@ -100,10 +104,33 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
                 "llm_sop_slot_enabled": getattr(settings, "llm_sop_slot_enabled", False),
                 "llm_sop_slot_min_confidence": getattr(settings, "llm_sop_slot_min_confidence", 0.70),
                 "llm_sop_slot_fallback_to_deterministic": getattr(settings, "llm_sop_slot_fallback_to_deterministic", True),
+                "llm_final_reply_service": final_reply_service,
+                "llm_final_reply_enabled": getattr(settings, "llm_final_reply_enabled", False),
+                "llm_final_reply_min_confidence": getattr(settings, "llm_final_reply_min_confidence", 0.70),
+                "llm_final_reply_fallback_enabled": getattr(settings, "llm_final_reply_fallback_enabled", True),
             }
         )
     service = GatewayService(**service_kwargs)
     return inbound_repository, service, managed_checkpointer
+
+
+def _build_final_reply_service(settings):
+    if not settings or not getattr(settings, "llm_final_reply_enabled", False):
+        return None
+    provider_name = str(getattr(settings, "llm_provider", "off") or "off").lower()
+    provider = FinalReplyLLMProvider(settings) if provider_name == "gemini" else None
+    return FinalReplyService(
+        provider=provider,
+        enabled=getattr(settings, "llm_final_reply_enabled", False),
+        min_confidence=getattr(settings, "llm_final_reply_min_confidence", 0.70),
+        fallback_enabled=getattr(settings, "llm_final_reply_fallback_enabled", True),
+        tenant_persona={
+            "default_language": getattr(settings, "tenant_persona_default_language", "zh"),
+            "tone": getattr(settings, "tenant_persona_tone", "polite"),
+            "assistant_name": getattr(settings, "tenant_persona_assistant_name", None),
+            "brand_name": getattr(settings, "tenant_persona_brand_name", None),
+        },
+    )
 
 
 async def _process_rows(service, rows: list[dict]) -> dict:
@@ -153,6 +180,14 @@ def _build_llm_summary(settings) -> dict:
         "sop_slot_enabled": bool(getattr(settings, "llm_sop_slot_enabled", False)),
         "sop_slot_min_confidence": getattr(settings, "llm_sop_slot_min_confidence", 0.70),
     }
+    if getattr(settings, "llm_final_reply_enabled", False):
+        summary.update(
+            {
+                "final_reply_enabled": True,
+                "final_reply_min_confidence": getattr(settings, "llm_final_reply_min_confidence", 0.70),
+                "final_reply_fallback_enabled": bool(getattr(settings, "llm_final_reply_fallback_enabled", True)),
+            }
+        )
     summary["fallback_enabled"] = bool(summary["rewrite_fallback_enabled"] or summary["intent_fallback_enabled"])
     summary["shadow_active"] = bool(
         provider != "off"

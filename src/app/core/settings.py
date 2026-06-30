@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     llm_sop_slot_enabled: bool = False
     llm_sop_slot_min_confidence: float = 0.70
     llm_sop_slot_fallback_to_deterministic: bool = True
+    llm_final_reply_enabled: bool = False
+    llm_final_reply_min_confidence: float = 0.70
+    llm_final_reply_fallback_enabled: bool = True
+    tenant_persona_default_language: str = "zh"
+    tenant_persona_tone: str = "polite"
+    tenant_persona_assistant_name: str | None = None
+    tenant_persona_brand_name: str | None = None
     gemini_model: str = "gemini-3.1-flash-lite"
     gemini_project: str = "project-gemini-0306"
     gemini_location: str = "global"

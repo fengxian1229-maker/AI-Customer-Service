@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.workflows.command_contracts import CommandType
+from app.workflows.final_reply_policy import build_reply_plan
 from app.workflows.sop_command_builder import build_sop_command
 from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
@@ -46,6 +47,8 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
                 "workflow_stage": "waiting_backend",
                 "sop_action": "append_to_case",
                 "response_text": reply["reply_text"],
+                "response_text_fallback": reply["reply_text"],
+                "reply_plan": _waiting_reply_plan("append_backend_case", reply["reply_text"]),
                 "commands": [
                     build_sop_command(
                         CommandType.TELEGRAM_APPEND_TO_CASE,
@@ -73,6 +76,8 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
             "workflow_stage": "waiting_backend",
             "sop_action": "append_to_case",
             "response_text": reply["reply_text"],
+            "response_text_fallback": reply["reply_text"],
+            "reply_plan": _waiting_reply_plan("append_backend_case", reply["reply_text"]),
             "commands": [
                 build_sop_command(
                     CommandType.TELEGRAM_APPEND_TO_CASE,
@@ -99,6 +104,11 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
         "workflow_stage": "waiting_backend",
         "sop_action": "waiting_followup",
         "response_text": plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"],
+        "response_text_fallback": plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"],
+        "reply_plan": _waiting_reply_plan(
+            "backend_waiting",
+            plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"],
+        ),
         "commands": [],
     }
 
@@ -110,6 +120,8 @@ def _waiting_followup_state(state: dict[str, Any], slot_memory: dict[str, Any]) 
         "workflow_stage": "waiting_backend",
         "sop_action": "waiting_followup",
         "response_text": CASE_PENDING_REPLY,
+        "response_text_fallback": CASE_PENDING_REPLY,
+        "reply_plan": _waiting_reply_plan("backend_waiting", CASE_PENDING_REPLY),
         "commands": [],
     }
 
@@ -120,6 +132,14 @@ def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> 
         "slot_memory": slot_memory,
         "status": "HANDOFF_REQUESTED",
         "response_text": "我会为你转接真人客服继续协助。",
+        "response_text_fallback": "我会为你转接真人客服继续协助。",
+        "reply_plan": build_reply_plan(
+            kind="human_handoff",
+            fallback_text="我会为你转接真人客服继续协助。",
+            must_say=["转接真人客服"],
+            must_not_say=["已接入", "马上处理", "已到账", "已完成"],
+            allowed_facts=["客户请求真人客服", "系统将提出转接请求"],
+        ),
         "commands": [
             {
                 "type": CommandType.HUMAN_HANDOFF_REQUESTED,
@@ -127,3 +147,13 @@ def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> 
             }
         ],
     }
+
+
+def _waiting_reply_plan(kind: str, fallback_text: str) -> dict[str, Any]:
+    return build_reply_plan(
+        kind=kind,
+        fallback_text=fallback_text,
+        must_say=[],
+        must_not_say=["已到账", "已完成", "保证", "马上到账", "已处理"],
+        allowed_facts=[fallback_text],
+    )

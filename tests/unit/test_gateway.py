@@ -268,6 +268,21 @@ class FakeLLMSopSlotService:
         return self.result
 
 
+class FakeFinalReplyService:
+    def __init__(self, final_text: str = "final composed text") -> None:
+        self.final_text = final_text
+        self.calls = []
+
+    async def compose(self, graph_state: dict) -> dict:
+        self.calls.append(graph_state)
+        return {
+            **graph_state,
+            "response_text_fallback": graph_state.get("response_text"),
+            "final_response_text": self.final_text,
+            "final_reply_result": {"status": "accepted", "confidence": 0.91},
+        }
+
+
 class ExplodingLLMService:
     async def rewrite(self, payload: dict) -> dict:
         raise RuntimeError("shadow failed with api_key=hidden")
@@ -308,6 +323,27 @@ def test_gateway_service_processes_message_created():
     assert result["graph_state"]["llm_intent_result"] is None
     assert result["graph_state"]["rewrite_source"] == "deterministic"
     assert result["graph_state"]["route_source"] == "deterministic"
+
+
+def test_gateway_service_uses_final_reply_text_for_outbound_message():
+    final_reply_service = FakeFinalReplyService("您好，请提供用户名或注册手机号，并上传存款付款截图。")
+    outbound_repository = FakeOutboundRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=outbound_repository,
+        message_repository=FakeConversationMessageRepository(),
+        llm_final_reply_service=final_reply_service,
+        llm_final_reply_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(12, make_inbound_event()))
+
+    assert final_reply_service.calls
+    assert result["graph_state"]["response_text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
+    assert result["graph_state"]["final_response_text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
+    assert result["outbound_messages"][0]["payload_json"]["text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
+    assert result["graph_state"]["commands"][0]["payload"]["text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
 
 
 def test_gateway_splits_livechat_outbox_and_external_commands():
