@@ -67,6 +67,7 @@ def test_seed_knowledge_default_uses_only_canonical_multimodal_faq():
         "forgot_password_howto",
         "screenshot_upload_howto",
     }
+    assert {seed_knowledge.prepare_seed_document(document)["metadata_json"]["is_canonical"] for document in documents} == {True}
     assert {
         "奖金规则说明",
         "流水要求说明",
@@ -158,6 +159,7 @@ def test_seed_knowledge_loads_multimodal_seed_file():
     assert deposit["question_aliases"]
     assert [block["type"] for block in deposit["answer_blocks"]] == ["image", "text", "buttons"]
     assert deposit["metadata_json"]["intent_id"] == "deposit_howto"
+    assert deposit["metadata_json"]["is_canonical"] is True
 
 
 def test_seed_knowledge_counts_invalid_answer_blocks(tmp_path):

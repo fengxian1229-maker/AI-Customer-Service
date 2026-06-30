@@ -432,10 +432,12 @@ def _redact_secret_text(text: str) -> str:
         r"token\s*[:=]\s*[^,\s}]+",
         r"password\s*[:=]\s*[^,\s}]+",
         r"cookie\s*[:=]\s*[^,\s}]+",
+        r"https?://[^\s,)]+",
     ]
     redacted = text
     for pattern in patterns:
-        redacted = re.sub(pattern, "<redacted>", redacted, flags=re.I)
+        replacement = "<redacted_backend_url>" if pattern.startswith("https?") else "<redacted>"
+        redacted = re.sub(pattern, replacement, redacted, flags=re.I)
     return redacted
 
 

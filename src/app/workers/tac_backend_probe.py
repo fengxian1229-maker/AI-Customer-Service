@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 from datetime import datetime, timedelta
 
 from app.backends.resolver import BackendConfigError
@@ -60,10 +61,10 @@ def run_preflight(settings: Settings, factory=None) -> dict:
         "settings_warning": _settings_warnings(),
     }
     if not settings.backend_query_enabled:
-        return result
+        return apply_preflight_terminal_status(result)
     if provider_type.lower() != "tac":
         result["preflight_status"] = "UNSUPPORTED_PROVIDER"
-        return result
+        return apply_preflight_terminal_status(result)
 
     resolver = TenantBackendConfigResolver(settings)
     try:
@@ -75,7 +76,7 @@ def run_preflight(settings: Settings, factory=None) -> dict:
                 "missing_config": _missing_config_from_error(str(exc)),
             }
         )
-        return result
+        return apply_preflight_terminal_status(result)
 
     from app.backends.factory import BackendProviderFactory
 
@@ -88,7 +89,7 @@ def run_preflight(settings: Settings, factory=None) -> dict:
                 "login_success": False,
             }
         )
-        return result
+        return apply_preflight_terminal_status(result)
 
     provider_factory = factory or BackendProviderFactory()
     result["preflight_status"] = "LOGIN_PENDING"
@@ -102,10 +103,10 @@ def run_preflight(settings: Settings, factory=None) -> dict:
                 "preflight_status": "LOGIN_FAILED",
                 "login_success": False,
                 "error_type": type(exc).__name__,
-                "error_message": _sanitize(str(exc)),
+                "error_message": sanitize_backend_text(str(exc), settings=settings),
             }
         )
-        return result
+        return apply_preflight_terminal_status(result)
 
     result.update(
         {
@@ -114,15 +115,29 @@ def run_preflight(settings: Settings, factory=None) -> dict:
             "safe_to_probe": True,
         }
     )
-    return result
+    return apply_preflight_terminal_status(result)
+
+
+def apply_preflight_terminal_status(result: dict) -> dict:
+    status = result.get("preflight_status")
+    if status == "OK":
+        terminal_status, exit_code = "OK", 0
+    elif status in {"DISABLED", "FAILED_CONFIG", "UNSUPPORTED_PROVIDER"}:
+        terminal_status, exit_code = status, 2
+    elif status == "LOGIN_FAILED":
+        terminal_status, exit_code = status, 3
+    else:
+        terminal_status, exit_code = "FAILED", 1
+    return {**result, "terminal_status": terminal_status, "exit_code": exit_code}
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     settings = Settings()
     if args.command == "preflight":
-        print(json.dumps(_sanitize(run_preflight(settings)), ensure_ascii=False, indent=2, default=_json_default))
-        return 0
+        result = _sanitize(run_preflight(settings), settings=settings)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+        return int(result.get("exit_code") or 1)
     resolver = TenantBackendConfigResolver(settings)
     config = resolver.resolve(tenant_id=None)
     if getattr(args, "merchant_code", None):
@@ -140,11 +155,11 @@ def main(argv: list[str] | None = None) -> int:
         result = {"records": provider.query_player_contribution(args.username, args.date_from, args.date_to)}
     else:
         raise ValueError(f"unsupported command: {args.command}")
-    print(json.dumps(_sanitize(result), ensure_ascii=False, indent=2, default=_json_default))
+    print(json.dumps(_sanitize(result, settings=settings), ensure_ascii=False, indent=2, default=_json_default))
     return 0
 
 
-def _sanitize(value):
+def _sanitize(value, settings: Settings | None = None):
     if isinstance(value, dict):
         redacted = {}
         for key, item in value.items():
@@ -152,11 +167,32 @@ def _sanitize(value):
             if not lowered.startswith("has_") and any(token in lowered for token in ("authorization", "password", "cookie", "token")):
                 redacted[key] = "<redacted>"
             else:
-                redacted[key] = _sanitize(item)
+                redacted[key] = _sanitize(item, settings=settings)
         return redacted
     if isinstance(value, list):
-        return [_sanitize(item) for item in value]
+        return [_sanitize(item, settings=settings) for item in value]
+    if isinstance(value, str):
+        return sanitize_backend_text(value, settings=settings)
     return value
+
+
+def sanitize_backend_text(text: str, settings: Settings | None = None) -> str:
+    redacted = text
+    base_url = (getattr(settings, "backend_base_url", None) or "").strip().rstrip("/") if settings else ""
+    if base_url:
+        redacted = redacted.replace(base_url, "<redacted_backend_url>")
+    patterns = [
+        r"Authorization\s*[:=]\s*[^,\s}]+",
+        r"Bearer\s+[A-Za-z0-9._~+/=-]+",
+        r"token\s*[:=]\s*[^,\s}]+",
+        r"password\s*[:=]\s*[^,\s}]+",
+        r"cookie\s*[:=]\s*[^,\s}]+",
+        r"https?://[^\s,)]+",
+    ]
+    for pattern in patterns:
+        replacement = "<redacted_backend_url>" if pattern.startswith("https?") else "<redacted>"
+        redacted = re.sub(pattern, replacement, redacted, flags=re.I)
+    return redacted
 
 
 def _settings_warnings() -> list[str]:

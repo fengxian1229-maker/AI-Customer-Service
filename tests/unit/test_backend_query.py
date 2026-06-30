@@ -137,6 +137,8 @@ def test_tac_backend_preflight_disabled_does_not_login(monkeypatch):
     assert result["settings_warning"] == [
         "ENABLE_BACKEND_LOOKUP is not used by this app; set BACKEND_QUERY_ENABLED=true"
     ]
+    assert result["exit_code"] == 2
+    assert result["terminal_status"] == "DISABLED"
 
 
 def test_tac_backend_preflight_login_success_is_sanitized():
@@ -170,6 +172,8 @@ def test_tac_backend_preflight_login_success_is_sanitized():
     assert result["login_attempted"] is True
     assert result["login_success"] is True
     assert result["safe_to_probe"] is True
+    assert result["exit_code"] == 0
+    assert result["terminal_status"] == "OK"
     rendered = str(result)
     assert "secret-login-token" not in rendered
     assert "password-secret" not in rendered
@@ -203,7 +207,63 @@ def test_tac_backend_preflight_missing_config_fails_without_login():
     assert result["preflight_status"] == "FAILED_CONFIG"
     assert result["login_attempted"] is False
     assert result["safe_to_probe"] is False
+    assert result["exit_code"] == 2
+    assert result["terminal_status"] == "FAILED_CONFIG"
     assert "backend_base_url" in result["missing_config"]
+
+
+def test_tac_backend_preflight_login_failed_exit_code_and_redacts_url():
+    from app.core.settings import Settings
+    from app.workers import tac_backend_probe
+
+    class FailingClient:
+        def login_password(self):
+            raise RuntimeError("failed at https://backend.secret.example/login Authorization: Bearer token password=abc")
+
+    class FakeFactory:
+        def create(self, config):
+            return FailingClient()
+
+    result = tac_backend_probe.run_preflight(
+        Settings(
+            livechat_agent_access_token="unused",
+            livechat_account_id="unused",
+            backend_query_enabled=True,
+            backend_provider_type="tac",
+            backend_base_url="https://backend.secret.example",
+            backend_merchant_code="MERCHANT",
+            backend_login_operator="operator-secret",
+            backend_login_password="password-secret",
+            backend_login_merchant="MERCHANT",
+        ),
+        factory=FakeFactory(),
+    )
+
+    rendered = str(result)
+    assert result["preflight_status"] == "LOGIN_FAILED"
+    assert result["exit_code"] == 3
+    assert result["terminal_status"] == "LOGIN_FAILED"
+    assert "backend.secret.example" not in rendered
+    assert "Bearer token" not in rendered
+    assert "password=abc" not in rendered
+
+
+def test_tac_backend_preflight_unsupported_provider_exit_code():
+    from app.core.settings import Settings
+    from app.workers import tac_backend_probe
+
+    result = tac_backend_probe.run_preflight(
+        Settings(
+            livechat_agent_access_token="unused",
+            livechat_account_id="unused",
+            backend_query_enabled=True,
+            backend_provider_type="crawler",
+        )
+    )
+
+    assert result["preflight_status"] == "UNSUPPORTED_PROVIDER"
+    assert result["exit_code"] == 2
+    assert result["terminal_status"] == "UNSUPPORTED_PROVIDER"
 
 
 def test_tac_api_get_builds_headers_refreshes_invalid_token_once():

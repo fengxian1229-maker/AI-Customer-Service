@@ -1123,6 +1123,7 @@ class KnowledgeDocumentRepository:
                 JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.intent_id')),
                 JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.intent'))
               ) IN (%s, %s, %s, %s)
+          AND LOWER(JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.is_canonical'))) = 'true'
         ORDER BY priority ASC, id ASC
         """
         allowed_intents = tuple(sorted(ALLOWED_FAQ_INTENTS))

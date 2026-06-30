@@ -1310,7 +1310,7 @@ def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores
                     "keywords": '["deposit","充值"]',
                     "question_aliases": '["how to deposit","如何充值"]',
                     "answer_blocks": '[{"type":"text","text":"按页面提示完成充值。"}]',
-                    "metadata_json": '{"intent_id":"deposit_howto"}',
+                    "metadata_json": '{"intent_id":"deposit_howto","is_canonical":true}',
                     "language": "en",
                     "priority": 20,
                 },
@@ -1338,6 +1338,7 @@ def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores
     assert "enabled = 1" in cursor.sql
     assert "JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.intent_id'))" in cursor.sql
     assert "JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.intent'))" in cursor.sql
+    assert "JSON_EXTRACT(metadata_json, '$.is_canonical')" in cursor.sql
     assert cursor.args == (
         "default",
         "default",
@@ -1350,7 +1351,7 @@ def test_knowledge_document_search_uses_parameterized_candidate_query_and_scores
     assert rows[0]["keywords"] == ["deposit", "充值"]
     assert rows[0]["question_aliases"] == ["how to deposit", "如何充值"]
     assert rows[0]["answer_blocks"] == [{"type": "text", "text": "按页面提示完成充值。"}]
-    assert rows[0]["metadata_json"] == {"intent_id": "deposit_howto"}
+    assert rows[0]["metadata_json"] == {"intent_id": "deposit_howto", "is_canonical": True}
     assert rows[0]["score"] > 0
     assert set(rows[0]["matched_fields"]) >= {"question_aliases", "keywords"}
     assert len(rows) == 1
@@ -1391,9 +1392,9 @@ def test_knowledge_document_search_sorts_by_score_priority_and_id():
     class FetchCursor(FakeCursor):
         async def fetchall(self):
             return [
-                {"id": 3, "tenant_id": "default", "kb_scope": "default", "title": "充值教程", "content": "充值", "keywords": "[]", "question_aliases": None, "answer_blocks": None, "metadata_json": '{"intent_id":"deposit_howto"}', "language": None, "priority": 30},
-                {"id": 1, "tenant_id": "default", "kb_scope": "default", "title": "充值教程", "content": "", "keywords": '["充值"]', "question_aliases": None, "answer_blocks": None, "metadata_json": '{"intent_id":"deposit_howto"}', "language": None, "priority": 10},
-                {"id": 2, "tenant_id": "default", "kb_scope": "default", "title": "充值教程", "content": "", "keywords": '["充值"]', "question_aliases": None, "answer_blocks": None, "metadata_json": '{"intent_id":"deposit_howto"}', "language": None, "priority": 10},
+                {"id": 3, "tenant_id": "default", "kb_scope": "default", "title": "充值教程", "content": "充值", "keywords": "[]", "question_aliases": None, "answer_blocks": None, "metadata_json": '{"intent_id":"deposit_howto","is_canonical":true}', "language": None, "priority": 30},
+                {"id": 1, "tenant_id": "default", "kb_scope": "default", "title": "充值教程", "content": "", "keywords": '["充值"]', "question_aliases": None, "answer_blocks": None, "metadata_json": '{"intent_id":"deposit_howto","is_canonical":true}', "language": None, "priority": 10},
+                {"id": 2, "tenant_id": "default", "kb_scope": "default", "title": "充值教程", "content": "", "keywords": '["充值"]', "question_aliases": None, "answer_blocks": None, "metadata_json": '{"intent_id":"deposit_howto","is_canonical":true}', "language": None, "priority": 10},
             ]
 
     cursor = FetchCursor(rowcount=3)

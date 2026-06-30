@@ -1,6 +1,15 @@
 import asyncio
 
-from app.services.rag import BACKEND_FACT_FALLBACK_ANSWER, RAG_FALLBACK_ANSWER, RagService, answer_from_rag_context, rank_knowledge_document
+from app.services.rag import (
+    BACKEND_FACT_FALLBACK_ANSWER,
+    RAG_FALLBACK_ANSWER,
+    RagService,
+    answer_from_rag_context,
+    answer_from_static_knowledge,
+    is_allowed_faq_document,
+    rank_knowledge_document,
+    search_static_knowledge,
+)
 
 
 class FakeKnowledgeRepository:
@@ -19,7 +28,7 @@ def test_rag_service_returns_matched_answer_from_knowledge_document():
             "id": 1,
             "title": "充值教程",
             "content": "按页面提示完成充值。",
-            "metadata_json": {"intent_id": "deposit_howto"},
+            "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
             "score": 12,
             "priority": 20,
             "matched_fields": ["title", "keywords"],
@@ -51,7 +60,7 @@ def test_rag_service_retrieve_uses_repository_search():
             "id": 1,
             "title": "充值教程",
             "content": "按页面提示完成充值。",
-            "metadata_json": {"intent_id": "deposit_howto"},
+            "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
             "score": 12,
             "priority": 20,
             "matched_fields": ["title", "keywords"],
@@ -76,6 +85,27 @@ def test_rag_service_retrieve_uses_repository_search():
     assert context["documents"][0]["block_types"] == ["text"]
     assert context["documents"][0]["asset_keys"] == []
     assert repository.calls == [("default", "充值教程", "default", 3)]
+
+
+def test_is_allowed_faq_document_requires_allowed_intent_and_canonical_true():
+    assert is_allowed_faq_document(
+        {"title": "充值教程", "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True}}
+    ) is True
+    assert is_allowed_faq_document(
+        {"title": "充值教程", "metadata_json": {"intent_id": "deposit_howto", "is_canonical": "true"}}
+    ) is True
+    assert is_allowed_faq_document(
+        {"title": "充值教程", "metadata_json": {"intent_id": "deposit_howto", "is_canonical": "True"}}
+    ) is True
+    assert is_allowed_faq_document(
+        {"title": "充值教程", "metadata_json": {"intent_id": "deposit_howto"}}
+    ) is False
+    assert is_allowed_faq_document(
+        {"title": "充值教程", "metadata_json": {"intent_id": "deposit_howto", "is_canonical": False}}
+    ) is False
+    assert is_allowed_faq_document(
+        {"title": "奖金规则说明", "metadata_json": {"intent_id": "faq_general", "is_canonical": True}}
+    ) is False
 
 
 def test_rag_service_filters_legacy_repository_documents_even_when_db_returns_them():
@@ -128,7 +158,7 @@ def test_rag_service_retrieves_all_canonical_faq_intents_from_repository():
                 "id": 1,
                 "title": title,
                 "content": f"{title} answer",
-                "metadata_json": {"intent_id": intent},
+                "metadata_json": {"intent_id": intent, "is_canonical": True},
                 "score": 12,
                 "priority": 10,
             }
@@ -151,13 +181,22 @@ def test_rag_service_does_not_match_legacy_static_faq_questions():
         assert context["documents"] == []
 
 
+def test_static_fallback_does_not_return_legacy_default_knowledge_documents():
+    result = answer_from_static_knowledge({"raw_user_input": "如何充值"})
+    documents = search_static_knowledge("default", "如何充值")
+
+    assert result["matched"] is False
+    assert "你可以在充值页面选择可用通道" not in result["answer"]
+    assert documents == []
+
+
 def test_rag_service_retrieve_prefers_llm_faq_query_then_normalized_query():
     repository = FakeKnowledgeRepository([
         {
             "id": 1,
             "title": "充值教程",
             "content": "请打开充值教程。",
-            "metadata_json": {"intent_id": "deposit_howto"},
+            "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
             "score": 12,
             "priority": 20,
             "matched_fields": ["question_aliases"],
@@ -174,11 +213,11 @@ def test_rag_service_retrieve_prefers_llm_faq_query_then_normalized_query():
                 "raw_user_input": "mi deposito no llegó",
                 "rewritten_question": "mi deposito no llegó",
                 "rewrite_result": {"normalized_query": "deposit issue"},
-                    "intent_result": {"faq_query": "怎么存款"},
-                    "rag_backend_fact_guard_enabled": False,
-                }
-            )
+                "intent_result": {"faq_query": "怎么存款"},
+                "rag_backend_fact_guard_enabled": False,
+            }
         )
+    )
 
     assert context["matched"] is True
     assert context["query"] == "怎么存款"
@@ -236,7 +275,7 @@ def test_answer_from_rag_context_returns_document_answer_and_summary_without_con
                         "id": 1,
                         "title": "充值教程",
                         "content": "按页面提示完成充值。",
-                        "metadata_json": {"intent_id": "deposit_howto"},
+                        "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
                         "score": 5,
                         "priority": 20,
                         "matched_fields": ["title"],
@@ -290,6 +329,30 @@ def test_answer_from_rag_context_filters_legacy_documents_before_returning_answe
     assert result["fallback_reason"] == "no_match"
 
 
+def test_answer_from_rag_context_uses_canonical_document_content_over_polluted_answer():
+    result = answer_from_rag_context(
+        {
+            "rag_context": {
+                "documents": [
+                    {
+                        "id": 1,
+                        "title": "充值教程",
+                        "content": "canonical content",
+                        "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
+                        "score": 99,
+                    }
+                ],
+                "source": "knowledge_documents",
+                "fallback_reason": None,
+                "answer": "污染答案",
+            }
+        }
+    )
+
+    assert result["matched"] is True
+    assert result["answer"] == "canonical content"
+
+
 def test_answer_from_rag_context_returns_no_match_fallback_without_documents():
     result = answer_from_rag_context({"rag_context": {"documents": [], "fallback_reason": None}})
 
@@ -313,10 +376,9 @@ def test_rag_service_matches_multilingual_static_queries():
     spanish = asyncio.run(service.answer({"tenant_id": "default", "raw_user_input": "cómo recargar"}))
     chinese = asyncio.run(service.answer({"tenant_id": "default", "raw_user_input": "如何充值"}))
 
-    assert english["matched"] is True
-    assert spanish["matched"] is True
-    assert chinese["matched"] is True
-    assert "充值" in chinese["answer"]
+    assert english["matched"] is False
+    assert spanish["matched"] is False
+    assert chinese["matched"] is False
 
 
 def test_rank_knowledge_document_prefers_exact_title_match():
@@ -460,7 +522,7 @@ def test_rag_service_low_score_returns_fallback():
             "id": 1,
             "title": "充值教程",
             "content": "充值 appears once only.",
-            "metadata_json": {"intent_id": "deposit_howto"},
+            "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
             "score": 1,
             "priority": 1,
             "matched_fields": ["content"],
@@ -483,6 +545,7 @@ def test_rag_service_returns_text_block_for_legacy_document():
             "id": 1,
             "title": "Upload screenshot",
             "content": "请上传清晰截图。",
+            "metadata_json": {"intent_id": "screenshot_upload_howto", "is_canonical": True},
             "score": 12,
             "priority": 20,
             "matched_fields": ["title"],
@@ -500,5 +563,5 @@ def test_rag_service_returns_text_block_for_legacy_document():
 def test_answer_from_rag_context_without_context_uses_static_fallback():
     result = answer_from_rag_context({"raw_user_input": "如何充值"})
 
-    assert result["matched"] is True
-    assert "充值" in result["answer"]
+    assert result["matched"] is False
+    assert result["fallback_reason"] == "no_match"

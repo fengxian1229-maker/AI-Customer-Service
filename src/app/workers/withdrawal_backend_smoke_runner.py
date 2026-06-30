@@ -125,15 +125,15 @@ async def run_smoke(
     result["steps"]["inbound"] = _inbound_summary(inbound)
     if not inbound:
         result["smoke_status"] = "NO_INBOUND"
-        return sanitize(result)
+        return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
     result["chat_id"] = inbound.get("chat_id")
     result["thread_id"] = inbound.get("thread_id")
     if inbound.get("ignored"):
         result["smoke_status"] = "INBOUND_IGNORED"
-        return sanitize(result)
+        return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
     if inbound.get("standard_event_type") not in {"MESSAGE_CREATED", "FILE_RECEIVED"}:
         result["smoke_status"] = "UNSUPPORTED_INBOUND_TYPE"
-        return sanitize(result)
+        return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
 
     if plan_only:
         result["steps"]["gateway"] = {"planned": bool(not inbound.get("processed")), "changed_db": False}
@@ -149,7 +149,7 @@ async def run_smoke(
         result["steps"]["gateway"] = {**gateway_result, "changed_db": True}
         if gateway_result.get("failed"):
             result["smoke_status"] = "GATEWAY_FAILED"
-            return sanitize(result)
+            return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
 
     result["steps"]["immediate_reply"] = await _sender_step(
         pool,
@@ -169,7 +169,7 @@ async def run_smoke(
     }
     if not selected:
         result["smoke_status"] = "SOP_NOT_TRIGGERED"
-        return sanitize(result)
+        return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
 
     if not execute_backend:
         result["steps"]["backend_execute"] = {
@@ -177,47 +177,74 @@ async def run_smoke(
             "changed_db": False,
         }
         result["smoke_status"] = "PLAN_BACKEND_EXECUTION" if plan_only else "BACKEND_COMMAND_PENDING"
-        return sanitize(result)
+        return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
 
     command_repository = ExternalCommandRepository(pool)
     result_repository = ExternalCommandResultRepository(pool)
-    command = await command_repository.lease_pending_by_id(selected["id"], worker_id=worker_id, lease_seconds=lease_seconds)
-    if not command:
-        result["steps"]["backend_execute"] = {"status": "COMMAND_LOCKED_OR_NOT_PENDING", "changed_db": False}
-        result["smoke_status"] = "COMMAND_LOCKED_OR_NOT_PENDING"
-        return sanitize(result)
-    backend_execute = await external_command_worker._process_real_backend_query_command(
-        command,
-        repository=command_repository,
-        result_repository=result_repository,
-        emit_result=True,
-        execute_backend=True,
-        settings=settings,
-    )
-    result["steps"]["backend_execute"] = {**backend_execute, "changed_db": True}
+    command_status = selected.get("status")
+    if command_status in {"PENDING", "RETRYABLE"}:
+        command = await command_repository.lease_pending_by_id(selected["id"], worker_id=worker_id, lease_seconds=lease_seconds)
+        if not command:
+            result["steps"]["backend_execute"] = {"status": "COMMAND_LOCKED_OR_NOT_PENDING", "changed_db": False}
+            result["smoke_status"] = "COMMAND_LOCKED_OR_NOT_PENDING"
+            return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
+        backend_execute = await external_command_worker._process_real_backend_query_command(
+            command,
+            repository=command_repository,
+            result_repository=result_repository,
+            emit_result=True,
+            execute_backend=True,
+            settings=settings,
+        )
+        result["steps"]["backend_execute"] = {**backend_execute, "changed_db": True}
+        command_id = command["id"]
+    elif command_status == "SENT":
+        result["steps"]["backend_execute"] = {"status": "SKIPPED_ALREADY_SENT", "changed_db": False}
+        command_id = selected["id"]
+    elif str(command_status or "").startswith("FAILED"):
+        result["steps"]["backend_execute"] = {"status": "SKIPPED_COMMAND_FAILED", "changed_db": False}
+        command_id = selected["id"]
+    else:
+        result["steps"]["backend_execute"] = {"status": f"UNSUPPORTED_COMMAND_STATUS:{command_status}", "changed_db": False}
+        result["smoke_status"] = "FAILED"
+        result["failure_reasons"].append(f"unsupported backend.query command status: {command_status}")
+        return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
 
-    backend_results = await repository.list_results_for_command(command["id"])
+    backend_results = await repository.list_results_for_command(command_id)
     backend_result = backend_results[0] if backend_results else None
     if not backend_result:
-        result["smoke_status"] = "BACKEND_COMMAND_SENT"
-        return sanitize(result)
+        result["smoke_status"] = "FAILED" if str(command_status or "").startswith("FAILED") else "BACKEND_COMMAND_SENT"
+        if str(command_status or "").startswith("FAILED"):
+            result["failure_reasons"].append("backend.query command failed and no result emitted")
+        return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
 
-    consume_result = await external_result_consumer.process_result_by_id(
-        result_repository=result_repository,
-        conversation_repository=ConversationRepository(pool),
-        outbound_repository=OutboundMessageRepository(pool),
-        result_id=backend_result["id"],
-        transaction_repository=_SmokeResultTransaction(
-            result_repository,
-            ConversationRepository(pool),
-            OutboundMessageRepository(pool),
-        ),
-        worker_id=worker_id,
-        lease_seconds=lease_seconds,
-    )
+    if backend_result.get("status") in {"PENDING", "RETRYABLE"}:
+        consume_result = await external_result_consumer.process_result_by_id(
+            result_repository=result_repository,
+            conversation_repository=ConversationRepository(pool),
+            outbound_repository=OutboundMessageRepository(pool),
+            result_id=backend_result["id"],
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
+    elif backend_result.get("status") == "PROCESSED":
+        consume_result = {
+            "id": backend_result["id"],
+            "result_type": backend_result.get("result_type") or "backend.query.result",
+            "status": "SKIPPED_ALREADY_PROCESSED",
+        }
+    else:
+        consume_result = {
+            "id": backend_result["id"],
+            "result_type": backend_result.get("result_type") or "backend.query.result",
+            "status": f"UNSUPPORTED_RESULT_STATUS:{backend_result.get('status')}",
+        }
     result["steps"]["backend_result_consume"] = consume_result
     result_json = backend_result.get("result_json") or {}
-    result["safe_failure_processed"] = result_json.get("status") == "failed" and consume_result.get("status") == "PROCESSED"
+    result["safe_failure_processed"] = result_json.get("status") == "failed" and consume_result.get("status") in {
+        "PROCESSED",
+        "SKIPPED_ALREADY_PROCESSED",
+    }
 
     result["steps"]["backend_answer"] = await _sender_step(
         pool,
@@ -228,9 +255,13 @@ async def run_smoke(
     )
 
     if not hasattr(pool, "acquire"):
-        result["smoke_status"] = "BACKEND_RESULT_PROCESSED" if consume_result.get("status") == "PROCESSED" else "BACKEND_RESULT_PENDING"
-        result["closed_loop"] = consume_result.get("status") == "PROCESSED"
-        return sanitize(result)
+        result["smoke_status"] = (
+            "SAFE_FAILURE_PROCESSED"
+            if result["safe_failure_processed"]
+            else ("BACKEND_RESULT_PROCESSED" if consume_result.get("status") in {"PROCESSED", "SKIPPED_ALREADY_PROCESSED"} else "BACKEND_RESULT_PENDING")
+        )
+        result["closed_loop"] = consume_result.get("status") in {"PROCESSED", "SKIPPED_ALREADY_PROCESSED"} and not result["safe_failure_processed"]
+        return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
 
     admin_repository = backend_sop_smoke_admin.BackendSopSmokeReadRepository(pool)
     admin_snapshot = await admin_repository.by_inbound(inbound_event_id)
@@ -246,28 +277,7 @@ async def run_smoke(
         result["closed_loop"] = result["smoke_status"] == "BACKEND_ANSWER_SENT" and not result["safe_failure_processed"]
     if result["safe_failure_processed"]:
         result["closed_loop"] = False
-    return sanitize(result)
-
-
-class _SmokeResultTransaction:
-    def __init__(self, result_repository, conversation_repository, outbound_repository) -> None:
-        self.result_repository = result_repository
-        self.conversation_repository = conversation_repository
-        self.outbound_repository = outbound_repository
-
-    async def process_result_transactionally(
-        self,
-        row: dict,
-        graph_state: dict,
-        outbound_messages: list[dict],
-        external_commands: list[dict] | None = None,
-        summary_message: dict | None = None,
-    ) -> None:
-        del external_commands, summary_message
-        await self.conversation_repository.update_workflow_state(row["conversation_id"], graph_state)
-        for message in outbound_messages:
-            await self.outbound_repository.insert_idempotent(message)
-        await self.result_repository.mark_processed(row["id"])
+    return sanitize(apply_terminal_status(result, plan_only=plan_only), settings=settings)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -308,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     result = asyncio.run(run_cli(args))
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    return 0 if not result.get("failure_reasons") else 1
+    return int(result.get("exit_code") or 1)
 
 
 async def _sender_step(
@@ -377,13 +387,27 @@ def _admin_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def sanitize(value: Any) -> Any:
+def apply_terminal_status(result: dict[str, Any], plan_only: bool = False) -> dict[str, Any]:
+    if result.get("failure_reasons"):
+        terminal_status, exit_code = "FAILED", 1
+    elif result.get("safe_failure_processed"):
+        terminal_status, exit_code = "SAFE_FAILURE_PROCESSED", 3
+    elif result.get("closed_loop") is True and result.get("smoke_status") == "BACKEND_ANSWER_SENT":
+        terminal_status, exit_code = "SUCCESS", 0
+    elif plan_only and result.get("smoke_status") in {"PLAN_BACKEND_EXECUTION", "BACKEND_COMMAND_PENDING"}:
+        terminal_status, exit_code = "PLAN_READY", 0
+    else:
+        terminal_status, exit_code = "FAILED", 1
+    return {**result, "terminal_status": terminal_status, "exit_code": exit_code}
+
+
+def sanitize(value: Any, settings: Settings | None = None) -> Any:
     if isinstance(value, dict):
-        return {key: "<redacted>" if _is_secret_key(key) else sanitize(item) for key, item in value.items()}
+        return {key: "<redacted>" if _is_secret_key(key) else sanitize(item, settings=settings) for key, item in value.items()}
     if isinstance(value, list):
-        return [sanitize(item) for item in value]
+        return [sanitize(item, settings=settings) for item in value]
     if isinstance(value, str):
-        return _redact_secret_text(value)
+        return _redact_secret_text(value, settings=settings)
     return value
 
 
@@ -392,17 +416,22 @@ def _is_secret_key(key: Any) -> bool:
     return any(token in lowered for token in ("authorization", "password", "cookie", "token", "bearer"))
 
 
-def _redact_secret_text(text: str) -> str:
+def _redact_secret_text(text: str, settings: Settings | None = None) -> str:
     redacted = text
+    base_url = (getattr(settings, "backend_base_url", None) or "").strip().rstrip("/") if settings else ""
+    if base_url:
+        redacted = redacted.replace(base_url, "<redacted_backend_url>")
     patterns = [
         r"Authorization\s*[:=]\s*[^,\s}]+",
         r"Bearer\s+[A-Za-z0-9._~+/=-]+",
         r"token\s*[:=]\s*[^,\s}]+",
         r"password\s*[:=]\s*[^,\s}]+",
         r"cookie\s*[:=]\s*[^,\s}]+",
+        r"https?://[^\s,)]+",
     ]
     for pattern in patterns:
-        redacted = re.sub(pattern, "<redacted>", redacted, flags=re.I)
+        replacement = "<redacted_backend_url>" if pattern.startswith("https?") else "<redacted>"
+        redacted = re.sub(pattern, replacement, redacted, flags=re.I)
     return redacted
 
 

@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 from app.backends.factory import BackendProviderFactory, UnsupportedBackendProviderError
@@ -91,8 +92,17 @@ def _failed(error_code: str, error_message: str) -> dict[str, Any]:
 
 def _safe_error_message(exc: Exception) -> str:
     message = str(exc)
-    for token in ("authorization", "cookie", "password", "token", "Bearer"):
-        message = message.replace(token, "<redacted>")
+    patterns = [
+        r"Authorization\s*[:=]\s*[^,\s}]+",
+        r"Bearer\s+[A-Za-z0-9._~+/=-]+",
+        r"token\s*[:=]\s*[^,\s}]+",
+        r"password\s*[:=]\s*[^,\s}]+",
+        r"cookie\s*[:=]\s*[^,\s}]+",
+        r"https?://[^\s,)]+",
+    ]
+    for pattern in patterns:
+        replacement = "<redacted_backend_url>" if pattern.startswith("https?") else "<redacted>"
+        message = re.sub(pattern, replacement, message, flags=re.I)
     return message[:500]
 
 

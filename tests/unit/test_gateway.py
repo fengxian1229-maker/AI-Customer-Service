@@ -158,7 +158,7 @@ class FakeRagService:
                     "id": 1,
                     "title": "充值教程",
                     "content": "按页面提示完成充值。",
-                    "metadata_json": {"intent_id": "deposit_howto"},
+                    "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
                     "score": 5,
                 }
             ],
@@ -560,7 +560,7 @@ def test_gateway_service_records_error_and_skips_side_effects_when_rag_retrieve_
     assert "rag_context" not in graph_error_repository.inserted[0]["state_snapshot"]
 
 
-def test_gateway_service_without_rag_service_keeps_static_fallback_for_faq():
+def test_gateway_service_without_rag_service_returns_no_match_for_faq_static_fallback():
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
         conversation_repository=FakeConversationRepository(),
@@ -571,7 +571,7 @@ def test_gateway_service_without_rag_service_keeps_static_fallback_for_faq():
     result = asyncio.run(service.process_event(16, make_event_with_text("how to deposit")))
 
     assert result["graph_state"]["route"] == "faq"
-    assert result["graph_state"]["rag_result"]["matched"] is True
+    assert result["graph_state"]["rag_result"]["matched"] is False
     assert result["external_commands"] == []
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
 

@@ -114,8 +114,8 @@ def test_workflow_graph_rag_route_returns_knowledge_answer_without_placeholder_c
 
     assert result["intent_result"]["intent"] == "deposit_howto"
     assert result["route"] == "faq"
-    assert result["rag_result"]["matched"] is True
-    assert "充值" in result["response_text"]
+    assert result["rag_result"]["matched"] is False
+    assert "暂时没有在知识库中找到" in result["response_text"]
     assert [str(command["type"]) for command in result["commands"]] == ["livechat.send_text"]
 
 

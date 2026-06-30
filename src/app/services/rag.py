@@ -340,7 +340,7 @@ def filter_allowed_faq_documents(documents: list[dict]) -> list[dict]:
 
 
 def is_allowed_faq_document(document: dict) -> bool:
-    return document_faq_intent(document) in ALLOWED_FAQ_INTENTS
+    return document_faq_intent(document) in ALLOWED_FAQ_INTENTS and _is_canonical_document(document)
 
 
 def document_faq_intent(document: dict) -> str | None:
@@ -352,6 +352,18 @@ def document_faq_intent(document: dict) -> str | None:
         return str(intent)
     title = normalize_text(document.get("title")).lower()
     return _TITLE_INTENT_MAP.get(title)
+
+
+def _is_canonical_document(document: dict) -> bool:
+    metadata = document.get("metadata_json") or {}
+    if isinstance(metadata, str):
+        metadata = {}
+    value = metadata.get("is_canonical")
+    if value is True:
+        return True
+    if isinstance(value, str) and value.strip().lower() == "true":
+        return True
+    return False
 
 
 def _fallback_context(
@@ -400,20 +412,12 @@ def _build_answer_from_context(context: dict) -> dict:
     if fallback_reason == "empty_query":
         return _fallback_answer("empty_query", RAG_FALLBACK_ANSWER)
 
-    answer = context.get("answer")
     documents = filter_allowed_faq_documents(context.get("documents") or [])
-    if answer and documents:
+    if documents:
+        answer = documents[0].get("content") or RAG_FALLBACK_ANSWER
         return {
             "matched": True,
             "answer": answer,
-            "documents": [_rag_document_summary(document) for document in documents],
-            "fallback_reason": None,
-        }
-
-    if documents:
-        return {
-            "matched": True,
-            "answer": documents[0].get("content") or RAG_FALLBACK_ANSWER,
             "documents": [_rag_document_summary(document) for document in documents],
             "fallback_reason": None,
         }
@@ -431,6 +435,7 @@ def _rag_document_payload(document: dict) -> dict:
         "matched_fields": list(document.get("matched_fields") or []),
         "matched_terms": list(document.get("matched_terms") or []),
         "content": document.get("content") or "",
+        "metadata_json": document.get("metadata_json") or {},
         "has_answer_blocks": bool(raw_blocks),
         "block_types": _block_types(raw_blocks),
         "asset_keys": _asset_keys(raw_blocks),
