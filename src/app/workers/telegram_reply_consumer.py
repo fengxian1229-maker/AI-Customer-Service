@@ -124,6 +124,9 @@ async def process_single_update(
         inbound_event_id=result_row.get("inbound_event_id"),
         text=handler["text"],
     )
+    outbound["dedup_key"] = f"{result_row['dedup_key']}:outbound"
+    outbound["command_type"] = COMMAND_TYPE
+    outbound["message_kind"] = "telegram_staff_reply"
     try:
         await transaction_repository.process_result_transactionally(
             result_row,

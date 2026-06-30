@@ -123,6 +123,32 @@ def test_telegram_reply_consumer_records_reply_and_writes_outbox():
     assert case_repository.staff_messages[0]["telegram_message_id"] == 301
 
 
+def test_telegram_reply_consumer_staff_reply_outbox_uses_independent_dedup():
+    case_repository = FakeCaseRepository(case=make_case())
+    result_repository = FakeResultRepository()
+    transaction_repository = FakeTransactionRepository()
+
+    result = asyncio.run(
+        process_single_update(
+            make_update(),
+            case_repository=case_repository,
+            result_repository=result_repository,
+            transaction_repository=transaction_repository,
+            target_chat_ids={"-1001"},
+        )
+    )
+
+    assert result["status"] == "RECORDED"
+    result_row = result_repository.results[0]
+    outbound = transaction_repository.calls[0]["outbound_messages"][0]
+    assert outbound["conversation_id"] == "livechat:chat-1"
+    assert outbound["inbound_event_id"] == 77
+    assert outbound["action_type"] == "send_event"
+    assert outbound["dedup_key"] == f"{result_row['dedup_key']}:outbound"
+    assert outbound["command_type"] == "telegram.staff_reply"
+    assert outbound["message_kind"] == "telegram_staff_reply"
+
+
 def test_telegram_reply_consumer_duplicate_result_does_not_write_outbox():
     case_repository = FakeCaseRepository(case=make_case())
     result_repository = FakeResultRepository(inserted=False)
