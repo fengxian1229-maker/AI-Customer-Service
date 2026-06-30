@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -123,13 +124,18 @@ async def process_single_update(
         inbound_event_id=result_row.get("inbound_event_id"),
         text=handler["text"],
     )
-    await transaction_repository.process_result_transactionally(
-        result_row,
-        graph_state=handler["graph_state"],
-        outbound_messages=[outbound],
-        external_commands=[],
-        summary_message=handler["summary_message"],
-    )
+    try:
+        await transaction_repository.process_result_transactionally(
+            result_row,
+            graph_state=handler["graph_state"],
+            outbound_messages=[outbound],
+            external_commands=[],
+            summary_message=handler["summary_message"],
+        )
+    except Exception as exc:
+        if hasattr(result_repository, "mark_failed"):
+            await result_repository.mark_failed(insert["id"], str(exc))
+        raise
     if message.get("message_id") is not None:
         await case_repository.record_staff_reply_message(
             telegram_case_id=case["id"],
@@ -184,7 +190,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--once", action="store_true", help="Run one getUpdates batch and exit.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum Telegram updates to request.")
     parser.add_argument("--timeout", type=int, default=0, help="Telegram getUpdates long-poll timeout seconds.")
-    parser.add_argument("--offset-key", default=None, help="Stable offset key. Defaults to bot token suffix and target chat ids.")
+    parser.add_argument("--offset-key", default=None, help="Stable offset key. Defaults to bot token fingerprint and target chat ids.")
     parser.add_argument("--worker-id", default=None, help="Stable worker id for logs only.")
     return parser
 
@@ -327,8 +333,8 @@ def _target_chat_ids(settings: Settings) -> set[str]:
 
 
 def _offset_key(settings: Settings, target_chat_ids: set[str]) -> str:
-    token_tail = str(settings.telegram_bot_token or "")[-8:]
-    return f"telegram:{token_tail}:{','.join(sorted(target_chat_ids))}"
+    token_fingerprint = hashlib.sha256(str(settings.telegram_bot_token or "").encode("utf-8")).hexdigest()[:12]
+    return f"telegram:{token_fingerprint}:{','.join(sorted(target_chat_ids))}"
 
 
 def _safe_bot_user_id(client: TelegramUpdatesClient) -> int | None:
