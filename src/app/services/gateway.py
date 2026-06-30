@@ -1062,7 +1062,7 @@ class GatewayService:
             "latest_user_text": normalize_text(graph_state.get("rewritten_question") or graph_state.get("raw_user_input")),
             "attachments_summary": self._attachments_summary(graph_state),
             "recent_messages": list(graph_state.get("recent_messages") or []),
-            "language": ((graph_state.get("rewrite_result") or {}).get("language")) or "unknown",
+            "language": graph_state.get("reply_language") or ((graph_state.get("rewrite_result") or {}).get("language")) or "unknown",
         }
 
     def _attachments_summary(self, graph_state: dict) -> list[dict]:

@@ -1108,6 +1108,25 @@ def test_gateway_service_llm_sop_slot_extractor_exception_fallback_does_not_bloc
     assert "hidden" not in str(result["graph_state"]["llm_sop_slot_result"])
 
 
+def test_gateway_llm_sop_slot_input_prefers_reply_language():
+    service = GatewayService()
+
+    payload = service._build_llm_sop_slot_input(
+        {
+            "intent_result": {"intent": "deposit_missing"},
+            "slot_memory": {},
+            "raw_user_input": "",
+            "rewritten_question": "",
+            "attachments": [],
+            "recent_messages": [],
+            "reply_language": "tl",
+            "rewrite_result": {"language": "unknown"},
+        }
+    )
+
+    assert payload["language"] == "tl"
+
+
 def test_gateway_service_guarded_authoritative_uses_llm_human_handoff_route():
     router_service = FakeLLMRouterService(
         {

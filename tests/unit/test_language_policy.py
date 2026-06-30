@@ -17,33 +17,132 @@ def test_normalize_language_code_accepts_legacy_aliases():
     assert normalize_language_code("thai") == "th"
 
 
-def test_detect_language_deterministic_supported_languages():
-    cases = [
-        ("请问怎么充值，需要上传截图吗", "zh-Hans"),
-        ("請問怎麼儲值，需要上傳截圖嗎", "zh-Hant"),
-        ("Please help with my deposit account", "en"),
-        ("mi depósito no llegó, usuario andy", "es"),
-        ("paki tulong po sa deposito ko", "tl"),
-        ("ช่วยตรวจสอบการฝากเงินของฉัน", "th"),
-        ("ကျွန်ုပ်အကောင့်ငွေသွင်းထားပါတယ်", "my"),
-        ("tolong semak akaun deposit saya", "ms"),
-    ]
-
-    for text, expected in cases:
-        result = detect_language_deterministic(text)
-        assert result["detected_language"] == expected
-        assert result["language_confidence"] >= 0.7
-
-
-def test_detect_language_deterministic_returns_unknown_for_non_language_tokens():
-    for text in ("", "D123456", "5000", "🙂🙂", "ok", "?"):
+def test_detect_language_deterministic_never_infers_language_from_text():
+    for text, reason in [
+        ("", "empty_input"),
+        ("请问怎么充值，需要上传截图吗", "llm_language_required"),
+        ("Please help with my deposit account", "llm_language_required"),
+        ("mi depósito no llegó, usuario andy", "llm_language_required"),
+        ("paki tulong po sa deposito ko", "llm_language_required"),
+        ("ช่วยตรวจสอบการฝากเงินของฉัน", "llm_language_required"),
+        ("ကျွန်ုပ်အကောင့်ငွေသွင်းထားပါတယ်", "llm_language_required"),
+        ("tolong semak akaun deposit saya", "llm_language_required"),
+    ]:
         result = detect_language_deterministic(text)
 
         assert result["detected_language"] == "unknown"
         assert result["language_confidence"] == 0.0
+        assert result["reason"] == reason
 
 
-def test_file_received_without_text_uses_slot_memory_language_for_reply_without_overwriting_user_language():
+def test_llm_router_accepted_language_has_highest_priority_and_updates_slot_memory():
+    slot_memory = {"last_user_language": "es"}
+    result = resolve_language_policy(
+        {
+            "raw_user_input": "deposit help",
+            "slot_memory": slot_memory,
+            "recent_messages": [{"sender_role": "customer", "detected_language": "zh-Hant"}],
+            "rewrite_result": {"language": "tl"},
+            "llm_router_result": {"status": "accepted", "language": "en", "confidence": 0.91},
+        },
+        tenant_default_language="zh-Hans",
+        supported_languages=["zh-Hans", "zh-Hant", "en", "es", "tl"],
+    )
+
+    assert result["detected_language"] == "unknown"
+    assert result["reply_language"] == "en"
+    assert result["language_source"] == "llm_router"
+    assert result["llm_language"] == "en"
+    assert result["llm_language_source"] == "llm_router"
+    assert slot_memory["last_user_language"] == "en"
+    assert slot_memory["last_reply_language"] == "en"
+
+
+def test_llm_router_accepted_language_supports_tl_and_zh_hant():
+    for language in ("tl", "zh-Hant"):
+        result = resolve_language_policy(
+            {
+                "raw_user_input": "no keyword matching",
+                "slot_memory": {},
+                "recent_messages": [],
+                "llm_router_result": {"status": "accepted", "language": language},
+            },
+            tenant_default_language="zh-Hans",
+            supported_languages=["zh-Hans", "zh-Hant", "tl"],
+        )
+
+        assert result["reply_language"] == language
+        assert result["language_source"] == "llm_router"
+
+
+def test_authoritative_rewrite_language_is_used_when_router_has_no_supported_language():
+    slot_memory = {}
+    result = resolve_language_policy(
+        {
+            "raw_user_input": "anything",
+            "slot_memory": slot_memory,
+            "recent_messages": [],
+            "llm_router_result": {"status": "accepted", "language": "unknown"},
+            "rewrite_result": {"language": "tl", "source": "llm_guarded_authoritative"},
+        },
+        tenant_default_language="zh-Hans",
+        supported_languages=["zh-Hans", "tl"],
+    )
+
+    assert result["reply_language"] == "tl"
+    assert result["language_source"] == "rewrite_result"
+    assert result["llm_language"] == "tl"
+    assert slot_memory["last_user_language"] == "tl"
+
+
+def test_llm_language_unsupported_falls_back_to_slot_memory():
+    slot_memory = {"last_user_language": "es"}
+    result = resolve_language_policy(
+        {
+            "raw_user_input": "anything",
+            "slot_memory": slot_memory,
+            "recent_messages": [{"sender_role": "customer", "detected_language": "en"}],
+            "llm_router_result": {"status": "accepted", "language": "ja"},
+        },
+        tenant_default_language="zh-Hans",
+        supported_languages=["zh-Hans", "es"],
+    )
+
+    assert result["reply_language"] == "es"
+    assert result["language_source"] == "slot_memory"
+    assert slot_memory["last_user_language"] == "es"
+    assert slot_memory["last_reply_language"] == "es"
+
+
+def test_llm_language_unknown_falls_back_to_slot_memory():
+    result = resolve_language_policy(
+        {
+            "raw_user_input": "anything",
+            "slot_memory": {"last_user_language": "tl"},
+            "recent_messages": [],
+            "llm_router_result": {"status": "accepted", "language": "unknown"},
+        },
+        tenant_default_language="zh-Hans",
+        supported_languages=["zh-Hans", "tl"],
+    )
+
+    assert result["reply_language"] == "tl"
+    assert result["language_source"] == "slot_memory"
+
+
+def test_no_llm_or_history_uses_tenant_default_language():
+    result = resolve_language_policy(
+        {"raw_user_input": "Please help with my withdrawal", "slot_memory": {}, "recent_messages": []},
+        tenant_default_language="en",
+        supported_languages=["zh-Hans", "en", "tl"],
+    )
+
+    assert result["detected_language"] == "unknown"
+    assert result["reply_language"] == "en"
+    assert result["language_source"] == "tenant_default"
+
+
+def test_file_received_without_text_uses_slot_memory_language_without_overwriting_user_language():
     slot_memory = {"last_user_language": "tl"}
     result = resolve_language_policy(
         {
@@ -57,44 +156,12 @@ def test_file_received_without_text_uses_slot_memory_language_for_reply_without_
     )
 
     assert result["detected_language"] == "unknown"
-    assert result["conversation_language"] == "tl"
     assert result["reply_language"] == "tl"
     assert slot_memory["last_user_language"] == "tl"
     assert slot_memory["last_reply_language"] == "tl"
 
 
-def test_unknown_current_message_uses_tenant_default_when_no_history():
-    result = resolve_language_policy(
-        {"raw_user_input": "D123456", "slot_memory": {}, "recent_messages": []},
-        tenant_default_language="en",
-        supported_languages=["zh-Hans", "en", "tl"],
-    )
-
-    assert result["detected_language"] == "unknown"
-    assert result["reply_language"] == "en"
-    assert result["language_source"] == "tenant_default"
-
-
-def test_current_language_switch_updates_reply_language_and_slot_memory():
-    slot_memory = {"last_user_language": "es"}
-    result = resolve_language_policy(
-        {
-            "raw_user_input": "Please help with my withdrawal",
-            "slot_memory": slot_memory,
-            "recent_messages": [{"sender_role": "customer", "text_content": "mi deposito no llegó"}],
-        },
-        tenant_default_language="zh-Hans",
-        supported_languages=["zh-Hans", "en", "es"],
-    )
-
-    assert result["detected_language"] == "en"
-    assert result["reply_language"] == "en"
-    assert result["language_source"] == "deterministic"
-    assert slot_memory["last_user_language"] == "en"
-    assert slot_memory["last_reply_language"] == "en"
-
-
-def test_recent_messages_supply_conversation_language_when_current_unknown():
+def test_recent_messages_text_content_without_language_metadata_is_ignored():
     result = resolve_language_policy(
         {
             "raw_user_input": "D123456",
@@ -105,7 +172,20 @@ def test_recent_messages_supply_conversation_language_when_current_unknown():
         supported_languages=["zh-Hans", "tl"],
     )
 
-    assert result["detected_language"] == "unknown"
-    assert result["conversation_language"] == "tl"
-    assert result["reply_language"] == "tl"
+    assert result["reply_language"] == "zh-Hans"
+    assert result["language_source"] == "tenant_default"
+
+
+def test_recent_messages_explicit_detected_language_can_be_fallback():
+    result = resolve_language_policy(
+        {
+            "raw_user_input": "D123456",
+            "slot_memory": {},
+            "recent_messages": [{"sender_role": "customer", "detected_language": "en"}],
+        },
+        tenant_default_language="zh-Hans",
+        supported_languages=["zh-Hans", "en"],
+    )
+
+    assert result["reply_language"] == "en"
     assert result["language_source"] == "recent_messages"
