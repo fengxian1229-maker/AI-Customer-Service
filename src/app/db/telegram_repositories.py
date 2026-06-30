@@ -13,6 +13,30 @@ class TelegramCaseRepository:
     def __init__(self, pool) -> None:
         self.pool = pool
 
+    async def sync_recent_external_results(self, limit: int = 200) -> dict:
+        sql = """
+        SELECT id, external_command_id, tenant_id, conversation_id, chat_id, thread_id,
+               inbound_event_id, command_type, result_type, result_json, status, dedup_key
+        FROM external_command_results
+        WHERE result_type IN ('telegram.case.created', 'telegram.append_to_case.result')
+        ORDER BY created_at DESC, id DESC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (limit,))
+                rows = await cur.fetchall()
+        synced = 0
+        skipped = 0
+        for row in reversed(rows):
+            row["result_json"] = json_loads(row.get("result_json"))
+            result = await self.upsert_from_external_result(row)
+            if result is None:
+                skipped += 1
+            else:
+                synced += 1
+        return {"synced": synced, "skipped": skipped, "scanned": len(rows)}
+
     async def upsert_from_external_result(self, row: dict) -> dict | None:
         result_type = row.get("result_type")
         result_json = row.get("result_json") or {}
@@ -67,24 +91,23 @@ class TelegramCaseRepository:
         if not case:
             return None
         async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
+            await self._insert_case_message_on_connection(
+                conn,
+                telegram_case_id=case["id"],
+                telegram_chat_id=str(target_chat_id),
+                telegram_message_thread_id=result_json.get("message_thread_id"),
+                telegram_message_id=int(message_id),
+                message_kind="append",
+            )
+            for attachment_id in _attachment_message_ids(result_json):
                 await self._insert_case_message_on_connection(
                     conn,
                     telegram_case_id=case["id"],
                     telegram_chat_id=str(target_chat_id),
                     telegram_message_thread_id=result_json.get("message_thread_id"),
-                    telegram_message_id=int(message_id),
-                    message_kind="append",
+                    telegram_message_id=int(attachment_id),
+                    message_kind="attachment",
                 )
-                for attachment_id in _attachment_message_ids(result_json):
-                    await self._insert_case_message_on_connection(
-                        conn,
-                        telegram_case_id=case["id"],
-                        telegram_chat_id=str(target_chat_id),
-                        telegram_message_thread_id=result_json.get("message_thread_id"),
-                        telegram_message_id=int(attachment_id),
-                        message_kind="attachment",
-                    )
         return {"telegram_case_id": case["id"], "telegram_message_id": int(message_id)}
 
     async def find_by_reply_message(
@@ -222,6 +245,12 @@ def build_telegram_staff_reply_dedup_key(update: dict, case: dict) -> str:
         }
     )
     return f"telegram.staff_reply:{hashlib.sha256(raw.encode()).hexdigest()[:24]}"
+
+
+def json_loads(value: Any) -> Any:
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    return json.loads(value)
 
 
 def _attachment_message_ids(result_json: dict) -> list[int]:
