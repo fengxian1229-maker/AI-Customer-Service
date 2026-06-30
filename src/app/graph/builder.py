@@ -35,6 +35,7 @@ def build_workflow_graph(
     tenant_supported_languages: str | list[str] = "zh-Hans,zh-Hant,en,es,tl,th,my,ms",
     language_fallback: str = "zh-Hans",
     language_persist_to_slot_memory: bool = True,
+    llm_rewrite_min_confidence: float = 0.70,
     llm_router_mode: str = "shadow",
     llm_router_min_confidence: float = 0.70,
     llm_router_fallback_to_deterministic: bool = True,
@@ -44,7 +45,10 @@ def build_workflow_graph(
     llm_final_reply_enabled: bool = False,
 ):
     graph = StateGraph(GraphState)
-    graph.add_node("rewrite_question_node", make_rewrite_question_node(llm_rewrite_service))
+    graph.add_node(
+        "rewrite_question_node",
+        make_rewrite_question_node(llm_rewrite_service, min_confidence=llm_rewrite_min_confidence),
+    )
     graph.add_node(
         "language_policy_node",
         make_language_policy_node(
@@ -79,7 +83,10 @@ def build_workflow_graph(
     graph.add_node("clarification_node", clarification_node)
     graph.add_node(
         "final_reply_node",
-        make_final_reply_node(final_reply_service, llm_final_reply_enabled=llm_final_reply_enabled),
+        make_final_reply_node(
+            final_reply_service if llm_final_reply_enabled else None,
+            llm_final_reply_enabled=llm_final_reply_enabled,
+        ),
     )
     graph.add_node("command_planner_node", command_planner_node)
     graph.add_node("persist_state_node", persist_state_node)
