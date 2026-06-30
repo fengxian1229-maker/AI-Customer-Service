@@ -15,12 +15,16 @@ ALLOWED_LLM_ROUTES = (
     "unsupported",
 )
 
-ALLOWED_LLM_INTENTS = (
-    "faq_general",
+CANONICAL_FAQ_INTENTS = (
     "deposit_howto",
     "withdrawal_howto",
     "forgot_password_howto",
     "screenshot_upload_howto",
+)
+
+ALLOWED_LLM_INTENTS = (
+    "faq_general",
+    *CANONICAL_FAQ_INTENTS,
     "rollover_explanation",
     "menu_help",
     "deposit_missing",
@@ -178,6 +182,11 @@ def normalize_router_decision_intent(intent: str, route: str, requires_human: bo
     raise ValueError(f"Unsupported llm intent: {normalized or intent}")
 
 
+def validate_route_intent_pair(route: str, intent: str) -> None:
+    if route == "faq" and intent not in CANONICAL_FAQ_INTENTS:
+        raise ValueError(f"FAQ route requires a canonical FAQ intent: {intent}")
+
+
 def normalize_risk_flags(flags: list[str] | None) -> list[str]:
     result = []
     seen = set()
@@ -233,6 +242,7 @@ def validate_intent_output(payload: dict[str, Any], output: dict[str, Any]) -> d
         "faq_query": _optional_str(output.get("faq_query")),
         "risk_level": _optional_str(output.get("risk_level")),
     }
+    validate_route_intent_pair(validated["route"], validated["intent"])
     return validated
 
 
@@ -245,6 +255,7 @@ def validate_router_decision_output(payload: dict[str, Any], output: dict[str, A
         route,
         requires_human,
     )
+    validate_route_intent_pair(route, intent)
     return {
         "rewritten_question": _require_str(output, "rewritten_question", "router decision"),
         "normalized_query": _optional_str(output.get("normalized_query")),
