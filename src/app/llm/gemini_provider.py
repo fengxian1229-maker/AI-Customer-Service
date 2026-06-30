@@ -222,7 +222,7 @@ class GeminiLLMProvider:
             "confidence": float(result.get("confidence") or 0.0),
             "reason": result["reason"],
             "provider": self.provider_name,
-            "mode": "rewrite_authoritative",
+            "mode": "shadow",
         }
 
     async def classify_intent(self, payload: LLMIntentShadowInput) -> LLMIntentShadowOutput:
