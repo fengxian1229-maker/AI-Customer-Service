@@ -217,6 +217,7 @@ async def run_once(
             result_repository=result_repository,
             conversation_message_repository=ConversationMessageRepository(pool),
         )
+        mapping_sync = await case_repository.sync_recent_external_results()
         last_update_id = await offset_repository.get_offset(offset_key)
         client = client or TelegramUpdatesClient(
             bot_token=settings.telegram_bot_token,
@@ -243,6 +244,7 @@ async def run_once(
             "duplicates": sum(1 for item in processed if item.get("status") == "DUPLICATE"),
             "ignored": sum(1 for item in processed if item.get("status") == "IGNORED"),
             "failed": sum(1 for item in processed if item.get("status") == "FAILED"),
+            "mapping_sync": mapping_sync,
             "offset_key": offset_key,
         }
     finally:
