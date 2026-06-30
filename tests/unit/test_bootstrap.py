@@ -89,6 +89,8 @@ def test_load_sql_files_in_order():
         "012_add_multimodal_knowledge_fields.sql",
         "013_add_outbound_message_dedup_fields.sql",
         "014_telegram_cases.sql",
+        "015_telegram_case_messages.sql",
+        "016_telegram_update_offsets.sql",
     ]
 
 
@@ -118,13 +120,15 @@ def test_outbound_messages_schema_has_multiblock_dedup_fields():
 def test_telegram_cases_schema_has_reply_lookup_tables():
     from pathlib import Path
 
-    sql = Path("sql/014_telegram_cases.sql").read_text()
+    cases_sql = Path("sql/014_telegram_cases.sql").read_text()
+    messages_sql = Path("sql/015_telegram_case_messages.sql").read_text()
+    offsets_sql = Path("sql/016_telegram_update_offsets.sql").read_text()
 
-    assert "CREATE TABLE IF NOT EXISTS telegram_cases" in sql
-    assert "CREATE TABLE IF NOT EXISTS telegram_case_messages" in sql
-    assert "CREATE TABLE IF NOT EXISTS telegram_update_offsets" in sql
-    assert "UNIQUE KEY uk_telegram_cases_target_root" in sql
-    assert "UNIQUE KEY uk_telegram_case_messages_chat_message" in sql
+    assert "CREATE TABLE IF NOT EXISTS telegram_cases" in cases_sql
+    assert "CREATE TABLE IF NOT EXISTS telegram_case_messages" in messages_sql
+    assert "CREATE TABLE IF NOT EXISTS telegram_update_offsets" in offsets_sql
+    assert "UNIQUE KEY uk_telegram_cases_target_root" in cases_sql
+    assert "UNIQUE KEY uk_telegram_case_messages_chat_message" in messages_sql
 
 
 def test_conversation_states_schema_has_workflow_stage():
