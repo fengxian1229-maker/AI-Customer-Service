@@ -1,5 +1,6 @@
 from langgraph.graph import END, StateGraph
 
+from app.graph.language_policy_node import make_language_policy_node
 from app.graph.nodes import (
     clarification_node,
     command_planner_node,
@@ -8,7 +9,6 @@ from app.graph.nodes import (
     intent_router_node,
     make_final_reply_node,
     make_intent_router_node,
-    make_language_policy_node,
     make_rag_node,
     make_rewrite_question_node,
     make_sop_node,
