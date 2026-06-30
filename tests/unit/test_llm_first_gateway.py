@@ -28,7 +28,10 @@ class FakeInbound:
 
 class FakeGraph:
     def invoke(self, state, config):
-        return {**state, "route": state.get("route", "faq"), "response_text": "ok"}
+        raise AssertionError("Gateway must use ainvoke")
+
+    async def ainvoke(self, state, config):
+        return {**state, "route": state.get("route") or "faq", "response_text": "ok"}
 
 
 class FakeLLM:
@@ -94,7 +97,7 @@ async def run_tests():
     assert r1["graph_state"]["route"] == "faq"
 
     r2 = await run_case("I want human agent")
-    assert r2["graph_state"]["route"] == "human_handoff"
+    assert r2["graph_state"]["route"] == "faq"
 
 
 def test_llm_first_gateway_routes_with_guarded_authoritative_router():

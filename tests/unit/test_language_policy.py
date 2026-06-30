@@ -35,44 +35,48 @@ def test_detect_language_deterministic_never_infers_language_from_text():
         assert result["reason"] == reason
 
 
-def test_llm_router_accepted_language_has_highest_priority_and_updates_slot_memory():
+def test_llm_router_language_is_audit_only_and_rewrite_language_updates_slot_memory():
     slot_memory = {"last_user_language": "es"}
     result = resolve_language_policy(
         {
             "raw_user_input": "deposit help",
             "slot_memory": slot_memory,
             "recent_messages": [{"sender_role": "customer", "detected_language": "zh-Hant"}],
-            "rewrite_result": {"language": "tl"},
+            "rewrite_result": {"detected_language": "tl", "source": "llm_rewrite_authoritative", "language_confidence": 0.91},
             "llm_router_result": {"status": "accepted", "language": "en", "confidence": 0.91},
         },
         tenant_default_language="zh-Hans",
         supported_languages=["zh-Hans", "zh-Hant", "en", "es", "tl"],
     )
 
-    assert result["detected_language"] == "unknown"
-    assert result["reply_language"] == "en"
-    assert result["language_source"] == "llm_router"
-    assert result["llm_language"] == "en"
-    assert result["llm_language_source"] == "llm_router"
-    assert slot_memory["last_user_language"] == "en"
-    assert slot_memory["last_reply_language"] == "en"
+    assert result["detected_language"] == "tl"
+    assert result["reply_language"] == "tl"
+    assert result["language_source"] == "rewrite_result"
+    assert result["llm_language"] == "tl"
+    assert result["llm_language_source"] == "rewrite_result"
+    assert slot_memory["last_user_language"] == "tl"
+    assert slot_memory["last_reply_language"] == "tl"
 
 
-def test_llm_router_accepted_language_supports_tl_and_zh_hant():
+def test_authoritative_rewrite_language_supports_tl_and_zh_hant():
     for language in ("tl", "zh-Hant"):
         result = resolve_language_policy(
             {
                 "raw_user_input": "no keyword matching",
                 "slot_memory": {},
                 "recent_messages": [],
-                "llm_router_result": {"status": "accepted", "language": language},
+                "rewrite_result": {
+                    "source": "llm_rewrite_authoritative",
+                    "detected_language": language,
+                    "language_confidence": 0.91,
+                },
             },
             tenant_default_language="zh-Hans",
             supported_languages=["zh-Hans", "zh-Hant", "tl"],
         )
 
         assert result["reply_language"] == language
-        assert result["language_source"] == "llm_router"
+        assert result["language_source"] == "rewrite_result"
 
 
 def test_authoritative_rewrite_language_is_used_when_router_has_no_supported_language():
@@ -83,7 +87,7 @@ def test_authoritative_rewrite_language_is_used_when_router_has_no_supported_lan
             "slot_memory": slot_memory,
             "recent_messages": [],
             "llm_router_result": {"status": "accepted", "language": "unknown"},
-            "rewrite_result": {"language": "tl", "source": "llm_guarded_authoritative"},
+            "rewrite_result": {"language": "tl", "source": "llm_rewrite_authoritative"},
         },
         tenant_default_language="zh-Hans",
         supported_languages=["zh-Hans", "tl"],

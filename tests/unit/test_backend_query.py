@@ -72,15 +72,31 @@ def test_tenant_backend_config_resolver_default_disabled_fails_config():
         raise AssertionError("expected BackendConfigError")
 
 
-def test_tenant_backend_config_resolver_env_default_source_and_missing_config():
+def test_tenant_backend_config_resolver_env_default_source_and_missing_config(monkeypatch):
     from app.backends.resolver import BackendConfigError, TenantBackendConfigResolver
     from app.core.settings import Settings
+
+    for key in (
+        "BACKEND_BASE_URL",
+        "BACKEND_AUTHORIZATION",
+        "BACKEND_MERCHANT_CODE",
+        "BACKEND_LOGIN_OPERATOR",
+        "BACKEND_LOGIN_PASSWORD",
+        "BACKEND_LOGIN_MERCHANT",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
     settings = Settings(
         livechat_agent_access_token="unused",
         livechat_account_id="unused",
         backend_query_enabled=True,
         backend_provider_type="tac",
+        backend_base_url=None,
+        backend_authorization=None,
+        backend_merchant_code=None,
+        backend_login_operator=None,
+        backend_login_password=None,
+        backend_login_merchant=None,
     )
 
     try:
@@ -120,11 +136,26 @@ def test_tac_backend_preflight_disabled_does_not_login(monkeypatch):
             raise AssertionError("preflight must not create TAC client when disabled")
 
     monkeypatch.setenv("ENABLE_BACKEND_LOOKUP", "true")
+    for key in (
+        "BACKEND_BASE_URL",
+        "BACKEND_AUTHORIZATION",
+        "BACKEND_MERCHANT_CODE",
+        "BACKEND_LOGIN_OPERATOR",
+        "BACKEND_LOGIN_PASSWORD",
+        "BACKEND_LOGIN_MERCHANT",
+    ):
+        monkeypatch.delenv(key, raising=False)
     result = tac_backend_probe.run_preflight(
         Settings(
             livechat_agent_access_token="unused",
             livechat_account_id="unused",
             backend_query_enabled=False,
+            backend_base_url=None,
+            backend_authorization=None,
+            backend_merchant_code=None,
+            backend_login_operator=None,
+            backend_login_password=None,
+            backend_login_merchant=None,
         ),
         factory=FailingFactory(),
     )

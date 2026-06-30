@@ -1,4 +1,5 @@
 import json
+import asyncio
 from pathlib import Path
 
 from app.graph.builder import build_workflow_graph
@@ -41,7 +42,7 @@ def run_replay_case(graph, case_name: str, input_messages: list[str]) -> dict:
     for index, message in enumerate(input_messages, start=1):
         event = make_event(case_name, index, message)
         state = build_graph_state_from_event(event, conversation)
-        final_state = graph.invoke(state)
+        final_state = asyncio.run(graph.ainvoke(state))
         conversation.update(
             {
                 "status": final_state.get("status") or conversation.get("status"),

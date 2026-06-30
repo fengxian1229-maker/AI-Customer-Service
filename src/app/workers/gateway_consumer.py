@@ -14,11 +14,9 @@ from app.graph.checkpointing import build_checkpointer
 from app.llm.final_reply_provider import FinalReplyLLMProvider
 from app.llm.provider import build_llm_provider
 from app.schemas.events import InboundEvent
-from app.services.llm_first_gateway import LLMFirstGatewayService
+from app.services.gateway import GatewayService
 from app.services.final_reply_service import FinalReplyService
 from app.services.rag import RagService
-
-GatewayService = LLMFirstGatewayService
 
 
 async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off", settings=None) -> dict:

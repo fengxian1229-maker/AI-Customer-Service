@@ -1,10 +1,17 @@
 from typing import Any
+import re
 
 from app.graph.state import GraphState
+from app.llm.guardrails import validate_router_decision_output, validate_sop_slot_extraction_output
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
 from app.services.rag import answer_from_rag_context, answer_from_static_knowledge
-from app.services.language_policy import detect_language_deterministic
+from app.services.language_policy import (
+    detect_language_deterministic,
+    normalize_language_code,
+    parse_supported_languages,
+    resolve_language_policy,
+)
 from app.workflows.slot_extractors import (
     attachment_urls,
     extract_amount,
@@ -21,7 +28,10 @@ LLM_AUTHORITATIVE_SOURCES = {
     "llm_guarded_authoritative",
     "llm_guarded_authoritative_post_guard",
     "llm_faq_authoritative",
+    "llm_rewrite_authoritative",
 }
+
+ACTIVE_WORKFLOW_GUARD_STAGES = {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}
 
 
 def build_graph_state_from_event(
@@ -104,6 +114,115 @@ def rewrite_question_node(state: GraphState) -> GraphState:
 def prepare_route_state(state: GraphState) -> GraphState:
     routed = rewrite_question_node(state)
     return intent_router_node(routed)
+
+
+def make_rewrite_question_node(llm_rewrite_service=None, *, min_confidence: float = 0.0):
+    async def node(state: GraphState) -> GraphState:
+        if state.get("route_locked") and state.get("rewritten_question"):
+            return state
+        if state.get("rewrite_source") in LLM_AUTHORITATIVE_SOURCES and state.get("rewritten_question"):
+            return state
+        if not llm_rewrite_service or not hasattr(llm_rewrite_service, "rewrite"):
+            return rewrite_question_node(state)
+
+        payload = _build_llm_rewrite_payload(state)
+        try:
+            raw_result = await llm_rewrite_service.rewrite(payload)
+            result = dict(raw_result or {})
+            confidence = float(result.get("confidence") or result.get("language_confidence") or 0.0)
+            if confidence < float(min_confidence or 0.0):
+                return _deterministic_rewrite_fallback(state, "low_confidence", result=result)
+            rewritten = normalize_text(result.get("rewritten_question") or state.get("raw_user_input"))
+            normalized_query = normalize_text(result.get("normalized_query") or rewritten)
+            language = result.get("detected_language") or result.get("language") or "unknown"
+            language_confidence = float(result.get("language_confidence") or 0.0)
+            rewrite_result = {
+                "rewritten_question": rewritten,
+                "normalized_query": normalized_query,
+                "detected_language": language,
+                "language": language,
+                "language_confidence": language_confidence,
+                "language_source": "llm_rewrite",
+                "preserved_entities": list(result.get("preserved_entities") or []),
+                "missing_or_ambiguous": list(result.get("missing_or_ambiguous") or []),
+                "risk_flags": list(result.get("risk_flags") or []),
+                "confidence": confidence,
+                "reason": result.get("reason"),
+                "source": "llm_rewrite_authoritative",
+            }
+            return {
+                **state,
+                "rewritten_question": rewritten,
+                "rewrite_result": rewrite_result,
+                "llm_rewrite_result": {**result, "status": result.get("status") or "accepted"},
+                "rewrite_source": "llm_rewrite_authoritative",
+            }
+        except Exception as exc:
+            return _deterministic_rewrite_fallback(state, "exception", exc=exc)
+
+    return node
+
+
+def language_policy_node(
+    state: GraphState,
+    *,
+    language_detection_enabled: bool = True,
+    language_detection_min_confidence: float = 0.70,
+    tenant_persona_default_language: str = "zh-Hans",
+    tenant_supported_languages: str | list[str] = "zh-Hans,zh-Hant,en,es,tl,th,my,ms",
+    language_fallback: str = "zh-Hans",
+    language_persist_to_slot_memory: bool = True,
+) -> GraphState:
+    if not language_detection_enabled:
+        supported = parse_supported_languages(tenant_supported_languages)
+        reply_language = _default_reply_language(tenant_persona_default_language, language_fallback, supported)
+        slot_memory = dict(state.get("slot_memory") or {})
+        if language_persist_to_slot_memory:
+            slot_memory["last_reply_language"] = reply_language
+        policy = {
+            "detected_language": "unknown",
+            "language_confidence": 0.0,
+            "deterministic_language": "unknown",
+            "deterministic_language_confidence": 0.0,
+            "llm_language": "unknown",
+            "llm_language_source": None,
+            "llm_language_confidence": 0.0,
+            "language_source": "tenant_default",
+            "conversation_language": reply_language,
+            "reply_language": reply_language,
+            "supported_languages": supported,
+            "reason": "language detection disabled",
+            "detection_reason": "disabled",
+        }
+        state = {**state, "slot_memory": slot_memory}
+    else:
+        state_for_policy = {**state, "slot_memory": dict(state.get("slot_memory") or {})}
+        policy = resolve_language_policy(
+            state_for_policy,
+            tenant_default_language=tenant_persona_default_language,
+            supported_languages=tenant_supported_languages,
+            min_confidence=language_detection_min_confidence,
+            fallback_language=language_fallback,
+            persist_to_slot_memory=language_persist_to_slot_memory,
+        )
+        state = {**state, "slot_memory": state_for_policy.get("slot_memory") or {}}
+    return {
+        **state,
+        "detected_language": policy.get("detected_language"),
+        "language_confidence": policy.get("language_confidence"),
+        "language_source": policy.get("language_source"),
+        "conversation_language": policy.get("conversation_language"),
+        "reply_language": policy.get("reply_language"),
+        "supported_languages": list(policy.get("supported_languages") or []),
+        "language_result": policy,
+    }
+
+
+def make_language_policy_node(**settings):
+    async def node(state: GraphState) -> GraphState:
+        return language_policy_node(state, **settings)
+
+    return node
 
 
 def intent_router_node(state: GraphState) -> GraphState:
@@ -210,6 +329,83 @@ def intent_router_node(state: GraphState) -> GraphState:
     return _with_route(state, "clarification_needed", "clarification", "No clear question content provided.", confidence=0.2)
 
 
+def make_intent_router_node(
+    llm_intent_service=None,
+    *,
+    llm_router_mode: str = "shadow",
+    llm_router_min_confidence: float = 0.70,
+    llm_router_fallback_to_deterministic: bool = True,
+):
+    async def node(state: GraphState) -> GraphState:
+        if state.get("route_locked") and state.get("route"):
+            return state
+        router_mode = str(llm_router_mode or "shadow").strip().lower()
+        if router_mode not in {"guarded_authoritative", "faq_authoritative"}:
+            return intent_router_node(state)
+        if not llm_intent_service or not hasattr(llm_intent_service, "route"):
+            return _router_fallback_state(state, "missing_provider", router_mode, llm_router_fallback_to_deterministic)
+
+        payload = _build_llm_router_payload(state, router_mode)
+        try:
+            raw_result = await llm_intent_service.route(payload)
+            raw = dict(raw_result or {})
+            decision = validate_router_decision_output(payload, raw)
+        except Exception as exc:
+            return _router_fallback_state(
+                state,
+                "exception" if not isinstance(exc, ValueError) else "validation_error",
+                router_mode,
+                llm_router_fallback_to_deterministic,
+                exc=exc,
+            )
+
+        provider = raw.get("provider")
+        mode = raw.get("mode") or router_mode
+        if float(decision.get("confidence") or 0.0) < float(llm_router_min_confidence):
+            return _router_fallback_state(
+                state,
+                "low_confidence",
+                router_mode,
+                llm_router_fallback_to_deterministic,
+                decision=decision,
+                provider=provider,
+                mode=mode,
+            )
+        if decision["route"] == "unsupported":
+            return _router_fallback_state(
+                state,
+                "unsupported_route",
+                router_mode,
+                llm_router_fallback_to_deterministic,
+                decision=decision,
+                provider=provider,
+                mode=mode,
+            )
+
+        intent_result = {
+            "intent": decision["intent"],
+            "route": decision["route"],
+            "confidence": decision["confidence"],
+            "reason": decision["reason"],
+            "sop_name": decision.get("sop_name"),
+            "faq_query": decision.get("faq_query"),
+            "risk_level": decision.get("risk_level"),
+            "requires_human": decision.get("requires_human"),
+            "requires_backend": decision.get("requires_backend"),
+            "missing_slots": list(decision.get("missing_slots") or []),
+        }
+        route = "clarification" if decision["route"] == "unsupported" else decision["route"]
+        return {
+            **state,
+            "intent_result": intent_result,
+            "llm_router_result": _router_result_summary("accepted", decision=decision, provider=provider, mode=mode),
+            "route": route,
+            "route_source": "llm_router",
+        }
+
+    return node
+
+
 def sop_node(state: GraphState) -> GraphState:
     if state.get("workflow_stage") in {"waiting_backend", "backend_querying"}:
         return handle_waiting_backend(state)
@@ -233,6 +429,48 @@ def rag_node(state: GraphState) -> GraphState:
         ),
         "commands": [],
     }
+
+
+def make_sop_node(
+    llm_sop_slot_service=None,
+    *,
+    llm_sop_slot_enabled: bool = False,
+    llm_sop_slot_min_confidence: float = 0.70,
+):
+    async def node(state: GraphState) -> GraphState:
+        next_state = state
+        if _should_run_sop_slot_extraction(state, llm_sop_slot_service, llm_sop_slot_enabled):
+            next_state = await _run_sop_slot_extraction(state, llm_sop_slot_service, llm_sop_slot_min_confidence)
+        return sop_node(next_state)
+
+    return node
+
+
+def make_rag_node(rag_service=None):
+    async def node(state: GraphState) -> GraphState:
+        next_state = state
+        if rag_service and state.get("rag_context") is None:
+            next_state = {**state, "rag_context": await rag_service.retrieve(state)}
+        return rag_node(next_state)
+
+    return node
+
+
+def make_final_reply_node(final_reply_service=None, *, llm_final_reply_enabled: bool = False):
+    async def node(state: GraphState) -> GraphState:
+        if final_reply_service and hasattr(final_reply_service, "compose"):
+            return await final_reply_service.compose(state)
+        if llm_final_reply_enabled and state.get("response_text"):
+            text = state.get("response_text_fallback") or state.get("response_text")
+            return {
+                **state,
+                "response_text_fallback": text,
+                "final_response_text": text,
+                "final_reply_result": {"status": "fallback", "fallback_reason": "missing_service"},
+            }
+        return state
+
+    return node
 
 
 def human_handoff_node(state: GraphState) -> GraphState:
@@ -295,13 +533,18 @@ def command_planner_node(state: GraphState) -> GraphState:
     commands = list(state.get("commands") or [])
     text = state.get("final_response_text") or state.get("response_text")
     if text:
-        commands.insert(
-            0,
-            {
-                "type": CommandType.LIVECHAT_SEND_TEXT,
-                "payload": {"text": text},
-            },
-        )
+        for command in commands:
+            if str(command.get("type")) == str(CommandType.LIVECHAT_SEND_TEXT):
+                command["payload"] = {**dict(command.get("payload") or {}), "text": text}
+                break
+        else:
+            commands.insert(
+                0,
+                {
+                    "type": CommandType.LIVECHAT_SEND_TEXT,
+                    "payload": {"text": text},
+                },
+            )
     return {**state, "commands": commands}
 
 
@@ -361,6 +604,247 @@ def _with_route(
         ),
         "route": route,
     }
+
+
+def _build_llm_rewrite_payload(state: GraphState) -> dict[str, Any]:
+    return {
+        "tenant_id": state.get("tenant_id"),
+        "conversation_id": state.get("conversation_id"),
+        "channel_type": state.get("channel_type"),
+        "raw_user_input": state.get("raw_user_input"),
+        "event_type": state.get("event_type"),
+        "attachments": list(state.get("attachments") or []),
+        "attachments_summary": _attachments_summary(state),
+        "recent_messages": list(state.get("recent_messages") or []),
+        "active_workflow": state.get("active_workflow"),
+        "workflow_stage": state.get("workflow_stage"),
+        "slot_memory": dict(state.get("slot_memory") or {}),
+        "current_rewritten_question": state.get("rewritten_question"),
+        "deterministic_rewrite_result": state.get("rewrite_result"),
+    }
+
+
+def _deterministic_rewrite_fallback(
+    state: GraphState,
+    fallback_reason: str,
+    *,
+    result: dict | None = None,
+    exc: Exception | None = None,
+) -> GraphState:
+    fallback = rewrite_question_node(state)
+    fallback["llm_rewrite_result"] = {
+        "status": "fallback",
+        "fallback_reason": fallback_reason,
+        "confidence": (result or {}).get("confidence"),
+        "error_type": type(exc).__name__ if exc else None,
+        "error_message": _redact_sensitive_text(str(exc)[:1000]) if exc else None,
+    }
+    fallback["rewrite_source"] = "deterministic_fallback"
+    return fallback
+
+
+def _build_llm_router_payload(state: GraphState, router_mode: str) -> dict[str, Any]:
+    rewrite = state.get("rewrite_result") or {}
+    return {
+        "router_mode": router_mode,
+        "mode": router_mode,
+        "tenant_id": state.get("tenant_id"),
+        "conversation_id": state.get("conversation_id"),
+        "raw_user_input": state.get("raw_user_input"),
+        "rewritten_question": state.get("rewritten_question"),
+        "normalized_query": rewrite.get("normalized_query") or state.get("rewritten_question"),
+        "reply_language": state.get("reply_language"),
+        "recent_messages": list(state.get("recent_messages") or []),
+        "slot_memory": dict(state.get("slot_memory") or {}),
+        "active_workflow": state.get("active_workflow"),
+        "workflow_stage": state.get("workflow_stage"),
+        "attachments_summary": _attachments_summary(state),
+        "deterministic_rewrite_result": None,
+        "deterministic_intent_result": None,
+        "deterministic_route": None,
+    }
+
+
+def _router_fallback_state(
+    state: GraphState,
+    fallback_reason: str,
+    router_mode: str,
+    fallback_to_deterministic: bool,
+    *,
+    decision: dict | None = None,
+    provider: str | None = None,
+    mode: str | None = None,
+    exc: Exception | None = None,
+) -> GraphState:
+    if fallback_to_deterministic:
+        next_state = intent_router_node(state)
+    else:
+        next_state = {
+            **state,
+            "intent_result": {
+                "intent": "clarification_needed",
+                "route": "clarification",
+                "confidence": 0.0,
+                "reason": "LLM router failed and deterministic fallback is disabled.",
+            },
+            "route": "clarification",
+            "route_source": "llm_router",
+        }
+    next_state["llm_router_result"] = _router_result_summary(
+        "fallback",
+        decision=decision,
+        provider=provider,
+        mode=mode or router_mode,
+        fallback_reason=fallback_reason,
+        error_type=type(exc).__name__ if exc else None,
+        error_message=_redact_sensitive_text(str(exc)[:1000]) if exc else None,
+        fallback_to_deterministic=fallback_to_deterministic,
+    )
+    return next_state
+
+
+def _router_result_summary(
+    status: str,
+    decision: dict | None = None,
+    provider: str | None = None,
+    mode: str | None = None,
+    fallback_reason: str | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+    fallback_to_deterministic: bool | None = None,
+) -> dict[str, Any]:
+    decision = decision or {}
+    summary = {
+        "provider": provider or decision.get("provider"),
+        "mode": mode or decision.get("mode") or "guarded_authoritative",
+        "status": status,
+        "intent": decision.get("intent"),
+        "route": decision.get("route"),
+        "confidence": decision.get("confidence"),
+        "reason": decision.get("reason"),
+        "rewritten_question": decision.get("rewritten_question"),
+        "normalized_query": decision.get("normalized_query"),
+        "language": decision.get("language"),
+        "sop_name": decision.get("sop_name"),
+        "faq_query": decision.get("faq_query"),
+        "requires_human": decision.get("requires_human"),
+        "requires_backend": decision.get("requires_backend"),
+        "missing_slots": decision.get("missing_slots"),
+    }
+    if fallback_reason:
+        summary["fallback_reason"] = fallback_reason
+    if error_type:
+        summary["error_type"] = error_type
+    if error_message:
+        summary["error_message"] = error_message
+    if fallback_to_deterministic is not None:
+        summary["fallback_to_deterministic"] = fallback_to_deterministic
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _should_run_sop_slot_extraction(state: GraphState, service, enabled: bool) -> bool:
+    intent = (state.get("intent_result") or {}).get("intent")
+    return bool(
+        enabled
+        and service
+        and hasattr(service, "extract_sop_slots")
+        and state.get("route") == "sop"
+        and intent in {"deposit_missing", "withdrawal_missing"}
+        and state.get("workflow_stage") not in {"waiting_backend", "backend_querying"}
+    )
+
+
+async def _run_sop_slot_extraction(state: GraphState, service, min_confidence: float) -> GraphState:
+    payload = {
+        "intent": (state.get("intent_result") or {}).get("intent"),
+        "current_slot_memory": dict(state.get("slot_memory") or {}),
+        "latest_user_text": normalize_text(state.get("rewritten_question") or state.get("raw_user_input")),
+        "attachments_summary": _attachments_summary(state),
+        "recent_messages": list(state.get("recent_messages") or []),
+        "language": state.get("reply_language") or "unknown",
+    }
+    try:
+        raw_result = await service.extract_sop_slots(payload)
+        result = validate_sop_slot_extraction_output(payload, dict(raw_result or {}))
+        if result.get("dropped_fields") or _sop_slot_low_confidence(result, min_confidence):
+            return _sop_slot_fallback_state(state, "guardrail_or_low_confidence", result=result)
+        slot_memory = dict(state.get("slot_memory") or {})
+        for key, value in (result.get("extracted_slots") or {}).items():
+            if value:
+                slot_memory[key] = value
+        return {
+            **state,
+            "slot_memory": slot_memory,
+            "llm_sop_slot_result": {
+                "status": "accepted",
+                "provider": (raw_result or {}).get("provider"),
+                "mode": (raw_result or {}).get("mode") or "sop_slot",
+                "intent": result.get("intent"),
+                "missing_slots": result.get("missing_slots"),
+                "confidence": result.get("confidence"),
+                "reason": result.get("reason"),
+            },
+            "sop_slot_source": "llm_guarded",
+        }
+    except Exception as exc:
+        return _sop_slot_fallback_state(state, "exception", exc=exc)
+
+
+def _sop_slot_low_confidence(result: dict, min_confidence: float) -> bool:
+    extracted = result.get("extracted_slots") or {}
+    confidence = result.get("confidence") or {}
+    for key, value in extracted.items():
+        if value and float(confidence.get(key) or 0.0) < float(min_confidence):
+            return True
+    return False
+
+
+def _sop_slot_fallback_state(state: GraphState, fallback_reason: str, result: dict | None = None, exc: Exception | None = None) -> GraphState:
+    return {
+        **state,
+        "llm_sop_slot_result": {
+            "status": "fallback",
+            "fallback_reason": fallback_reason,
+            "intent": (result or {}).get("intent"),
+            "error_type": type(exc).__name__ if exc else None,
+            "error_message": _redact_sensitive_text(str(exc)[:1000]) if exc else None,
+        },
+        "sop_slot_source": "deterministic",
+    }
+
+
+def _attachments_summary(state: GraphState) -> list[dict[str, Any]]:
+    return [{"url": item.get("url"), "name": item.get("name")} for item in state.get("attachments") or []]
+
+
+def _default_reply_language(tenant_default: str, fallback: str, supported: list[str]) -> str:
+    for candidate in (tenant_default, fallback):
+        normalized = normalize_language_code(candidate)
+        if normalized != "unknown" and normalized in supported:
+            return normalized
+    return supported[0] if supported else "zh-Hans"
+
+
+def _redact_sensitive_text(value: str) -> str:
+    redacted = re.sub(
+        r"\b(Authorization)\s*[:=]\s*Bearer\s+['\"]?([^'\"\s,;]+)['\"]?",
+        lambda match: f"{match.group(1)}: Bearer [redacted]",
+        value,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\b(access[-_]?token|x-api-key|api[-_]?key|secret|password|token)\s*[:=]\s*['\"]?([^'\"\s,;]+)['\"]?",
+        lambda match: f"{match.group(1)}=[redacted]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\b(Bearer)\s+['\"]?([^'\"\s,;]+)['\"]?",
+        lambda match: f"{match.group(1)} [redacted]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    return redacted
 
 
 def _has_waiting_supplement(signal: dict[str, Any], state: GraphState) -> bool:

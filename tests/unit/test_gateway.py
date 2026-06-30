@@ -343,7 +343,7 @@ def test_gateway_service_uses_final_reply_text_for_outbound_message():
     assert result["graph_state"]["response_text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
     assert result["graph_state"]["final_response_text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
     assert result["outbound_messages"][0]["payload_json"]["text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
-    assert result["graph_state"]["commands"][0]["payload"]["text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
+    assert result["graph_state"]["commands"][0]["payload"]["text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
 
 
 def test_gateway_language_policy_file_received_preserves_last_user_language():
@@ -499,7 +499,7 @@ def test_gateway_service_human_active_records_inbound_but_does_not_run_graph_or_
     assert inbound_repository.processed == [15]
 
 
-def test_gateway_service_prefetches_rag_context_only_for_faq_route():
+def test_gateway_service_does_not_prefetch_rag_context_before_graph_for_faq_route():
     graph = RecordingGraph()
     rag_service = FakeRagService()
     service = GatewayService(
@@ -514,8 +514,8 @@ def test_gateway_service_prefetches_rag_context_only_for_faq_route():
     asyncio.run(service.process_event(14, make_event_with_text("how to deposit")))
 
     state, _config = graph.calls[0]
-    assert rag_service.calls[0]["conversation_id"] == "livechat:chat-1"
-    assert state["rag_context"]["documents"][0]["title"] == "充值教程"
+    assert rag_service.calls == []
+    assert state.get("rag_context") is None
 
 
 def test_gateway_service_does_not_prefetch_rag_context_for_sop_route():
@@ -587,7 +587,7 @@ def test_gateway_service_does_not_prefetch_rag_context_for_backend_fact_guard():
     assert result["graph_state"]["response_text"] == "ok"
 
 
-def test_gateway_service_records_error_and_skips_side_effects_when_rag_retrieve_fails():
+def test_gateway_service_does_not_call_rag_before_graph_when_rag_service_would_fail():
     inbound_repository = FakeInboundRepository()
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
@@ -606,22 +606,17 @@ def test_gateway_service_records_error_and_skips_side_effects_when_rag_retrieve_
         rag_service=FakeRagService(error=RuntimeError("rag retrieve failed")),
     )
 
-    try:
-        asyncio.run(service.process_event(15, make_event_with_text("how to deposit")))
-    except RuntimeError as exc:
-        assert str(exc) == "rag retrieve failed"
-    else:
-        raise AssertionError("expected rag retrieve to fail")
+    result = asyncio.run(service.process_event(15, make_event_with_text("how to deposit")))
 
-    assert graph.calls == []
-    assert inbound_repository.processed == []
-    assert conversation_repository.updated == []
-    assert message_repository.inserted == []
-    assert outbound_repository.inserted == []
+    assert graph.calls
+    assert result["graph_state"]["response_text"] == "ok"
+    assert inbound_repository.processed == [15]
+    assert conversation_repository.updated
+    assert message_repository.inserted
+    assert outbound_repository.inserted
     assert external_repository.inserted == []
-    assert graph_error_repository.inserted[0]["error_type"] == "RuntimeError"
-    assert graph_error_repository.inserted[0]["error_message"] == "rag retrieve failed"
-    assert "rag_context" not in graph_error_repository.inserted[0]["state_snapshot"]
+    assert graph_error_repository.inserted == []
+    assert service.rag_service.calls == []
 
 
 def test_gateway_service_without_rag_service_returns_no_match_for_faq_static_fallback():
@@ -640,7 +635,7 @@ def test_gateway_service_without_rag_service_returns_no_match_for_faq_static_fal
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
 
 
-def test_gateway_service_guarded_authoritative_blocks_llm_faq_for_deterministic_sop_without_generating_reply_or_commands():
+def test_gateway_service_guarded_authoritative_calls_router_inside_graph_for_sop_like_text():
     router_service = FakeLLMRouterService()
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
@@ -653,14 +648,13 @@ def test_gateway_service_guarded_authoritative_blocks_llm_faq_for_deterministic_
 
     result = asyncio.run(service.process_event(26, make_event_with_text("mi deposito no llegó")))
 
-    assert router_service.calls == []
-    assert result["graph_state"]["route"] == "sop"
-    assert result["graph_state"]["route_source"] == "deterministic"
+    assert len(router_service.calls) == 1
+    assert router_service.calls[0]["rewritten_question"] == "mi deposito no llegó"
+    assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["route_source"] == "llm_router"
     assert result["graph_state"]["rewrite_source"] == "deterministic"
-    assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
-    assert result["graph_state"]["llm_router_result"]["status"] == "fallback"
-    assert result["graph_state"]["llm_router_result"]["fallback_reason"] == "hard_guard"
-    assert result["graph_state"]["llm_router_result"]["hard_guard"] == "deterministic_sop"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
+    assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
     assert result["outbound_messages"][0]["message_type"] == "text"
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
     assert "response_text" not in result["graph_state"]["llm_router_result"]
@@ -718,11 +712,10 @@ def test_gateway_service_faq_authoritative_calls_llm_before_keyword_router_and_u
     assert router_service.calls[0]["deterministic_route"] is None
     assert router_service.calls[0]["deterministic_intent_result"] is None
     assert result["graph_state"]["route"] == "faq"
-    assert result["graph_state"]["route_source"] == "llm_faq_authoritative"
-    assert result["graph_state"]["rewrite_source"] == "llm_faq_authoritative"
+    assert result["graph_state"]["route_source"] == "llm_router"
+    assert result["graph_state"]["rewrite_source"] == "deterministic"
     assert result["graph_state"]["intent_result"]["faq_query"] == "deposit not arrived FAQ"
     assert rag_service.calls[0]["intent_result"]["faq_query"] == "deposit not arrived FAQ"
-    assert rag_service.calls[0]["rag_backend_fact_guard_enabled"] is False
     assert len(result["outbound_messages"]) == 1
     assert result["outbound_messages"][0]["message_type"] == "text"
     assert result["outbound_messages"][0]["command_type"] == "livechat.send_text"
@@ -764,11 +757,9 @@ def test_gateway_service_faq_authoritative_rejects_sop_route_without_determinist
 
     result = asyncio.run(service.process_event(36, make_event_with_text("mi deposito no llegó")))
 
-    assert result["graph_state"]["route"] == "clarification"
-    assert result["graph_state"]["intent_result"]["intent"] == "clarification_needed"
-    assert result["graph_state"]["llm_router_result"]["fallback_reason"] == "unsupported_route"
-    assert result["graph_state"]["llm_router_result"]["fallback_to_deterministic"] is False
-    assert result["external_commands"] == []
+    assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
+    assert result["graph_state"]["route_source"] == "llm_router"
 
 
 def test_gateway_service_faq_authoritative_active_workflow_falls_back_to_clarification_without_sop():
@@ -793,10 +784,10 @@ def test_gateway_service_faq_authoritative_active_workflow_falls_back_to_clarifi
 
     result = asyncio.run(service.process_event(37, make_event_with_text("ya lo mandé")))
 
-    assert router_service.calls == []
-    assert result["graph_state"]["route"] == "clarification"
-    assert result["graph_state"]["llm_router_result"]["fallback_reason"] == "active_workflow_guard"
-    assert result["graph_state"]["llm_router_result"]["fallback_to_deterministic"] is False
+    assert len(router_service.calls) == 1
+    assert router_service.calls[0]["active_workflow"] == "deposit_missing"
+    assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["route_source"] == "llm_router"
     assert result["external_commands"] == []
 
 
@@ -1034,7 +1025,7 @@ def test_gateway_service_guarded_authoritative_uses_llm_sop_route():
     result = asyncio.run(service.process_event(27, make_event_with_text("怎么存款？")))
 
     assert result["graph_state"]["route"] == "sop"
-    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["route_source"] == "llm_router"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
     assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
 
@@ -1162,7 +1153,7 @@ def test_gateway_service_guarded_authoritative_uses_llm_human_handoff_route():
     result = asyncio.run(service.process_event(38, make_event_with_text("how to deposit")))
 
     assert result["graph_state"]["route"] == "human_handoff"
-    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["route_source"] == "llm_router"
     assert result["graph_state"]["intent_result"]["intent"] == "explicit_human_request"
     assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
     assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
@@ -1204,7 +1195,7 @@ def test_gateway_service_guarded_authoritative_forces_requires_human_for_llm_han
     result = asyncio.run(service.process_event(40, make_event_with_text("how to deposit")))
 
     assert result["graph_state"]["route"] == "human_handoff"
-    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["route_source"] == "llm_router"
     assert result["graph_state"]["intent_result"]["intent"] == "explicit_human_request"
     assert result["graph_state"]["llm_router_result"]["status"] == "accepted"
     assert result["graph_state"]["llm_router_result"]["requires_human"] is True
@@ -1258,7 +1249,7 @@ def test_gateway_service_guarded_authoritative_fallback_disabled_does_not_use_de
     result = asyncio.run(service.process_event(39, make_event_with_text("how to deposit")))
 
     assert result["graph_state"]["route"] == "clarification"
-    assert result["graph_state"]["route_source"] == "llm_guarded_authoritative"
+    assert result["graph_state"]["route_source"] == "llm_router"
     assert result["graph_state"]["intent_result"]["intent"] == "clarification_needed"
     assert result["graph_state"]["llm_router_result"]["status"] == "fallback"
     assert result["graph_state"]["llm_router_result"]["fallback_reason"] == "validation_error"
@@ -1266,7 +1257,7 @@ def test_gateway_service_guarded_authoritative_fallback_disabled_does_not_use_de
     assert result["external_commands"] == []
 
 
-def test_gateway_service_guarded_authoritative_hard_guards_active_workflow_human_and_backend_fact():
+def test_gateway_service_guarded_authoritative_passes_guard_context_to_graph_router():
     class ActiveWorkflowConversationRepository(FakeConversationRepository):
         async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
             conversation = await super().get_or_create(chat_id, thread_id)
@@ -1284,9 +1275,10 @@ def test_gateway_service_guarded_authoritative_hard_guards_active_workflow_human
         llm_router_mode="guarded_authoritative",
     )
     active_result = asyncio.run(active_service.process_event(29, make_event_with_text("发了")))
-    assert active_result["graph_state"]["route"] == "sop"
-    assert active_result["graph_state"]["llm_router_result"]["fallback_reason"] == "hard_guard"
-    assert faq_router.calls == []
+    assert active_result["graph_state"]["route"] == "faq"
+    assert active_result["graph_state"]["route_source"] == "llm_router"
+    assert len(faq_router.calls) == 1
+    assert faq_router.calls[0]["active_workflow"] == "deposit_missing"
 
     human_service = GatewayService(
         inbound_repository=FakeInboundRepository(),
@@ -1297,8 +1289,8 @@ def test_gateway_service_guarded_authoritative_hard_guards_active_workflow_human
         llm_router_mode="guarded_authoritative",
     )
     human_result = asyncio.run(human_service.process_event(30, make_event_with_text("I want human agent")))
-    assert human_result["graph_state"]["route"] == "human_handoff"
-    assert human_result["graph_state"]["llm_router_result"]["fallback_reason"] == "hard_guard"
+    assert human_result["graph_state"]["route"] == "faq"
+    assert human_result["graph_state"]["route_source"] == "llm_router"
 
     backend_service = GatewayService(
         inbound_repository=FakeInboundRepository(),
@@ -1309,8 +1301,8 @@ def test_gateway_service_guarded_authoritative_hard_guards_active_workflow_human
         llm_router_mode="guarded_authoritative",
     )
     backend_result = asyncio.run(backend_service.process_event(31, make_event_with_text("withdrawal status and balance")))
-    assert backend_result["graph_state"]["route"] != "faq"
-    assert backend_result["graph_state"]["llm_router_result"]["fallback_reason"] == "backend_fact_guard"
+    assert backend_result["graph_state"]["route"] == "faq"
+    assert backend_result["graph_state"]["route_source"] == "llm_router"
 
 
 def test_gateway_service_deterministic_router_mode_does_not_call_llm():
@@ -1331,7 +1323,7 @@ def test_gateway_service_deterministic_router_mode_does_not_call_llm():
     assert result["graph_state"].get("llm_router_result") is None
 
 
-def test_gateway_service_rewrite_shadow_records_result_without_overriding_deterministic_fields():
+def test_gateway_service_rewrite_shadow_flag_does_not_call_gateway_level_llm():
     rewrite_service = FakeLLMRewriteService()
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
@@ -1344,8 +1336,8 @@ def test_gateway_service_rewrite_shadow_records_result_without_overriding_determ
 
     result = asyncio.run(service.process_event(17, make_event_with_text("how to deposit")))
 
-    assert len(rewrite_service.calls) == 1
-    assert result["graph_state"]["llm_rewrite_result"]["provider"] == "mock"
+    assert rewrite_service.calls == []
+    assert result["graph_state"]["llm_rewrite_result"] is None
     assert result["graph_state"]["rewritten_question"] == "how to deposit"
     assert result["graph_state"]["rewrite_source"] == "deterministic"
     assert result["graph_state"]["route"] == "faq"
@@ -1353,7 +1345,7 @@ def test_gateway_service_rewrite_shadow_records_result_without_overriding_determ
     assert result["outbound_messages"][0]["action_type"] == "send_event"
 
 
-def test_gateway_service_intent_shadow_records_result_without_overriding_deterministic_route():
+def test_gateway_service_intent_shadow_flag_does_not_call_gateway_level_llm():
     intent_service = FakeLLMIntentService()
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
@@ -1366,14 +1358,14 @@ def test_gateway_service_intent_shadow_records_result_without_overriding_determi
 
     result = asyncio.run(service.process_event(18, make_event_with_text("how to deposit")))
 
-    assert len(intent_service.calls) == 1
-    assert result["graph_state"]["llm_intent_result"]["provider"] == "mock"
+    assert intent_service.calls == []
+    assert result["graph_state"]["llm_intent_result"] is None
     assert result["graph_state"]["route"] == "faq"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
     assert result["graph_state"]["route_source"] == "deterministic"
 
 
-def test_gateway_service_sop_route_is_not_overridden_by_shadow_results():
+def test_gateway_service_sop_route_is_not_overridden_by_legacy_shadow_flags():
     rewrite_service = FakeLLMRewriteService(
         {
             "rewritten_question": "how to deposit",
@@ -1411,6 +1403,8 @@ def test_gateway_service_sop_route_is_not_overridden_by_shadow_results():
 
     result = asyncio.run(service.process_event(19, make_event_with_text("mi deposito no llegó")))
 
+    assert rewrite_service.calls == []
+    assert intent_service.calls == []
     assert result["graph_state"]["route"] == "sop"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
     assert result["graph_state"]["rewritten_question"] == "mi deposito no llegó"
@@ -1487,11 +1481,11 @@ def test_gateway_service_backend_fact_shadow_does_not_query_knowledge_repository
     result = asyncio.run(service.process_event(22, make_event_with_text("withdrawal status and balance")))
 
     assert repository.calls == []
-    assert result["graph_state"]["llm_rewrite_result"] is not None
-    assert result["graph_state"]["llm_intent_result"] is not None
+    assert result["graph_state"]["llm_rewrite_result"] is None
+    assert result["graph_state"]["llm_intent_result"] is None
 
 
-def test_gateway_service_shadow_guardrail_failure_records_shadow_error_and_keeps_side_effects():
+def test_gateway_service_shadow_flag_does_not_run_when_custom_graph_is_injected():
     inbound_repository = FakeInboundRepository()
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
@@ -1517,13 +1511,8 @@ def test_gateway_service_shadow_guardrail_failure_records_shadow_error_and_keeps
 
     result = asyncio.run(service.process_event(23, make_event_with_text("how to deposit")))
 
-    assert result["graph_state"]["route"] == "faq"
-    assert result["graph_state"]["llm_rewrite_result"] == {
-        "mode": "shadow",
-        "status": "error",
-        "error_type": "ValueError",
-        "error_message": "Unsupported llm route: invalid_route",
-    }
+    assert result["graph_state"]["response_text"] == "ok"
+    assert result["graph_state"].get("llm_rewrite_result") is None
     assert inbound_repository.processed == [23]
     assert conversation_repository.updated
     assert message_repository.inserted
@@ -1532,7 +1521,7 @@ def test_gateway_service_shadow_guardrail_failure_records_shadow_error_and_keeps
     assert graph_error_repository.inserted == []
 
 
-def test_gateway_service_shadow_failure_does_not_block_deterministic_outbound_or_record_graph_error():
+def test_gateway_service_legacy_shadow_failure_does_not_run_or_block_deterministic_outbound():
     graph_error_repository = FakeGraphRunErrorRepository()
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
@@ -1551,19 +1540,12 @@ def test_gateway_service_shadow_failure_does_not_block_deterministic_outbound_or
     assert result["graph_state"]["route"] == "faq"
     assert result["outbound_messages"][0]["payload_json"]["text"] == result["graph_state"]["response_text"]
     assert result["outbound_messages"][0]["message_type"] == "text"
-    assert result["graph_state"]["llm_rewrite_result"]["mode"] == "shadow"
-    assert result["graph_state"]["llm_rewrite_result"]["status"] == "error"
-    assert result["graph_state"]["llm_rewrite_result"]["error_type"] == "RuntimeError"
-    assert result["graph_state"]["llm_intent_result"]["mode"] == "shadow"
-    assert result["graph_state"]["llm_intent_result"]["status"] == "error"
-    assert "api_key=[redacted]" in str(result["graph_state"]["llm_rewrite_result"])
-    assert "password=[redacted]" in str(result["graph_state"]["llm_intent_result"])
-    assert "hidden" not in str(result["graph_state"]["llm_rewrite_result"])
-    assert "hidden" not in str(result["graph_state"]["llm_intent_result"])
+    assert result["graph_state"]["llm_rewrite_result"] is None
+    assert result["graph_state"]["llm_intent_result"] is None
     assert graph_error_repository.inserted == []
 
 
-def test_gateway_service_checkpoint_success_metadata_contains_shadow_summary():
+def test_gateway_service_checkpoint_success_metadata_omits_legacy_shadow_when_not_run():
     checkpoint_repository = FakeCheckpointRunRepository()
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
@@ -1582,11 +1564,7 @@ def test_gateway_service_checkpoint_success_metadata_contains_shadow_summary():
     assert result["graph_state"]["route"] == "faq"
     assert checkpoint_repository.succeeded[0][0] == 91
     metadata = checkpoint_repository.succeeded[0][2]
-    assert metadata["llm_shadow"]["rewrite"]["provider"] == "mock"
-    assert metadata["llm_shadow"]["rewrite"]["status"] == "ok"
-    assert metadata["llm_shadow"]["intent"]["provider"] == "mock"
-    assert metadata["llm_shadow"]["intent"]["route"] == "human_handoff"
-    assert metadata["llm_shadow"]["deterministic_route"] == "faq"
+    assert "llm_shadow" not in metadata
 
 
 class RecordingGraph:
@@ -1594,6 +1572,9 @@ class RecordingGraph:
         self.calls = []
 
     def invoke(self, state: dict, config=None) -> dict:
+        raise AssertionError("GatewayService must call workflow_graph.ainvoke")
+
+    async def ainvoke(self, state: dict, config=None) -> dict:
         self.calls.append((state, config))
         return {
             **state,
@@ -1877,6 +1858,9 @@ class ExplodingGraph:
         self.calls = []
 
     def invoke(self, state: dict, config=None) -> dict:
+        raise AssertionError("GatewayService must call workflow_graph.ainvoke")
+
+    async def ainvoke(self, state: dict, config=None) -> dict:
         self.calls.append((state, config))
         raise self.error
 

@@ -1,3 +1,5 @@
+import asyncio
+
 from app.graph.builder import build_workflow_graph
 
 
@@ -67,14 +69,17 @@ def test_workflow_graph_omits_legacy_signal_and_continue_nodes(monkeypatch):
 
     assert "signal_judgement_node" not in calls["nodes"]
     assert "continue_workflow_node" not in calls["nodes"]
-    assert ("rewrite_question_node", "intent_router_node") in calls["edges"]
+    assert ("rewrite_question_node", "language_policy_node") in calls["edges"]
+    assert ("language_policy_node", "intent_router_node") in calls["edges"]
+    assert ("final_reply_node", "command_planner_node") in calls["edges"]
 
 
 def test_workflow_graph_invokes_minimal_sop_path():
     graph = build_workflow_graph()
 
-    result = graph.invoke(
-        {
+    result = asyncio.run(
+        graph.ainvoke(
+            {
             "tenant_id": "default",
             "channel_type": "livechat",
             "conversation_id": "livechat:chat-1",
@@ -86,7 +91,8 @@ def test_workflow_graph_invokes_minimal_sop_path():
             "slot_memory": {},
             "commands": [],
             "errors": [],
-        }
+            }
+        )
     )
 
     assert result["intent_result"]["intent"] == "deposit_missing"
@@ -96,8 +102,9 @@ def test_workflow_graph_invokes_minimal_sop_path():
 def test_workflow_graph_rag_route_returns_knowledge_answer_without_placeholder_command():
     graph = build_workflow_graph()
 
-    result = graph.invoke(
-        {
+    result = asyncio.run(
+        graph.ainvoke(
+            {
             "tenant_id": "default",
             "channel_type": "livechat",
             "conversation_id": "livechat:chat-1",
@@ -109,7 +116,8 @@ def test_workflow_graph_rag_route_returns_knowledge_answer_without_placeholder_c
             "slot_memory": {},
             "commands": [],
             "errors": [],
-        }
+            }
+        )
     )
 
     assert result["intent_result"]["intent"] == "deposit_howto"
@@ -122,8 +130,9 @@ def test_workflow_graph_rag_route_returns_knowledge_answer_without_placeholder_c
 def test_workflow_graph_non_canonical_question_asks_for_clarification_without_rag():
     graph = build_workflow_graph()
 
-    result = graph.invoke(
-        {
+    result = asyncio.run(
+        graph.ainvoke(
+            {
             "tenant_id": "default",
             "channel_type": "livechat",
             "conversation_id": "livechat:chat-1",
@@ -135,7 +144,8 @@ def test_workflow_graph_non_canonical_question_asks_for_clarification_without_ra
             "slot_memory": {},
             "commands": [],
             "errors": [],
-        }
+            }
+        )
     )
 
     assert result["route"] == "clarification"

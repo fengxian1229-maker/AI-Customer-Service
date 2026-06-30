@@ -1,83 +1,17 @@
-from app.graph.nodes import prepare_route_state
-from app.llm.guardrails import validate_router_decision_output
 from app.services.gateway import ACTIVE_WORKFLOW_GUARD_STAGES, GatewayService
 from app.workflows.slot_extractors import is_explicit_human_request, normalize_text
 
 
 class LLMFirstGatewayService(GatewayService):
-    """Gateway variant where authoritative LLM routing is the primary path.
+    """Deprecated compatibility shell.
 
-    The base GatewayService keeps the original deterministic-first behaviour for
-    historical smoke tests. This service is used by gateway_consumer so the live
-    intake path can call the LLM rewrite/router before deterministic SOP guards.
-    Deterministic routing remains available as fallback and as a safety guard.
+    LLM rewrite/routing now runs inside LangGraph nodes. This class is kept for
+    legacy tests/imports only and must not perform Gateway-level LLM routing.
     """
 
     async def _prepare_route_state(self, graph_state: dict) -> dict:
-        if self.llm_router_mode == "faq_authoritative":
-            state = await self._prepare_faq_authoritative_route_state(graph_state)
-            if state.get("route_source") == "llm_faq_authoritative" and state.get("route"):
-                return {**state, "route_locked": True}
-            return state
-        if self.llm_router_mode != "guarded_authoritative":
-            return prepare_route_state(graph_state)
-
-        pre_guard = self._llm_first_pre_guard_reason(graph_state)
-        if pre_guard:
-            deterministic_state = prepare_route_state(graph_state)
-            return self._router_fallback_state(deterministic_state, "hard_guard", hard_guard=pre_guard)
-
-        if not self.llm_intent_service or not hasattr(self.llm_intent_service, "route"):
-            return self._router_fallback_state(prepare_route_state(graph_state), "missing_provider")
-
-        payload = self._build_llm_router_input(graph_state, include_deterministic=False)
-        try:
-            raw_result = await self.llm_intent_service.route(payload)
-            sanitized_raw = self._sanitize_value(raw_result or {})
-            decision = validate_router_decision_output(payload, sanitized_raw)
-        except Exception as exc:
-            return self._router_fallback_state(
-                prepare_route_state(graph_state),
-                "exception" if not isinstance(exc, ValueError) else "validation_error",
-                exc=exc,
-            )
-
-        provider = sanitized_raw.get("provider")
-        mode = sanitized_raw.get("mode") or "guarded_authoritative"
-        if decision["confidence"] < self.llm_router_min_confidence:
-            return self._router_fallback_state(
-                prepare_route_state(graph_state),
-                "low_confidence",
-                decision=decision,
-                provider=provider,
-                mode=mode,
-            )
-        if decision["route"] == "unsupported":
-            return self._router_fallback_state(
-                prepare_route_state(graph_state),
-                "unsupported_route",
-                decision=decision,
-                provider=provider,
-                mode=mode,
-            )
-
-        accepted_state = self._accepted_router_state(
-            graph_state,
-            decision=decision,
-            provider=provider,
-            mode=mode,
-            source="llm_guarded_authoritative",
-        )
-        post_guard = self._llm_first_post_guard_reason(accepted_state, decision)
-        if post_guard:
-            return self._post_guard_override_state(
-                accepted_state,
-                decision=decision,
-                provider=provider,
-                mode=mode,
-                post_guard=post_guard,
-            )
-        return accepted_state
+        # LLM routing is now handled by LangGraph intent_router_node.
+        return graph_state
 
     def _llm_first_pre_guard_reason(self, graph_state: dict) -> str | None:
         if graph_state.get("active_workflow") and graph_state.get("workflow_stage") in ACTIVE_WORKFLOW_GUARD_STAGES:

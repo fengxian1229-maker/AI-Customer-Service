@@ -88,11 +88,10 @@ def resolve_language_policy(
     slot_memory = state.setdefault("slot_memory", {})
 
     deterministic = detect_language_deterministic(state.get("raw_user_input"))
-    detected_language = "unknown"
-    detected_confidence = 0.0
-
-    llm_language, llm_source, llm_reason, llm_confidence = _router_or_rewrite_language(state, supported)
-    if llm_language:
+    llm_language, llm_source, llm_reason, llm_confidence = _rewrite_language(state, supported)
+    detected_language = llm_language or "unknown"
+    detected_confidence = llm_confidence if llm_language else 0.0
+    if llm_language and llm_confidence >= float(min_confidence):
         conversation_language = llm_language
         source = llm_source
         reason = llm_reason
@@ -142,17 +141,19 @@ def resolve_language_policy(
     }
 
 
-def _router_or_rewrite_language(state: dict[str, Any], supported: list[str]) -> tuple[str | None, str | None, str, float]:
-    router = state.get("llm_router_result") or {}
-    router_language = normalize_language_code(router.get("language"))
-    if router.get("status") == "accepted" and router_language != "unknown" and router_language in supported:
-        return router_language, "llm_router", "accepted router supplied language", float(router.get("confidence") or 1.0)
+def _rewrite_language(state: dict[str, Any], supported: list[str]) -> tuple[str | None, str | None, str, float]:
     rewrite = state.get("rewrite_result") or {}
     rewrite_language = normalize_language_code(rewrite.get("detected_language") or rewrite.get("language"))
     rewrite_source = str(rewrite.get("source") or rewrite.get("language_source") or "")
-    authoritative_sources = {"llm_guarded_authoritative", "llm_guarded_authoritative_post_guard", "llm_faq_authoritative"}
+    authoritative_sources = {
+        "llm_guarded_authoritative",
+        "llm_guarded_authoritative_post_guard",
+        "llm_faq_authoritative",
+        "llm_rewrite_authoritative",
+        "llm_rewrite",
+    }
     if rewrite_language != "unknown" and rewrite_language in supported and rewrite_source in authoritative_sources:
-        return rewrite_language, "rewrite_result", "authoritative rewrite result supplied language", float(rewrite.get("language_confidence") or 1.0)
+        return rewrite_language, "rewrite_result", "authoritative rewrite result supplied language", float(rewrite.get("language_confidence") or rewrite.get("confidence") or 1.0)
     return None, None, "", 0.0
 
 

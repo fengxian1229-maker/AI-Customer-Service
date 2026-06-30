@@ -87,7 +87,6 @@ class GatewayService:
         self.outbound_repository = outbound_repository
         self.external_command_repository = external_command_repository
         self.transactional_repository = transactional_repository
-        self.workflow_graph = workflow_graph or build_workflow_graph(checkpointer=checkpointer)
         pool = getattr(transactional_repository, "pool", None)
         self.message_repository = (
             message_repository
@@ -124,6 +123,28 @@ class GatewayService:
         self.language_fallback = normalize_language_code(language_fallback)
         self.language_persist_to_slot_memory = bool(language_persist_to_slot_memory)
         self.recent_message_limit = recent_message_limit
+        graph_llm_router_enabled = self.llm_router_mode in {"guarded_authoritative", "faq_authoritative"}
+        self.workflow_graph = workflow_graph or build_workflow_graph(
+            checkpointer=checkpointer,
+            llm_rewrite_service=self.llm_rewrite_service if graph_llm_router_enabled else None,
+            llm_intent_service=self.llm_intent_service if graph_llm_router_enabled else None,
+            llm_sop_slot_service=self.llm_sop_slot_service,
+            final_reply_service=self.llm_final_reply_service,
+            rag_service=self.rag_service,
+            language_detection_enabled=self.language_detection_enabled,
+            language_detection_min_confidence=self.language_detection_min_confidence,
+            tenant_persona_default_language=self.tenant_persona_default_language,
+            tenant_supported_languages=self.tenant_supported_languages,
+            language_fallback=self.language_fallback,
+            language_persist_to_slot_memory=self.language_persist_to_slot_memory,
+            llm_router_mode=self.llm_router_mode,
+            llm_router_min_confidence=self.llm_router_min_confidence,
+            llm_router_fallback_to_deterministic=self.llm_router_fallback_to_deterministic,
+            llm_sop_slot_enabled=self.llm_sop_slot_enabled,
+            llm_sop_slot_min_confidence=self.llm_sop_slot_min_confidence,
+            llm_sop_slot_fallback_to_deterministic=self.llm_sop_slot_fallback_to_deterministic,
+            llm_final_reply_enabled=self.llm_final_reply_enabled,
+        )
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
         if self.transactional_repository:
@@ -231,27 +252,10 @@ class GatewayService:
         )
         active_state = graph_state
         try:
-            routed_state = await self._prepare_route_state(graph_state)
-            routed_state = self._apply_language_policy(routed_state)
-            active_state = routed_state
-            if self._should_run_sop_slot_extraction(routed_state):
-                routed_state = await self._run_sop_slot_extraction(routed_state)
-                active_state = routed_state
-            if self.llm_rewrite_shadow_enabled and self.llm_rewrite_service:
-                routed_state["llm_rewrite_result"] = await self._run_rewrite_shadow(routed_state)
-            if self.llm_intent_shadow_enabled and self.llm_intent_service:
-                routed_state["llm_intent_result"] = await self._run_intent_shadow(routed_state)
-            if self.rag_service and routed_state.get("route") == "faq":
-                # Conservative lazy-retrieve transition: pre-route with pure deterministic nodes,
-                # then only prefetch DB-backed RAG for FAQ traffic before invoking the full graph.
-                # The full graph still re-runs rewrite/router from the entry point on invoke.
-                # This prevents SOP / backend-fact / handoff / clarification traffic from querying knowledge_documents.
-                routed_state["rag_context"] = await self.rag_service.retrieve(routed_state)
-            result = self.workflow_graph.invoke(
-                routed_state,
+            result = await self.workflow_graph.ainvoke(
+                graph_state,
                 config={"configurable": {"thread_id": graph_thread_id}},
             )
-            result = await self._run_final_reply(result)
             await self._mark_checkpoint_run_succeeded(checkpoint_run_id, result)
             return result
         except Exception as exc:

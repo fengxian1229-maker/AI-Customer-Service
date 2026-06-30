@@ -59,6 +59,9 @@ class LLMRouterInput(TypedDict, total=False):
     tenant_id: str
     conversation_id: str
     raw_user_input: str
+    rewritten_question: str | None
+    normalized_query: str | None
+    reply_language: str | None
     deterministic_rewrite_result: dict[str, Any] | None
     deterministic_intent_result: dict[str, Any] | None
     deterministic_route: str | None
