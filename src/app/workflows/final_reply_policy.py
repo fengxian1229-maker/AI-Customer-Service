@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.language_policy import detect_language_deterministic, normalize_language_code
+
 UNVERIFIED_BACKEND_FACT_PHRASES = (
     "已到账",
     "到账成功",
@@ -20,14 +22,67 @@ UNVERIFIED_BACKEND_FACT_PHRASES = (
     "refunded",
 )
 
-MISSING_SLOT_REQUIRED_PHRASES = {
-    "account_or_phone": ("用户名", "注册手机号", "账号", "手机号", "account", "phone"),
-    "deposit_screenshot": ("存款付款截图", "付款截图", "充值截图", "screenshot", "proof"),
-    "withdrawal_screenshot": ("提款截图", "提款申请截图", "withdrawal screenshot", "screenshot"),
-    "amount": ("金额", "amount"),
-    "order_id": ("订单", "单号", "order"),
-    "payment_channel": ("通道", "渠道", "channel"),
-    "pending_reply_identity": ("用户名", "注册手机号", "邮箱", "识别资料", "account", "phone", "email"),
+SEMANTIC_ALIASES = {
+    "account_or_phone": {
+        "zh-Hans": ("用户名", "注册手机号", "账号", "手机号"),
+        "zh-Hant": ("用戶名", "註冊手機號", "帳號", "手機號"),
+        "en": ("username", "registered phone number", "account", "phone"),
+        "es": ("usuario", "teléfono registrado", "telefono registrado", "cuenta"),
+        "tl": ("username", "rehistradong numero", "account"),
+        "th": ("ชื่อผู้ใช้", "เบอร์โทรที่ลงทะเบียน", "บัญชี"),
+        "my": ("username", "registered phone", "account"),
+        "ms": ("nama pengguna", "nombor telefon berdaftar", "akaun"),
+    },
+    "deposit_screenshot": {
+        "zh-Hans": ("存款付款截图", "付款截图", "充值截图"),
+        "zh-Hant": ("存款付款截圖", "付款截圖", "儲值截圖"),
+        "en": ("deposit screenshot", "payment screenshot", "proof of payment", "payment proof"),
+        "es": ("captura de depósito", "captura de deposito", "comprobante de pago"),
+        "tl": ("screenshot ng deposito", "proof of payment"),
+        "th": ("ภาพหน้าจอการฝากเงิน", "หลักฐานการชำระเงิน"),
+        "my": ("deposit screenshot", "payment proof"),
+        "ms": ("tangkapan skrin deposit", "bukti pembayaran"),
+    },
+    "withdrawal_screenshot": {
+        "zh-Hans": ("提款截图", "提款申请截图"),
+        "zh-Hant": ("提款截圖", "提款申請截圖"),
+        "en": ("withdrawal screenshot", "withdrawal request screenshot"),
+        "es": ("captura de retiro", "solicitud de retiro"),
+        "tl": ("screenshot ng withdrawal", "withdrawal request screenshot"),
+        "th": ("ภาพหน้าจอการถอนเงิน", "คำขอถอนเงิน"),
+        "my": ("withdrawal screenshot",),
+        "ms": ("tangkapan skrin pengeluaran",),
+    },
+    "backend_waiting_notice": {
+        "zh-Hans": ("请稍等", "后台", "查询", "确认"),
+        "zh-Hant": ("請稍等", "後台", "查詢", "確認"),
+        "en": ("please wait", "checking", "confirm", "backend"),
+        "es": ("espera", "verificando", "confirmar"),
+        "tl": ("maghintay", "chine-check", "kumpirma"),
+        "th": ("รอสักครู่", "ตรวจสอบ", "ยืนยัน"),
+        "my": ("please wait", "checking"),
+        "ms": ("sila tunggu", "semak", "sahkan"),
+    },
+    "human_handoff_notice": {
+        "zh-Hans": ("转接真人客服", "真人客服"),
+        "zh-Hant": ("轉接真人客服", "真人客服"),
+        "en": ("human agent", "live agent", "support agent"),
+        "es": ("agente humano", "soporte"),
+        "tl": ("human agent", "support agent"),
+        "th": ("เจ้าหน้าที่", "พนักงาน"),
+        "my": ("human agent", "support"),
+        "ms": ("ejen manusia", "sokongan"),
+    },
+    "pending_reply_identity": {
+        "zh-Hans": ("用户名", "注册手机号", "邮箱", "识别资料"),
+        "zh-Hant": ("用戶名", "註冊手機號", "信箱", "識別資料"),
+        "en": ("username", "registered phone number", "email", "identity"),
+        "es": ("usuario", "teléfono registrado", "correo", "identificación"),
+        "tl": ("username", "rehistradong numero", "email"),
+        "th": ("ชื่อผู้ใช้", "เบอร์โทรที่ลงทะเบียน", "อีเมล"),
+        "my": ("username", "registered phone", "email"),
+        "ms": ("nama pengguna", "nombor telefon berdaftar", "emel"),
+    },
 }
 
 BACKEND_WAITING_FORBIDDEN_PROMISES = (
@@ -57,6 +112,8 @@ def build_reply_plan(
     kind: str,
     fallback_text: str,
     must_say: list[str] | None = None,
+    must_say_exact: list[str] | None = None,
+    semantic_required_items: list[str] | None = None,
     must_not_say: list[str] | None = None,
     missing_slots: list[str] | None = None,
     allowed_facts: list[str] | None = None,
@@ -67,6 +124,8 @@ def build_reply_plan(
         "kind": kind,
         "fallback_text": fallback_text,
         "must_say": list(must_say or []),
+        "must_say_exact": list(must_say_exact or []),
+        "semantic_required_items": list(semantic_required_items or []),
         "must_not_say": list(must_not_say or []),
         "missing_slots": list(missing_slots or []),
         "allowed_facts": list(allowed_facts or []),
@@ -108,9 +167,25 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
         return violations
 
     lowered = text.lower()
-    for phrase in plan.get("must_say") or []:
+    reply_language = _reply_language(state)
+    output_language = normalize_language_code(output.get("language"))
+    if reply_language != "unknown" and output_language != reply_language:
+        violations.append("language_mismatch")
+
+    fallback_language = detect_language_deterministic(plan.get("fallback_text") or state.get("response_text_fallback")).get("detected_language")
+    should_enforce_legacy_must_say = reply_language in {"unknown", fallback_language}
+
+    for phrase in plan.get("must_say_exact") or []:
         if phrase and str(phrase).lower() not in lowered:
-            violations.append("missing_required_phrase")
+            violations.append("missing_exact_phrase")
+    if should_enforce_legacy_must_say:
+        for phrase in plan.get("must_say") or []:
+            if phrase and str(phrase).lower() not in lowered:
+                violations.append("missing_required_phrase")
+
+    for item in plan.get("semantic_required_items") or []:
+        if not _contains_semantic_item(lowered, str(item), reply_language):
+            violations.append(f"missing_semantic_{item}")
     for phrase in plan.get("must_not_say") or []:
         if phrase and str(phrase).lower() in lowered:
             violations.append("forbidden_phrase")
@@ -121,8 +196,7 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
 
     if plan.get("kind") == "ask_missing_slots":
         for slot in plan.get("missing_slots") or state.get("missing_slots") or []:
-            aliases = MISSING_SLOT_REQUIRED_PHRASES.get(str(slot), (str(slot),))
-            if not any(alias.lower() in lowered for alias in aliases):
+            if not _contains_semantic_item(lowered, str(slot), reply_language):
                 violations.append(f"missing_slot_{slot}")
 
     if state.get("workflow_stage") in {"waiting_backend", "backend_querying"} or plan.get("kind") in {
@@ -142,3 +216,26 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
             violations.append("staff_reply_key_fact_missing")
 
     return sorted(set(violations))
+
+
+def _reply_language(state: dict[str, Any]) -> str:
+    language = normalize_language_code(state.get("reply_language"))
+    if language != "unknown":
+        return language
+    tenant = state.get("tenant_persona") or {}
+    return normalize_language_code(tenant.get("default_language"))
+
+
+def _contains_semantic_item(lowered_text: str, item: str, reply_language: str) -> bool:
+    aliases_by_language = SEMANTIC_ALIASES.get(item)
+    if not aliases_by_language:
+        return item.lower() in lowered_text
+    languages = [reply_language]
+    if reply_language not in {"en", "unknown"}:
+        languages.append("en")
+    languages.extend(["zh-Hans", "zh-Hant"])
+    for language in languages:
+        for alias in aliases_by_language.get(language, ()):
+            if alias and alias.lower() in lowered_text:
+                return True
+    return False

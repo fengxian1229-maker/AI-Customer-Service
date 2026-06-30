@@ -8,6 +8,7 @@ from app.llm.guardrails import contains_backend_fact_signal, validate_router_dec
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.faq_outbound_plan import build_faq_outbound_plan_from_rag_context, faq_plan_to_outbound_rows
+from app.services.language_policy import normalize_language_code, parse_supported_languages, resolve_language_policy
 from app.services.message_history import build_customer_message_from_inbound
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
 from app.workflows.command_contracts import CommandType
@@ -73,6 +74,12 @@ class GatewayService:
         llm_final_reply_enabled: bool = False,
         llm_final_reply_min_confidence: float = 0.70,
         llm_final_reply_fallback_enabled: bool = True,
+        language_detection_enabled: bool = True,
+        language_detection_min_confidence: float = 0.70,
+        tenant_persona_default_language: str = "zh-Hans",
+        tenant_supported_languages: str | list[str] = "zh-Hans,zh-Hant,en,es,tl,th,my,ms",
+        language_fallback: str = "zh-Hans",
+        language_persist_to_slot_memory: bool = True,
         recent_message_limit: int = 10,
     ) -> None:
         self.inbound_repository = inbound_repository
@@ -110,6 +117,12 @@ class GatewayService:
         self.llm_final_reply_enabled = bool(llm_final_reply_enabled)
         self.llm_final_reply_min_confidence = float(llm_final_reply_min_confidence)
         self.llm_final_reply_fallback_enabled = bool(llm_final_reply_fallback_enabled)
+        self.language_detection_enabled = bool(language_detection_enabled)
+        self.language_detection_min_confidence = float(language_detection_min_confidence)
+        self.tenant_persona_default_language = normalize_language_code(tenant_persona_default_language)
+        self.tenant_supported_languages = parse_supported_languages(tenant_supported_languages)
+        self.language_fallback = normalize_language_code(language_fallback)
+        self.language_persist_to_slot_memory = bool(language_persist_to_slot_memory)
         self.recent_message_limit = recent_message_limit
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
@@ -219,6 +232,7 @@ class GatewayService:
         active_state = graph_state
         try:
             routed_state = await self._prepare_route_state(graph_state)
+            routed_state = self._apply_language_policy(routed_state)
             active_state = routed_state
             if self._should_run_sop_slot_extraction(routed_state):
                 routed_state = await self._run_sop_slot_extraction(routed_state)
@@ -337,6 +351,10 @@ class GatewayService:
             "thread_id": graph_state.get("thread_id"),
             "raw_user_input": graph_state.get("raw_user_input"),
             "event_type": graph_state.get("event_type"),
+            "detected_language": graph_state.get("detected_language"),
+            "conversation_language": graph_state.get("conversation_language"),
+            "reply_language": graph_state.get("reply_language"),
+            "language_result": graph_state.get("language_result"),
             "active_workflow": graph_state.get("active_workflow"),
             "workflow_stage": graph_state.get("workflow_stage"),
             "slot_memory": graph_state.get("slot_memory"),
@@ -820,6 +838,52 @@ class GatewayService:
             "final_reply_result": {"status": "fallback", "fallback_reason": "missing_service"},
         }
 
+    def _apply_language_policy(self, graph_state: dict) -> dict:
+        if not self.language_detection_enabled:
+            supported = list(self.tenant_supported_languages)
+            fallback = self._default_reply_language()
+            slot_memory = dict(graph_state.get("slot_memory") or {})
+            if self.language_persist_to_slot_memory:
+                slot_memory["last_reply_language"] = fallback
+            language_result = {
+                "detected_language": "unknown",
+                "language_confidence": 0.0,
+                "language_source": "tenant_default",
+                "conversation_language": fallback,
+                "reply_language": fallback,
+                "supported_languages": supported,
+                "reason": "language detection disabled",
+            }
+        else:
+            state_for_policy = {**graph_state, "slot_memory": dict(graph_state.get("slot_memory") or {})}
+            language_result = resolve_language_policy(
+                state_for_policy,
+                tenant_default_language=self.tenant_persona_default_language,
+                supported_languages=self.tenant_supported_languages,
+                min_confidence=self.language_detection_min_confidence,
+                fallback_language=self.language_fallback,
+                persist_to_slot_memory=self.language_persist_to_slot_memory,
+            )
+            slot_memory = state_for_policy.get("slot_memory") or {}
+        return {
+            **graph_state,
+            "slot_memory": slot_memory,
+            "detected_language": language_result.get("detected_language"),
+            "language_confidence": language_result.get("language_confidence"),
+            "language_source": language_result.get("language_source"),
+            "conversation_language": language_result.get("conversation_language"),
+            "reply_language": language_result.get("reply_language"),
+            "supported_languages": list(language_result.get("supported_languages") or self.tenant_supported_languages),
+            "language_result": language_result,
+        }
+
+    def _default_reply_language(self) -> str:
+        for candidate in (self.tenant_persona_default_language, self.language_fallback):
+            normalized = normalize_language_code(candidate)
+            if normalized != "unknown" and normalized in self.tenant_supported_languages:
+                return normalized
+        return self.tenant_supported_languages[0] if self.tenant_supported_languages else "zh-Hans"
+
     def _router_checkpoint_summary(self, router: dict, graph_state: dict) -> dict:
         keys = (
             "provider",
@@ -1050,7 +1114,7 @@ class GatewayService:
                 inbound_event_id=inbound_event_id,
                 platform="JUE999",
                 channel_type=graph_state.get("channel_type") or "livechat",
-                language=((graph_state.get("rewrite_result") or {}).get("language")) or "zh",
+                language=graph_state.get("reply_language") or self._default_reply_language(),
             )
             rows = faq_plan_to_outbound_rows(
                 plan,

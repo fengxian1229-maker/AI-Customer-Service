@@ -76,6 +76,17 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
         "checkpoint_run_repository": checkpoint_run_repository,
         "rag_service": rag_service,
     }
+    if settings is not None:
+        service_kwargs.update(
+            {
+                "language_detection_enabled": getattr(settings, "language_detection_enabled", True),
+                "language_detection_min_confidence": getattr(settings, "language_detection_min_confidence", 0.70),
+                "tenant_persona_default_language": getattr(settings, "tenant_persona_default_language", "zh-Hans"),
+                "tenant_supported_languages": getattr(settings, "tenant_supported_languages", "zh-Hans,zh-Hant,en,es,tl,th,my,ms"),
+                "language_fallback": getattr(settings, "language_fallback", "zh-Hans"),
+                "language_persist_to_slot_memory": getattr(settings, "language_persist_to_slot_memory", True),
+            }
+        )
     if any(
         [
             llm_provider is not None,
@@ -125,7 +136,8 @@ def _build_final_reply_service(settings):
         min_confidence=getattr(settings, "llm_final_reply_min_confidence", 0.70),
         fallback_enabled=getattr(settings, "llm_final_reply_fallback_enabled", True),
         tenant_persona={
-            "default_language": getattr(settings, "tenant_persona_default_language", "zh"),
+            "default_language": getattr(settings, "tenant_persona_default_language", "zh-Hans"),
+            "supported_languages": getattr(settings, "tenant_supported_languages", "zh-Hans,zh-Hant,en,es,tl,th,my,ms"),
             "tone": getattr(settings, "tenant_persona_tone", "polite"),
             "assistant_name": getattr(settings, "tenant_persona_assistant_name", None),
             "brand_name": getattr(settings, "tenant_persona_brand_name", None),

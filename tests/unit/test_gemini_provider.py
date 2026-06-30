@@ -71,7 +71,7 @@ def test_gemini_provider_intent_returns_shadow_output(monkeypatch):
             captured["intent_payload"] = payload
             return {
                 "intent": "withdrawal_missing",
-                "route": "faq",
+                "route": "sop",
                 "confidence": 0.42,
                 "reason": "Model suspects FAQ, but this is shadow only.",
                 "sop_name": None,
@@ -109,7 +109,7 @@ def test_gemini_provider_intent_returns_shadow_output(monkeypatch):
     assert captured["intent_method"] == "json_schema"
     assert result["provider"] == "gemini"
     assert result["mode"] == "shadow"
-    assert result["route"] == "faq"
+    assert result["route"] == "sop"
     assert captured["intent_payload"][0][0] == "system"
     assert "Do not generate tool calls or external commands." in captured["intent_payload"][0][1]
     assert captured["intent_payload"][1][0] == "human"
@@ -179,7 +179,7 @@ def test_gemini_provider_clamps_confidence(monkeypatch):
             "reason": "too high",
         },
         {
-            "intent": "faq_general",
+            "intent": "deposit_howto",
             "route": "faq",
             "confidence": -0.5,
             "reason": "too low",

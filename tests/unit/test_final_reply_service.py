@@ -63,7 +63,7 @@ def test_final_reply_service_uses_llm_text_when_guardrails_pass():
 
     assert result["final_response_text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
     assert result["final_reply_result"]["status"] == "accepted"
-    assert provider.calls[0]["tenant_persona"]["default_language"] == "zh"
+    assert provider.calls[0]["tenant_persona"]["default_language"] == "zh-Hans"
 
 
 def test_final_reply_service_falls_back_when_provider_raises():

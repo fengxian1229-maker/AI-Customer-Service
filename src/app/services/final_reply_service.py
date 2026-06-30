@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.language_policy import normalize_language_code, parse_supported_languages
 from app.workflows.final_reply_policy import accepted_result, fallback_result, validate_final_reply_output
 from app.workflows.slot_extractors import normalize_text
 
@@ -21,12 +22,14 @@ class FinalReplyService:
         self.min_confidence = float(min_confidence)
         self.fallback_enabled = bool(fallback_enabled)
         self.tenant_persona = {
-            "default_language": "zh",
+            "default_language": "zh-Hans",
             "tone": "polite",
             "assistant_name": None,
             "brand_name": None,
             **dict(tenant_persona or {}),
         }
+        self.tenant_persona["default_language"] = normalize_language_code(self.tenant_persona.get("default_language"))
+        self.supported_languages = parse_supported_languages(self.tenant_persona.get("supported_languages"))
 
     async def compose(self, state: dict[str, Any]) -> dict[str, Any]:
         fallback_text = normalize_text(state.get("response_text_fallback") or state.get("response_text"))
@@ -97,6 +100,13 @@ class FinalReplyService:
             "missing_slots": list(state.get("missing_slots") or []),
             "sop_action": state.get("sop_action"),
             "rag_result": state.get("rag_result"),
+            "detected_language": state.get("detected_language"),
+            "language_confidence": state.get("language_confidence"),
+            "language_source": state.get("language_source"),
+            "conversation_language": state.get("conversation_language"),
+            "reply_language": state.get("reply_language"),
+            "language_result": state.get("language_result"),
+            "supported_languages": list(state.get("supported_languages") or self.supported_languages),
             "response_text_fallback": fallback_text,
             "reply_plan": dict(state.get("reply_plan") or {}),
             "tenant_persona": dict(self.tenant_persona),

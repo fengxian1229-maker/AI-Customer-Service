@@ -346,6 +346,34 @@ def test_gateway_service_uses_final_reply_text_for_outbound_message():
     assert result["graph_state"]["commands"][0]["payload"]["text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
 
 
+def test_gateway_language_policy_file_received_preserves_last_user_language():
+    class FileConversationRepository(FakeConversationRepository):
+        async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
+            conversation = await super().get_or_create(chat_id, thread_id)
+            conversation["slot_memory"] = {"last_user_language": "tl"}
+            conversation["active_workflow"] = "deposit_missing"
+            conversation["workflow_stage"] = "waiting_backend"
+            return conversation
+
+    event = make_inbound_event()
+    event.standard_event_type = "FILE_RECEIVED"
+    event.event_type = "file"
+    event.payload_json = {"event": {"type": "file", "url": "https://cdn.example/proof.png"}}
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FileConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+    )
+
+    result = asyncio.run(service.process_event(17, event))
+
+    assert result["graph_state"]["detected_language"] == "unknown"
+    assert result["graph_state"]["reply_language"] == "tl"
+    assert result["graph_state"]["slot_memory"]["last_user_language"] == "tl"
+    assert result["graph_state"]["slot_memory"]["last_reply_language"] == "tl"
+
+
 def test_gateway_splits_livechat_outbox_and_external_commands():
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
@@ -645,7 +673,7 @@ def test_gateway_service_faq_authoritative_calls_llm_before_keyword_router_and_u
             "rewritten_question": "mi deposito no llegó",
             "normalized_query": "deposit not arrived",
             "language": "es",
-            "intent": "faq_general",
+            "intent": "deposit_howto",
             "route": "faq",
             "confidence": 0.95,
             "sop_name": None,
@@ -923,6 +951,53 @@ def test_gateway_service_faq_authoritative_renders_multimodal_answer_blocks_to_o
     }
     assert result["outbound_messages"][3]["payload_json"] == {"menu_key": "deposit_menu"}
     assert len({message["dedup_key"] for message in result["outbound_messages"]}) == 4
+
+
+def test_gateway_faq_multiblock_uses_reply_language_for_outbound_plan(monkeypatch):
+    import app.services.gateway as gateway_module
+
+    captured = {}
+
+    def fake_build_plan_from_rag_context(rag_context, **kwargs):
+        captured["language"] = kwargs["language"]
+        return {
+            "source": "faq_answer_blocks",
+            "dry_run": True,
+            "message_count": 1,
+            "messages": [
+                {
+                    "block_index": 0,
+                    "message_kind": "text",
+                    "command_type": "livechat.send_text",
+                    "dry_run": True,
+                    "dedup_key": "dedup",
+                    "payload": {"text": "FAQ text"},
+                    "warnings": [],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(gateway_module, "build_faq_outbound_plan_from_rag_context", fake_build_plan_from_rag_context)
+    service = GatewayService()
+    event = make_inbound_event()
+
+    rows = service._build_outbound_messages(
+        77,
+        event,
+        "livechat:chat-1",
+        {
+            "tenant_id": "default",
+            "channel_type": "livechat",
+            "route": "faq",
+            "reply_language": "tl",
+            "rewrite_result": {"language": "zh-Hans"},
+            "rag_context": {"answer_blocks": [{"type": "text", "text": "FAQ text"}]},
+            "commands": [],
+        },
+    )
+
+    assert captured["language"] == "tl"
+    assert rows[0]["payload_json"]["text"] == "FAQ text"
 
 
 def test_gateway_service_guarded_authoritative_uses_llm_sop_route():

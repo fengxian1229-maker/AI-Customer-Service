@@ -137,6 +137,7 @@ def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> 
             kind="human_handoff",
             fallback_text="我会为你转接真人客服继续协助。",
             must_say=["转接真人客服"],
+            semantic_required_items=["human_handoff_notice"],
             must_not_say=["已接入", "马上处理", "已到账", "已完成"],
             allowed_facts=["客户请求真人客服", "系统将提出转接请求"],
         ),
@@ -154,6 +155,7 @@ def _waiting_reply_plan(kind: str, fallback_text: str) -> dict[str, Any]:
         kind=kind,
         fallback_text=fallback_text,
         must_say=[],
+        semantic_required_items=["backend_waiting_notice"],
         must_not_say=["已到账", "已完成", "保证", "马上到账", "已处理"],
         allowed_facts=[fallback_text],
     )

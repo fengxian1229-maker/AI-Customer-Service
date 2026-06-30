@@ -4,6 +4,7 @@ from app.graph.state import GraphState
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
 from app.services.rag import answer_from_rag_context, answer_from_static_knowledge
+from app.services.language_policy import detect_language_deterministic
 from app.workflows.slot_extractors import (
     attachment_urls,
     extract_amount,
@@ -38,6 +39,13 @@ def build_graph_state_from_event(
         "thread_id": event.thread_id,
         "raw_user_input": raw_input,
         "rewritten_question": None,
+        "detected_language": None,
+        "language_confidence": None,
+        "language_source": None,
+        "conversation_language": None,
+        "reply_language": None,
+        "supported_languages": [],
+        "language_result": None,
         "event_type": event.standard_event_type,
         "attachments": _extract_attachments(payload, event.standard_event_type),
         "status": conversation.get("status") or "AI_ACTIVE",
@@ -72,12 +80,16 @@ def rewrite_question_node(state: GraphState) -> GraphState:
         return state
     raw = normalize_text(state.get("raw_user_input"))
     identity = extract_identity(raw)
+    language = detect_language_deterministic(raw)
     return {
         **state,
         "rewritten_question": raw,
         "rewrite_result": {
             "rewritten_question": raw,
-            "language": _detect_language(raw),
+            "language": language["detected_language"],
+            "detected_language": language["detected_language"],
+            "language_confidence": language["language_confidence"],
+            "language_source": language["language_source"],
             "mentioned_entities": {
                 "account_or_phone": identity["value"] if identity else None,
                 "transaction_ref": None,
@@ -237,6 +249,7 @@ def human_handoff_node(state: GraphState) -> GraphState:
             kind="human_handoff",
             fallback_text="我会为你转接真人客服继续协助。",
             must_say=["转接真人客服"],
+            semantic_required_items=["human_handoff_notice"],
             must_not_say=["已接入", "马上处理", "已处理", "已到账", "已完成"],
             allowed_facts=["客户需要真人客服", "系统将提出转接请求"],
         ),
@@ -253,6 +266,7 @@ def emotion_care_node(state: GraphState) -> GraphState:
             kind="emotion_care",
             fallback_text="我理解你现在很着急。我会先尽力说明处理方式；如果你愿意，也可以直接告诉我需要转接真人客服。",
             must_say=["理解", "转接真人客服"],
+            semantic_required_items=["human_handoff_notice"],
             must_not_say=["已到账", "已完成", "保证"],
             allowed_facts=["客户情绪较急", "可以请求转接真人客服"],
         ),
@@ -382,13 +396,7 @@ def _extract_attachments(payload: dict[str, Any], event_type: str) -> list[dict[
 
 
 def _detect_language(text: str) -> str:
-    if any("\u4e00" <= char <= "\u9fff" for char in text):
-        return "zh"
-    if any(token in text.lower() for token in ("depósito", "retiro", "contraseña", "usuario")):
-        return "es"
-    if text:
-        return "unknown"
-    return "unknown"
+    return detect_language_deterministic(text)["detected_language"]
 
 
 def _is_deposit_missing(text: str) -> bool:

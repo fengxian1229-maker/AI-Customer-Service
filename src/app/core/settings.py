@@ -70,7 +70,12 @@ class Settings(BaseSettings):
     llm_final_reply_enabled: bool = False
     llm_final_reply_min_confidence: float = 0.70
     llm_final_reply_fallback_enabled: bool = True
-    tenant_persona_default_language: str = "zh"
+    language_detection_enabled: bool = True
+    language_detection_min_confidence: float = 0.70
+    tenant_persona_default_language: str = "zh-Hans"
+    tenant_supported_languages: str = "zh-Hans,zh-Hant,en,es,tl,th,my,ms"
+    language_fallback: str = "zh-Hans"
+    language_persist_to_slot_memory: bool = True
     tenant_persona_tone: str = "polite"
     tenant_persona_assistant_name: str | None = None
     tenant_persona_brand_name: str | None = None

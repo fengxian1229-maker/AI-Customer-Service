@@ -125,6 +125,13 @@ class LLMFinalReplyInput(TypedDict, total=False):
     missing_slots: list[str]
     sop_action: str | None
     rag_result: dict[str, Any] | None
+    detected_language: str | None
+    language_confidence: float | None
+    language_source: str | None
+    conversation_language: str | None
+    reply_language: str | None
+    language_result: dict[str, Any] | None
+    supported_languages: list[str]
     response_text_fallback: str
     reply_plan: dict[str, Any]
     tenant_persona: dict[str, Any]

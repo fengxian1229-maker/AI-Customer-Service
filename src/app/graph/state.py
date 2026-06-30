@@ -10,6 +10,13 @@ class GraphState(TypedDict, total=False):
 
     raw_user_input: str
     rewritten_question: str | None
+    detected_language: str | None
+    language_confidence: float | None
+    language_source: str | None
+    conversation_language: str | None
+    reply_language: str | None
+    supported_languages: list[str]
+    language_result: dict[str, Any] | None
     rewrite_result: dict[str, Any] | None
     llm_rewrite_result: dict[str, Any] | None
     llm_router_result: dict[str, Any] | None
