@@ -16,6 +16,8 @@ from app.schemas.events import InboundEvent
 from app.services.llm_first_gateway import LLMFirstGatewayService
 from app.services.rag import RagService
 
+GatewayService = LLMFirstGatewayService
+
 
 async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off", settings=None) -> dict:
     inbound_repository, service, managed_checkpointer = _build_gateway_dependencies(pool, checkpoint_mode, settings)
@@ -100,7 +102,7 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
                 "llm_sop_slot_fallback_to_deterministic": getattr(settings, "llm_sop_slot_fallback_to_deterministic", True),
             }
         )
-    service = LLMFirstGatewayService(**service_kwargs)
+    service = GatewayService(**service_kwargs)
     return inbound_repository, service, managed_checkpointer
 
 

@@ -103,7 +103,7 @@ def test_workflow_graph_rag_route_returns_knowledge_answer_without_placeholder_c
             "conversation_id": "livechat:chat-1",
             "chat_id": "chat-1",
             "thread_id": "thread-1",
-            "raw_user_input": "bonus rules",
+            "raw_user_input": "如何充值",
             "event_type": "MESSAGE_CREATED",
             "attachments": [],
             "slot_memory": {},
@@ -112,14 +112,14 @@ def test_workflow_graph_rag_route_returns_knowledge_answer_without_placeholder_c
         }
     )
 
-    assert result["intent_result"]["intent"] == "faq_general"
+    assert result["intent_result"]["intent"] == "deposit_howto"
     assert result["route"] == "faq"
     assert result["rag_result"]["matched"] is True
-    assert "奖金规则" in result["response_text"]
+    assert "充值" in result["response_text"]
     assert [str(command["type"]) for command in result["commands"]] == ["livechat.send_text"]
 
 
-def test_workflow_graph_rag_route_returns_safe_fallback_without_match():
+def test_workflow_graph_non_canonical_question_asks_for_clarification_without_rag():
     graph = build_workflow_graph()
 
     result = graph.invoke(
@@ -138,7 +138,7 @@ def test_workflow_graph_rag_route_returns_safe_fallback_without_match():
         }
     )
 
-    assert result["route"] == "faq"
-    assert result["rag_result"]["matched"] is False
-    assert "暂时没有在知识库中找到" in result["response_text"]
+    assert result["route"] == "clarification"
+    assert result.get("rag_result") is None
+    assert "请补充" in result["response_text"]
     assert [str(command["type"]) for command in result["commands"]] == ["livechat.send_text"]

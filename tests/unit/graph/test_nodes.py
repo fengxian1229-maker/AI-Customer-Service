@@ -80,7 +80,7 @@ def test_intent_router_node_routes_bot66tornado_samples():
         ("Nunca me pagaron el retiro", "withdrawal_missing", "sop"),
         ("No puedo retirar", "withdrawal_blocked_or_rollover", "faq_then_sop"),
         ("Tengo un caso anterior", "pending_reply_lookup", "sop"),
-        ("no veo ningun menu", "menu_help", "faq"),
+        ("no veo ningun menu", "clarification_needed", "clarification"),
         ("Todo el tiempo lo mismo", "service_frustration", "human_handoff"),
         ("Problemas técnicos del juego", "unsupported_concrete_issue", "human_handoff"),
     ]
@@ -103,10 +103,25 @@ def test_intent_router_node_does_not_emit_sop_slots():
 
 
 def test_transaction_issue_must_not_route_to_faq():
-    text = "Nunca me pagaron el retiro"
-    result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
+    for text in ("我充值了没到账", "提款没到账", "无法提款", "流水不够"):
+        result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
 
-    assert result["route"] != "faq"
+        assert result["route"] != "faq"
+
+
+def test_canonical_howto_questions_route_to_faq():
+    cases = [
+        ("如何充值", "deposit_howto"),
+        ("如何提款", "withdrawal_howto"),
+        ("忘记密码", "forgot_password_howto"),
+        ("如何上传截图", "screenshot_upload_howto"),
+    ]
+
+    for text, expected_intent in cases:
+        result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
+
+        assert result["route"] == "faq"
+        assert result["intent_result"]["intent"] == expected_intent
 
 
 def test_howto_issue_must_not_route_to_sop():

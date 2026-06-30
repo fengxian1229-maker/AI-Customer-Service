@@ -346,7 +346,7 @@ def test_gateway_service_rag_faq_writes_outbound_without_external_command():
         rag_service=FakeRagService(),
     )
     event = make_inbound_event()
-    event.payload_json = {"event": {"type": "message", "text": "bonus rules"}}
+    event.payload_json = {"event": {"type": "message", "text": "how to deposit"}}
 
     result = asyncio.run(service.process_event(13, event))
 
@@ -493,7 +493,7 @@ def test_gateway_service_does_not_prefetch_rag_context_for_human_handoff_route()
 
 def test_gateway_service_does_not_prefetch_rag_context_for_backend_fact_guard():
     graph = RecordingGraph()
-    from app.services.rag import BACKEND_FACT_FALLBACK_ANSWER, RagService
+    from app.services.rag import RagService
 
     class FakeKnowledgeRepository:
         def __init__(self) -> None:
@@ -518,8 +518,7 @@ def test_gateway_service_does_not_prefetch_rag_context_for_backend_fact_guard():
 
     state, _config = graph.calls[0]
     assert repository.calls == []
-    assert state["rag_context"]["fallback_reason"] == "backend_fact"
-    assert state["rag_context"]["answer"] == BACKEND_FACT_FALLBACK_ANSWER
+    assert state.get("rag_context") is None
     assert result["graph_state"]["response_text"] == "ok"
 
 
@@ -1180,7 +1179,7 @@ def test_gateway_service_guarded_authoritative_hard_guards_active_workflow_human
     )
     backend_result = asyncio.run(backend_service.process_event(31, make_event_with_text("withdrawal status and balance")))
     assert backend_result["graph_state"]["route"] != "faq"
-    assert backend_result["graph_state"]["llm_router_result"]["fallback_reason"] == "hard_guard"
+    assert backend_result["graph_state"]["llm_router_result"]["fallback_reason"] == "backend_fact_guard"
 
 
 def test_gateway_service_deterministic_router_mode_does_not_call_llm():

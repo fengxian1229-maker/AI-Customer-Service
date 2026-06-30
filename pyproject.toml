@@ -28,6 +28,7 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["tests"]
 markers = [
     "unit: unit tests that do not require external services",
     "integration: integration tests that may require configured services",

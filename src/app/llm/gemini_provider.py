@@ -38,13 +38,13 @@ Return only structured JSON matching the schema."""
 
 FAQ_KNOWLEDGE_TARGETS = """FAQ knowledge targets. For FAQ route, choose the closest target and set intent and faq_query exactly as specified unless the question is genuinely outside the list:
 
-1. 充值方式说明
+1. 充值教程
    - route: faq
    - intent: deposit_howto
    - faq_query: 怎么存款
    - Use for: how to add money, fund account, put money into account, start playing after adding money, recharge, top up, cash in, deposit tutorial.
 
-2. 提款方式说明
+2. 提款教程
    - route: faq
    - intent: withdrawal_howto
    - faq_query: 如何提款
@@ -61,30 +61,6 @@ FAQ_KNOWLEDGE_TARGETS = """FAQ knowledge targets. For FAQ route, choose the clos
    - intent: screenshot_upload_howto
    - faq_query: 上传截图
    - Use for: how to upload/send screenshot or proof image.
-
-5. 流水要求说明
-   - route: faq
-   - intent: rollover_explanation
-   - faq_query: 流水是什么
-   - Use for: what is rollover/流水, explanation of wagering/turnover requirements.
-
-6. 菜单导航帮助
-   - route: faq
-   - intent: menu_help
-   - faq_query: 菜单在哪里
-   - Use for: cannot find menu, where is the menu, where to find deposit/withdraw/customer-service entry.
-
-7. 奖金规则说明
-   - route: faq
-   - intent: faq_general
-   - faq_query: 奖金规则
-   - Use for: bonus rules, promotion rules, reward explanation.
-
-8. 账户安全说明
-   - route: faq
-   - intent: faq_general
-   - faq_query: 账户安全
-   - Use for: account safety, security reminders, account protection instructions.
 """
 
 ALLOWED_INTENT_CONTRACT = """Allowed intents. The intent field must be exactly one of these values. Do not invent, translate, rename, or paraphrase intent names:
@@ -136,13 +112,13 @@ Allowed routes. The route field must be exactly one of these values:
 {FAQ_KNOWLEDGE_TARGETS}
 
 Routing rules:
-- For ordinary how-to, manual, guide, navigation, or concept explanation questions, use route: faq.
+- For ordinary how-to, manual, guide, or instruction questions that match the FAQ knowledge targets, use route: faq.
 - For FAQ route, intent and faq_query must match one of the FAQ knowledge targets above.
 - For user wording like "I just registered and want to put money into my account to start playing", use route: faq, intent: deposit_howto, faq_query: 怎么存款.
 - For deposit/recharge/top-up/cash-in status, missing funds, payment not credited, or "I paid but it did not arrive", use route: sop and intent: deposit_missing.
 - For withdrawal not received, use route: sop and intent: withdrawal_missing.
-- For withdrawal blocked, cannot withdraw because of rollover/流水, or checking whether rollover is enough, use route: sop or faq_then_sop and intent: withdrawal_blocked_or_rollover.
-- For pure "what is rollover/流水" explanation, use route: faq, intent: rollover_explanation, faq_query: 流水是什么.
+- For unable to withdraw, insufficient rollover/流水, checking whether rollover/流水 is enough, or asking to query rollover/流水, use route: sop or faq_then_sop and intent: withdrawal_blocked_or_rollover.
+- For requests to check the previous case, prior reply, pending handling, or last ticket, use route: sop and intent: pending_reply_lookup.
 - For account, order, payment, balance, deposit status, withdrawal status, or other backend fact-like requests, prefer SOP/human/backend-safe handling and set requires_backend: true when backend facts are needed.
 - For escalation, take-over requests, specialist review requests, or cases where automated replies are not helping, use route: human_handoff, intent: explicit_human_request, requires_human: true.
 - If the customer explicitly asks for a human, route must be human_handoff.
@@ -183,15 +159,12 @@ Allowed FAQ intents. The intent field must be exactly one of these values:
 - withdrawal_howto
 - forgot_password_howto
 - screenshot_upload_howto
-- rollover_explanation
-- menu_help
-- faq_general
 - clarification_needed
 - unsupported_concrete_issue
 
 {FAQ_KNOWLEDGE_TARGETS}
 
-For ordinary how-to, manual, guide, navigation, or instruction questions, route must be faq.
+For ordinary how-to, manual, guide, or instruction questions that match the FAQ knowledge targets, route must be faq.
 For FAQ route, intent and faq_query must match one of the FAQ knowledge targets above.
 For these questions: 怎么存款？ / 如何充值 / how to deposit / deposit guide / put money into my account / add funds / top up / start playing after adding money, return route: faq, intent: deposit_howto, faq_query: 怎么存款.
 faq_query should be short, stable, and close to the FAQ document title, keywords, or aliases.

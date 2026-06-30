@@ -89,13 +89,17 @@ async def run_case(text):
     return await svc.process_event(1, event)
 
 
-async def test():
+async def run_tests():
     r1 = await run_case("how to deposit")
-    assert r1["route"] == "faq"
+    assert r1["graph_state"]["route"] == "faq"
 
     r2 = await run_case("I want human agent")
-    assert r2["route"] == "human_handoff"
+    assert r2["graph_state"]["route"] == "human_handoff"
+
+
+def test_llm_first_gateway_routes_with_guarded_authoritative_router():
+    asyncio.run(run_tests())
 
 
 if __name__ == "__main__":
-    asyncio.run(test())
+    asyncio.run(run_tests())

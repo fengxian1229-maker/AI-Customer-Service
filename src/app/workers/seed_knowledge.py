@@ -12,7 +12,9 @@ from app.services.knowledge_blocks import (
     normalize_question_aliases,
     validate_answer_blocks,
 )
-from app.services.rag import DEFAULT_KNOWLEDGE_DOCUMENTS
+
+
+DEFAULT_SEED_SOURCE_FILE = Path(__file__).resolve().parents[3] / "data" / "knowledge" / "default_multimodal_faq_seed.json"
 
 
 EXTRA_SEED_DOCUMENTS = [
@@ -43,7 +45,7 @@ def build_seed_documents(
     limit: int | None = None,
 ) -> list[dict]:
     documents = []
-    base_documents = source_documents if source_documents is not None else [*DEFAULT_KNOWLEDGE_DOCUMENTS, *EXTRA_SEED_DOCUMENTS]
+    base_documents = source_documents if source_documents is not None else load_source_documents(str(DEFAULT_SEED_SOURCE_FILE)) or []
     for document in base_documents[:limit]:
         copied = dict(document)
         copied["tenant_id"] = tenant_id

@@ -271,6 +271,53 @@ def test_gemini_provider_route_uses_prompt_and_mode_from_router_mode(monkeypatch
     ]
 
 
+def test_gemini_provider_faq_targets_are_limited_to_canonical_howto_intents():
+    from app.llm.gemini_provider import (
+        FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT,
+        FAQ_KNOWLEDGE_TARGETS,
+        GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT,
+    )
+
+    for expected in (
+        "deposit_howto",
+        "withdrawal_howto",
+        "forgot_password_howto",
+        "screenshot_upload_howto",
+    ):
+        assert expected in FAQ_KNOWLEDGE_TARGETS
+        assert expected in FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+        assert expected in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
+    for banned in (
+        "rollover_explanation",
+        "menu_help",
+        "faq_general",
+        "流水要求说明",
+        "菜单导航帮助",
+        "奖金规则说明",
+        "账户安全说明",
+    ):
+        assert banned not in FAQ_KNOWLEDGE_TARGETS
+        assert banned not in FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
+
+def test_gemini_provider_guarded_prompt_keeps_sop_boundary_rules_out_of_faq_targets():
+    from app.llm.gemini_provider import GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
+    expected_boundaries = (
+        "deposit_missing",
+        "withdrawal_missing",
+        "withdrawal_blocked_or_rollover",
+        "pending_reply_lookup",
+        "human_handoff",
+    )
+    for boundary in expected_boundaries:
+        assert boundary in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
+    assert "For pure \"what is rollover/流水\" explanation, use route: faq" not in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    assert "For ordinary how-to, manual, guide, navigation, or concept explanation questions, use route: faq." not in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
+
 def test_gemini_provider_extract_sop_slots_uses_structured_output(monkeypatch):
     from app.core.settings import Settings
     from app.llm.gemini_provider import GeminiLLMProvider, SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT

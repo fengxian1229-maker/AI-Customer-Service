@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 from app.workers import seed_knowledge
 
@@ -31,7 +32,7 @@ def test_seed_knowledge_dry_run_does_not_write_repository():
     result = asyncio.run(seed_knowledge.seed_repository(repository, tenant_id="default", kb_scope="default", dry_run=True))
 
     assert result["dry_run"] is True
-    assert result["documents"] >= 4
+    assert result["documents"] == 4
     assert result["inserted"] == 0
     assert result["duplicates"] == 0
     assert result["skipped"] == 0
@@ -44,10 +45,58 @@ def test_seed_knowledge_non_dry_run_calls_insert_idempotent():
     result = asyncio.run(seed_knowledge.seed_repository(repository, tenant_id="default", kb_scope="default"))
 
     assert result["dry_run"] is False
+    assert result["documents"] == 4
     assert result["inserted"] == result["documents"]
     assert len(repository.inserted) == result["documents"]
     assert {document["tenant_id"] for document in repository.inserted} == {"default"}
     assert {document["kb_scope"] for document in repository.inserted} == {"default"}
+
+
+def test_seed_knowledge_default_uses_only_canonical_multimodal_faq():
+    documents = seed_knowledge.build_seed_documents(tenant_id="default", kb_scope="default")
+
+    assert [document["title"] for document in documents] == [
+        "充值教程",
+        "提款教程",
+        "忘记密码说明",
+        "上传截图说明",
+    ]
+    assert {document["metadata_json"]["intent_id"] for document in documents} == {
+        "deposit_howto",
+        "withdrawal_howto",
+        "forgot_password_howto",
+        "screenshot_upload_howto",
+    }
+    assert {
+        "奖金规则说明",
+        "流水要求说明",
+        "菜单导航帮助",
+        "账户安全说明",
+    }.isdisjoint({document["title"] for document in documents})
+
+
+def test_canonical_multimodal_seed_contains_only_four_supported_faqs():
+    seed_path = Path(__file__).resolve().parents[2] / "data" / "knowledge" / "default_multimodal_faq_seed.json"
+    payload = json.loads(seed_path.read_text(encoding="utf-8"))
+
+    assert [document["title"] for document in payload] == [
+        "充值教程",
+        "提款教程",
+        "忘记密码说明",
+        "上传截图说明",
+    ]
+    assert {document["metadata_json"]["intent_id"] for document in payload} == {
+        "deposit_howto",
+        "withdrawal_howto",
+        "forgot_password_howto",
+        "screenshot_upload_howto",
+    }
+    assert {
+        "奖金规则说明",
+        "流水要求说明",
+        "菜单导航帮助",
+        "账户安全说明",
+    }.isdisjoint({document["title"] for document in payload})
 
 
 def test_seed_knowledge_documents_do_not_contain_backend_fact_answers():

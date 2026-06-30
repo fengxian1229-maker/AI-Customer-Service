@@ -184,14 +184,12 @@ def intent_router_node(state: GraphState) -> GraphState:
         return _with_route(state, "forgot_password_howto", "faq", "Forgot-password instructions are FAQ/manual content.", faq_query=text)
     if _is_screenshot_upload_howto(lower, hints):
         return _with_route(state, "screenshot_upload_howto", "faq", "Screenshot upload instructions are FAQ/manual content.", faq_query=text)
-    if _is_rollover_explanation(lower):
-        return _with_route(state, "rollover_explanation", "faq", "Rollover explanation is FAQ/manual content.", faq_query=text)
     if _is_menu_help(lower, hints):
-        return _with_route(state, "menu_help", "faq", "Menu/navigation help is FAQ/manual content.", faq_query=text)
+        return _with_route(state, "clarification_needed", "clarification", "Menu recovery is outside canonical FAQ.")
     if state.get("event_type") == "FILE_RECEIVED":
         return _with_route(state, "clarification_needed", "clarification", "File upload without a clear issue needs clarification.")
     if text:
-        return _with_route(state, "faq_general", "faq", "General explanatory question routed to FAQ/RAG.", faq_query=text, confidence=0.55)
+        return _with_route(state, "clarification_needed", "clarification", "Question is outside canonical FAQ targets.", confidence=0.55)
     return _with_route(state, "clarification_needed", "clarification", "No clear question content provided.", confidence=0.2)
 
 
