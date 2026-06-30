@@ -37,9 +37,8 @@ def build_workflow_graph(
     language_fallback: str = "zh-Hans",
     language_persist_to_slot_memory: bool = True,
     llm_rewrite_min_confidence: float = 0.70,
-    llm_router_mode: str = "shadow",
-    llm_router_min_confidence: float = 0.70,
-    llm_router_fallback_to_deterministic: bool = True,
+    llm_intent_min_confidence: float = 0.70,
+    llm_intent_fallback_to_deterministic: bool = True,
     llm_sop_slot_enabled: bool = False,
     llm_sop_slot_min_confidence: float = 0.70,
     llm_sop_slot_fallback_to_deterministic: bool = True,
@@ -73,9 +72,8 @@ def build_workflow_graph(
             "intent_router_node",
             make_intent_router_node(
                 llm_intent_service,
-                llm_router_mode=llm_router_mode,
-                llm_router_min_confidence=llm_router_min_confidence,
-                llm_router_fallback_to_deterministic=llm_router_fallback_to_deterministic,
+                llm_intent_min_confidence=llm_intent_min_confidence,
+                llm_intent_fallback_to_deterministic=llm_intent_fallback_to_deterministic,
             ),
         ),
     )

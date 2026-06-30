@@ -60,10 +60,7 @@ class Settings(BaseSettings):
     llm_intent_shadow_enabled: bool = False
     llm_intent_fallback_enabled: bool = False
     llm_intent_min_confidence: float = 0.75
-    llm_router_mode: str = "shadow"
-    llm_router_min_confidence: float = 0.75
-    llm_router_fallback_to_deterministic: bool = True
-    llm_router_allow_smoke_modes: bool = False
+    llm_intent_fallback_to_deterministic: bool = True
     llm_sop_slot_enabled: bool = False
     llm_sop_slot_min_confidence: float = 0.70
     llm_sop_slot_fallback_to_deterministic: bool = True

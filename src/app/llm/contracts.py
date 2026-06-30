@@ -59,16 +59,12 @@ class LLMIntentShadowInput(TypedDict, total=False):
     attachments_summary: list[dict[str, Any]]
 
 
-class LLMRouterInput(TypedDict, total=False):
-    router_mode: str | None
-    mode: str | None
+class LLMIntentClassificationInput(TypedDict, total=False):
     tenant_id: str
     conversation_id: str
     raw_user_input: str
     rewritten_question: str | None
-    normalized_query: str | None
     reply_language: str | None
-    deterministic_rewrite_result: dict[str, Any] | None
     deterministic_intent_result: dict[str, Any] | None
     deterministic_route: str | None
     recent_messages: list[dict[str, Any]]
@@ -90,10 +86,7 @@ class LLMIntentShadowOutput(TypedDict, total=False):
     mode: str
 
 
-class LLMRouterDecisionOutput(TypedDict, total=False):
-    rewritten_question: str
-    normalized_query: str | None
-    language: str
+class LLMIntentClassificationOutput(TypedDict, total=False):
     intent: str
     route: str
     confidence: float
@@ -103,7 +96,6 @@ class LLMRouterDecisionOutput(TypedDict, total=False):
     requires_human: bool
     requires_backend: bool
     missing_slots: list[str]
-    preserved_entities: list[str]
     reason: str
     provider: str
     mode: str
@@ -208,12 +200,9 @@ class LLMIntentShadowSchema(BaseModel):
     risk_level: str | None = None
 
 
-class LLMRouterDecisionSchema(BaseModel):
+class LLMIntentClassificationSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    rewritten_question: str
-    normalized_query: str | None = None
-    language: str = "unknown"
     intent: str
     route: LLMRouteLiteral
     confidence: float = 0.0
@@ -223,8 +212,12 @@ class LLMRouterDecisionSchema(BaseModel):
     requires_human: bool = False
     requires_backend: bool = False
     missing_slots: list[str] = Field(default_factory=list)
-    preserved_entities: list[str] = Field(default_factory=list)
     reason: str
+
+
+LLMRouterInput = LLMIntentClassificationInput
+LLMRouterDecisionOutput = LLMIntentClassificationOutput
+LLMRouterDecisionSchema = LLMIntentClassificationSchema
 
 
 class LLMSopSlotExtractionSchema(BaseModel):

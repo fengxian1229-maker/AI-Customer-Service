@@ -70,13 +70,12 @@ async def run(argv: list[str] | None = None) -> dict:
         }
 
     llm_provider = str(getattr(settings, "llm_provider", "") or "").strip().lower()
-    llm_router_mode = str(getattr(settings, "llm_router_mode", "") or "").strip().lower()
-    if llm_provider != "gemini" or llm_router_mode != "faq_authoritative":
+    if llm_provider != "gemini":
         return {
             **base_summary,
             "error": {
                 "code": "invalid_settings",
-                "message": "real_gemini_faq_smoke requires llm_provider=gemini and llm_router_mode=faq_authoritative",
+                "message": "real_gemini_faq_smoke requires llm_provider=gemini; FAQ-only router smoke mode has been removed",
             },
             "smoke_success": False,
         }

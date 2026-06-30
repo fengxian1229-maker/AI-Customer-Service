@@ -257,9 +257,6 @@ def validate_router_decision_output(payload: dict[str, Any], output: dict[str, A
     )
     validate_route_intent_pair(route, intent)
     return {
-        "rewritten_question": _require_str(output, "rewritten_question", "router decision"),
-        "normalized_query": _optional_str(output.get("normalized_query")),
-        "language": str(output.get("language") or "unknown"),
         "intent": intent,
         "route": route,
         "confidence": normalize_confidence(output.get("confidence")),
@@ -269,7 +266,6 @@ def validate_router_decision_output(payload: dict[str, Any], output: dict[str, A
         "requires_human": requires_human,
         "requires_backend": bool(output.get("requires_backend", False)),
         "missing_slots": _string_list(output.get("missing_slots")),
-        "preserved_entities": _string_list(output.get("preserved_entities")),
         "reason": _require_str(output, "reason", "router decision"),
     }
 

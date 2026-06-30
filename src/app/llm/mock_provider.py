@@ -1,8 +1,8 @@
 from app.llm.contracts import (
     LLMIntentShadowInput,
     LLMIntentShadowOutput,
-    LLMRouterDecisionOutput,
-    LLMRouterInput,
+    LLMIntentClassificationOutput,
+    LLMIntentClassificationInput,
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
     LLMSopSlotExtractionInput,
@@ -54,17 +54,10 @@ class MockLLMProvider:
             "mode": "shadow",
         }
 
-    async def route(self, payload: LLMRouterInput) -> LLMRouterDecisionOutput:
-        router_mode = _router_mode_from_payload(payload)
-        if router_mode == "faq_authoritative":
-            return _faq_authoritative_route(payload, provider_name=self.provider_name)
+    async def route(self, payload: LLMIntentClassificationInput) -> LLMIntentClassificationOutput:
         deterministic = payload.get("deterministic_intent_result") or {}
-        rewrite = payload.get("deterministic_rewrite_result") or {}
         text = normalize_text(payload.get("raw_user_input"))
         return {
-            "rewritten_question": rewrite.get("rewritten_question") or text,
-            "normalized_query": rewrite.get("rewritten_question") or text,
-            "language": rewrite.get("language") or "unknown",
             "intent": deterministic.get("intent") or "faq_general",
             "route": deterministic.get("route") or payload.get("deterministic_route") or "faq",
             "confidence": 0.84,
@@ -74,10 +67,9 @@ class MockLLMProvider:
             "requires_human": (deterministic.get("route") == "human_handoff"),
             "requires_backend": bool(_risk_flags(text)),
             "missing_slots": [],
-            "preserved_entities": [],
-            "reason": "Mock guarded router mirrors deterministic decision for offline validation.",
+            "reason": "Mock guarded intent classifier mirrors deterministic decision for offline validation.",
             "provider": self.provider_name,
-            "mode": router_mode,
+            "mode": "guarded_authoritative",
         }
 
     async def extract_sop_slots(self, payload: LLMSopSlotExtractionInput) -> LLMSopSlotExtractionOutput:
@@ -97,62 +89,6 @@ class MockLLMProvider:
             "provider": self.provider_name,
             "mode": "sop_slot",
         }
-
-
-def _router_mode_from_payload(payload: dict) -> str:
-    mode = str(payload.get("router_mode") or payload.get("mode") or "guarded_authoritative").strip().lower()
-    return mode if mode in {"guarded_authoritative", "faq_authoritative"} else "guarded_authoritative"
-
-
-def _faq_authoritative_route(payload: LLMRouterInput, provider_name: str) -> LLMRouterDecisionOutput:
-    text = normalize_text(payload.get("raw_user_input"))
-    lower = text.lower()
-    if any(token in lower for token in ("怎么存款", "如何充值", "deposit", "recharge")):
-        intent = "deposit_howto"
-        faq_query = "怎么存款"
-    elif any(token in lower for token in ("如何提款", "withdraw")):
-        intent = "withdrawal_howto"
-        faq_query = "如何提款"
-    elif any(token in lower for token in ("忘记密码", "forgot password", "reset password")):
-        intent = "forgot_password_howto"
-        faq_query = "忘记密码"
-    else:
-        return {
-            "rewritten_question": text,
-            "normalized_query": text,
-            "language": "unknown",
-            "intent": "clarification_needed",
-            "route": "clarification",
-            "confidence": 0.84,
-            "sop_name": None,
-            "faq_query": None,
-            "risk_level": None,
-            "requires_human": False,
-            "requires_backend": False,
-            "missing_slots": [],
-            "preserved_entities": [],
-            "reason": "Mock FAQ-authoritative router asks for clarification when no FAQ alias is matched.",
-            "provider": provider_name,
-            "mode": "faq_authoritative",
-        }
-    return {
-        "rewritten_question": text,
-        "normalized_query": faq_query,
-        "language": "zh" if any("\u4e00" <= char <= "\u9fff" for char in text) else "unknown",
-        "intent": intent,
-        "route": "faq",
-        "confidence": 0.9,
-        "sop_name": None,
-        "faq_query": faq_query,
-        "risk_level": None,
-        "requires_human": False,
-        "requires_backend": False,
-        "missing_slots": [],
-        "preserved_entities": [],
-        "reason": "Mock FAQ-authoritative router matched a FAQ alias.",
-        "provider": provider_name,
-        "mode": "faq_authoritative",
-    }
 
 
 def _risk_flags(text: str, active_workflow: str | None = None) -> list[str]:

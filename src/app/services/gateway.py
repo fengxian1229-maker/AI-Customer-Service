@@ -3,7 +3,7 @@ import re
 from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
 from app.graph.builder import build_workflow_graph
 from app.graph.nodes import build_graph_state_from_event, prepare_route_state
-from app.llm.contracts import LLMIntentShadowInput, LLMRewriteShadowInput, LLMRouterInput, LLMSopSlotExtractionInput
+from app.llm.contracts import LLMIntentClassificationInput, LLMIntentShadowInput, LLMRewriteShadowInput, LLMSopSlotExtractionInput
 from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output, validate_sop_slot_extraction_output
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
@@ -24,7 +24,6 @@ EXTERNAL_COMMAND_TYPES = {
     str(CommandType.RAG_PLACEHOLDER),
 }
 
-LLM_ROUTER_MODES = {"deterministic", "shadow", "guarded_authoritative", "faq_authoritative"}
 ACTIVE_WORKFLOW_GUARD_STAGES = {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}
 
 
@@ -63,9 +62,7 @@ class GatewayService:
         llm_intent_shadow_enabled: bool = False,
         llm_intent_fallback_enabled: bool = False,
         llm_intent_min_confidence: float = 0.75,
-        llm_router_mode: str = "shadow",
-        llm_router_min_confidence: float = 0.75,
-        llm_router_fallback_to_deterministic: bool = True,
+        llm_intent_fallback_to_deterministic: bool = True,
         llm_sop_slot_service=None,
         llm_sop_slot_enabled: bool = False,
         llm_sop_slot_min_confidence: float = 0.70,
@@ -103,11 +100,8 @@ class GatewayService:
         self.llm_rewrite_fallback_enabled = llm_rewrite_fallback_enabled
         self.llm_intent_shadow_enabled = llm_intent_shadow_enabled
         self.llm_intent_fallback_enabled = llm_intent_fallback_enabled
-        self.llm_intent_min_confidence = llm_intent_min_confidence
-        normalized_router_mode = (llm_router_mode or "shadow").strip().lower()
-        self.llm_router_mode = normalized_router_mode if normalized_router_mode in LLM_ROUTER_MODES else "shadow"
-        self.llm_router_min_confidence = float(llm_router_min_confidence)
-        self.llm_router_fallback_to_deterministic = bool(llm_router_fallback_to_deterministic)
+        self.llm_intent_min_confidence = float(llm_intent_min_confidence)
+        self.llm_intent_fallback_to_deterministic = bool(llm_intent_fallback_to_deterministic)
         self.llm_sop_slot_service = llm_sop_slot_service
         self.llm_sop_slot_enabled = bool(llm_sop_slot_enabled)
         self.llm_sop_slot_min_confidence = float(llm_sop_slot_min_confidence)
@@ -123,11 +117,10 @@ class GatewayService:
         self.language_fallback = normalize_language_code(language_fallback)
         self.language_persist_to_slot_memory = bool(language_persist_to_slot_memory)
         self.recent_message_limit = recent_message_limit
-        graph_llm_router_enabled = self.llm_router_mode in {"guarded_authoritative", "faq_authoritative"}
         self.workflow_graph = workflow_graph or build_workflow_graph(
             checkpointer=checkpointer,
-            llm_rewrite_service=self.llm_rewrite_service if graph_llm_router_enabled else None,
-            llm_intent_service=self.llm_intent_service if graph_llm_router_enabled else None,
+            llm_rewrite_service=self.llm_rewrite_service,
+            llm_intent_service=self.llm_intent_service,
             llm_sop_slot_service=self.llm_sop_slot_service,
             final_reply_service=self.llm_final_reply_service,
             rag_service=self.rag_service,
@@ -137,9 +130,8 @@ class GatewayService:
             tenant_supported_languages=self.tenant_supported_languages,
             language_fallback=self.language_fallback,
             language_persist_to_slot_memory=self.language_persist_to_slot_memory,
-            llm_router_mode=self.llm_router_mode,
-            llm_router_min_confidence=self.llm_router_min_confidence,
-            llm_router_fallback_to_deterministic=self.llm_router_fallback_to_deterministic,
+            llm_intent_min_confidence=self.llm_intent_min_confidence,
+            llm_intent_fallback_to_deterministic=self.llm_intent_fallback_to_deterministic,
             llm_sop_slot_enabled=self.llm_sop_slot_enabled,
             llm_sop_slot_min_confidence=self.llm_sop_slot_min_confidence,
             llm_sop_slot_fallback_to_deterministic=self.llm_sop_slot_fallback_to_deterministic,
@@ -476,11 +468,7 @@ class GatewayService:
         return self._sanitize_value({key: value for key, value in summary.items() if value is not None})
 
     async def _prepare_route_state(self, graph_state: dict) -> dict:
-        if self.llm_router_mode == "faq_authoritative":
-            return await self._prepare_faq_authoritative_route_state(graph_state)
         deterministic_state = prepare_route_state(graph_state)
-        if self.llm_router_mode != "guarded_authoritative":
-            return deterministic_state
         fallback_reason = self._router_hard_guard_reason(deterministic_state)
         if fallback_reason:
             return self._router_fallback_state(deterministic_state, "hard_guard", hard_guard=fallback_reason)
@@ -497,7 +485,7 @@ class GatewayService:
 
         provider = sanitized_raw.get("provider")
         mode = sanitized_raw.get("mode") or "guarded_authoritative"
-        if decision["confidence"] < self.llm_router_min_confidence:
+        if decision["confidence"] < self.llm_intent_min_confidence:
             return self._router_fallback_state(deterministic_state, "low_confidence", decision=decision, provider=provider, mode=mode)
         if decision["route"] == "unsupported":
             return self._router_fallback_state(deterministic_state, "unsupported_route", decision=decision, provider=provider, mode=mode)
@@ -508,15 +496,6 @@ class GatewayService:
 
         return {
             **deterministic_state,
-            "rewritten_question": decision["rewritten_question"],
-            "rewrite_result": {
-                "rewritten_question": decision["rewritten_question"],
-                "normalized_query": decision.get("normalized_query"),
-                "language": decision.get("language"),
-                "preserved_entities": decision.get("preserved_entities") or [],
-                "source": "llm_guarded_authoritative",
-            },
-            "rewrite_source": "llm_guarded_authoritative",
             "intent_result": {
                 "intent": decision["intent"],
                 "route": decision["route"],
@@ -535,131 +514,6 @@ class GatewayService:
                 mode=mode,
             ),
         }
-
-    async def _prepare_faq_authoritative_route_state(self, graph_state: dict) -> dict:
-        raw = normalize_text(graph_state.get("raw_user_input"))
-        if graph_state.get("event_type") == "FILE_RECEIVED" and not raw:
-            return self._faq_authoritative_fallback_state(graph_state, "file_without_text")
-        if graph_state.get("active_workflow") and graph_state.get("workflow_stage") in ACTIVE_WORKFLOW_GUARD_STAGES:
-            return self._faq_authoritative_fallback_state(graph_state, "active_workflow_guard")
-        if not raw:
-            return self._faq_authoritative_fallback_state(graph_state, "empty_input")
-        if not self.llm_intent_service or not hasattr(self.llm_intent_service, "route"):
-            return self._faq_authoritative_fallback_state(graph_state, "missing_provider")
-
-        payload = self._build_llm_router_input(graph_state, include_deterministic=False)
-        try:
-            raw_result = await self.llm_intent_service.route(payload)
-            sanitized_raw = self._sanitize_value(raw_result or {})
-            decision = validate_router_decision_output(payload, sanitized_raw)
-        except Exception as exc:
-            return self._faq_authoritative_fallback_state(
-                graph_state,
-                "exception" if not isinstance(exc, ValueError) else "validation_error",
-                exc=exc,
-            )
-
-        provider = sanitized_raw.get("provider")
-        mode = sanitized_raw.get("mode") or "faq_authoritative"
-        if decision["confidence"] < self.llm_router_min_confidence:
-            return self._faq_authoritative_fallback_state(
-                graph_state,
-                "low_confidence",
-                decision=decision,
-                provider=provider,
-                mode=mode,
-            )
-        if decision["route"] not in {"faq", "clarification", "unsupported"}:
-            return self._faq_authoritative_fallback_state(
-                graph_state,
-                "unsupported_route",
-                decision=decision,
-                provider=provider,
-                mode=mode,
-            )
-        if decision["route"] == "faq" and not decision.get("faq_query"):
-            return self._faq_authoritative_fallback_state(
-                graph_state,
-                "missing_faq_query",
-                decision=decision,
-                provider=provider,
-                mode=mode,
-            )
-
-        final_route = "faq" if decision["route"] == "faq" else "clarification"
-        rewritten_question = decision["rewritten_question"]
-        return {
-            **graph_state,
-            "rewritten_question": rewritten_question,
-            "rewrite_result": {
-                "rewritten_question": rewritten_question,
-                "normalized_query": decision.get("normalized_query"),
-                "language": decision.get("language"),
-                "preserved_entities": decision.get("preserved_entities") or [],
-                "source": "llm_faq_authoritative",
-            },
-            "rewrite_source": "llm_faq_authoritative",
-            "intent_result": {
-                "intent": decision["intent"],
-                "route": final_route,
-                "confidence": decision["confidence"],
-                "reason": decision["reason"],
-                "sop_name": None,
-                "faq_query": decision.get("faq_query"),
-                "risk_level": decision.get("risk_level"),
-            },
-            "route": final_route,
-            "route_source": "llm_faq_authoritative",
-            "rag_backend_fact_guard_enabled": False,
-            "llm_router_result": self._router_result_summary(
-                status="accepted",
-                decision=decision,
-                provider=provider,
-                mode=mode,
-            ),
-        }
-
-    def _faq_authoritative_fallback_state(
-        self,
-        graph_state: dict,
-        fallback_reason: str,
-        decision: dict | None = None,
-        provider: str | None = None,
-        mode: str | None = None,
-        exc: Exception | None = None,
-    ) -> dict:
-        raw = normalize_text(graph_state.get("raw_user_input"))
-        state = {
-            **graph_state,
-            "rewritten_question": raw,
-            "rewrite_result": {
-                "rewritten_question": raw,
-                "normalized_query": raw,
-                "language": "unknown",
-                "preserved_entities": [],
-                "source": "llm_faq_authoritative_fallback",
-            },
-            "rewrite_source": "llm_faq_authoritative",
-            "intent_result": {
-                "intent": "clarification_needed",
-                "route": "clarification",
-                "confidence": 0.0,
-                "reason": "FAQ-authoritative router fell back to deterministic-free clarification.",
-            },
-            "route": "clarification",
-            "route_source": "llm_faq_authoritative",
-            "llm_router_result": self._router_result_summary(
-                status="fallback",
-                decision=decision,
-                provider=provider,
-                mode=mode or "faq_authoritative",
-                fallback_reason=fallback_reason,
-                error_type=type(exc).__name__ if exc else None,
-                error_message=str(exc) if exc else None,
-                fallback_to_deterministic=False,
-            ),
-        }
-        return state
 
     def _router_hard_guard_reason(self, graph_state: dict) -> str | None:
         if graph_state.get("active_workflow") and graph_state.get("workflow_stage") in ACTIVE_WORKFLOW_GUARD_STAGES:
@@ -690,19 +544,9 @@ class GatewayService:
         exc: Exception | None = None,
         hard_guard: str | None = None,
     ) -> dict:
-        if not self.llm_router_fallback_to_deterministic and hard_guard is None:
-            raw = normalize_text(deterministic_state.get("raw_user_input"))
+        if not self.llm_intent_fallback_to_deterministic and hard_guard is None:
             return {
                 **deterministic_state,
-                "rewritten_question": raw,
-                "rewrite_result": {
-                    "rewritten_question": raw,
-                    "normalized_query": raw,
-                    "language": "unknown",
-                    "preserved_entities": [],
-                    "source": "llm_guarded_authoritative_fallback",
-                },
-                "rewrite_source": "llm_guarded_authoritative",
                 "intent_result": {
                     "intent": "clarification_needed",
                     "route": "clarification",
@@ -746,7 +590,7 @@ class GatewayService:
             error_type=type(exc).__name__ if exc else None,
             error_message=str(exc) if exc else None,
             hard_guard=hard_guard,
-            fallback_to_deterministic=self.llm_router_fallback_to_deterministic,
+            fallback_to_deterministic=self.llm_intent_fallback_to_deterministic,
         )
         return state
 
@@ -771,9 +615,6 @@ class GatewayService:
             "route": decision.get("route"),
             "confidence": decision.get("confidence"),
             "reason": decision.get("reason"),
-            "rewritten_question": decision.get("rewritten_question"),
-            "normalized_query": decision.get("normalized_query"),
-            "language": decision.get("language"),
             "sop_name": decision.get("sop_name"),
             "faq_query": decision.get("faq_query"),
             "requires_human": decision.get("requires_human"),
@@ -897,10 +738,7 @@ class GatewayService:
             "intent",
             "confidence",
             "reason",
-            "rewritten_question",
-            "normalized_query",
             "faq_query",
-            "language",
             "requires_human",
             "requires_backend",
             "fallback_reason",
@@ -1042,14 +880,13 @@ class GatewayService:
             "attachments_summary": self._attachments_summary(graph_state),
         }
 
-    def _build_llm_router_input(self, graph_state: dict, include_deterministic: bool = True) -> LLMRouterInput:
+    def _build_llm_router_input(self, graph_state: dict, include_deterministic: bool = True) -> LLMIntentClassificationInput:
         return {
-            "router_mode": self.llm_router_mode,
-            "mode": self.llm_router_mode,
             "tenant_id": graph_state.get("tenant_id"),
             "conversation_id": graph_state.get("conversation_id"),
             "raw_user_input": graph_state.get("raw_user_input"),
-            "deterministic_rewrite_result": graph_state.get("rewrite_result") if include_deterministic else None,
+            "rewritten_question": graph_state.get("rewritten_question"),
+            "reply_language": graph_state.get("reply_language"),
             "deterministic_intent_result": graph_state.get("intent_result") if include_deterministic else None,
             "deterministic_route": graph_state.get("route") if include_deterministic else None,
             "recent_messages": list(graph_state.get("recent_messages") or []),

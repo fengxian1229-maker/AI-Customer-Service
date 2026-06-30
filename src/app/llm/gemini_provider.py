@@ -6,9 +6,9 @@ from app.llm.contracts import (
     LLMIntentShadowInput,
     LLMIntentShadowOutput,
     LLMIntentShadowSchema,
-    LLMRouterDecisionOutput,
-    LLMRouterDecisionSchema,
-    LLMRouterInput,
+    LLMIntentClassificationOutput,
+    LLMIntentClassificationInput,
+    LLMIntentClassificationSchema,
     LLMRewriteAuthoritativeSchema,
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
@@ -87,11 +87,12 @@ ALLOWED_INTENT_CONTRACT = """Allowed intents. The intent field must be exactly o
 - backend_fact_like
 """
 
-GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT = f"""You are a guarded authoritative router for a customer service routing system.
+GUARDED_AUTHORITATIVE_INTENT_CLASSIFIER_SYSTEM_PROMPT = f"""You are a guarded authoritative intent classifier for a customer service routing system.
 
-Your job is to rewrite the user's message and choose the safest route metadata.
+Your only job is to classify the user's intent and choose the safest route metadata.
 
 You must not answer the customer.
+You must not rewrite, normalize, translate, summarize, or expand the customer's message.
 You must not generate final customer replies.
 You must not generate images.
 You must not generate buttons.
@@ -129,51 +130,7 @@ Routing rules:
 
 Return only structured JSON matching the schema."""
 
-FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT = f"""You are an FAQ authoritative router for a customer service FAQ smoke test.
-
-Your only job is to rewrite the user's message and choose whether it should retrieve FAQ knowledge.
-
-You must not answer the customer.
-You must not generate final customer replies.
-You must not generate images.
-You must not generate buttons.
-You must not generate tool calls.
-You must not generate external commands.
-You must not decide backend facts, account facts, order status, payment status, balance status, deposit status, or withdrawal status.
-You must not promise that anything was processed, credited, successful, or failed.
-
-This smoke test only allows FAQ routing.
-
-Allowed routes:
-- faq
-- clarification
-- unsupported
-
-Do not output SOP.
-Do not output sop.
-Do not output human_handoff.
-Do not output faq_then_sop.
-Do not output emotion_care.
-Do not output backend routes.
-
-Allowed FAQ intents. The intent field must be exactly one of these values:
-- deposit_howto
-- withdrawal_howto
-- forgot_password_howto
-- screenshot_upload_howto
-- clarification_needed
-- unsupported_concrete_issue
-
-{FAQ_KNOWLEDGE_TARGETS}
-
-For ordinary how-to, manual, guide, or instruction questions that match the FAQ knowledge targets, route must be faq.
-For FAQ route, intent and faq_query must match one of the FAQ knowledge targets above.
-For these questions: 怎么存款？ / 如何充值 / how to deposit / deposit guide / put money into my account / add funds / top up / start playing after adding money, return route: faq, intent: deposit_howto, faq_query: 怎么存款.
-faq_query should be short, stable, and close to the FAQ document title, keywords, or aliases.
-
-Return only structured JSON matching the schema."""
-
-ROUTER_SYSTEM_PROMPT = GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+ROUTER_SYSTEM_PROMPT = GUARDED_AUTHORITATIVE_INTENT_CLASSIFIER_SYSTEM_PROMPT
 
 SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT = """You are a SOP slot extraction node for a customer service system.
 
@@ -244,18 +201,17 @@ class GeminiLLMProvider:
             "mode": "shadow",
         }
 
-    async def route(self, payload: LLMRouterInput) -> LLMRouterDecisionOutput:
-        router_mode = _router_mode_from_payload(payload)
+    async def route(self, payload: LLMIntentClassificationInput) -> LLMIntentClassificationOutput:
         structured_model = self.model.with_structured_output(
-            schema=LLMRouterDecisionSchema,
+            schema=LLMIntentClassificationSchema,
             method="json_schema",
         )
-        response = await structured_model.ainvoke(_build_chat_messages(_router_prompt_for_mode(router_mode), payload))
+        response = await structured_model.ainvoke(_build_chat_messages(ROUTER_SYSTEM_PROMPT, payload))
         result = validate_router_decision_output(payload, _model_dump(response))
         return {
             **result,
             "provider": self.provider_name,
-            "mode": router_mode,
+            "mode": "guarded_authoritative",
         }
 
     async def extract_sop_slots(self, payload: LLMSopSlotExtractionInput) -> LLMSopSlotExtractionOutput:
@@ -270,17 +226,6 @@ class GeminiLLMProvider:
             "provider": self.provider_name,
             "mode": "sop_slot",
         }
-
-
-def _router_mode_from_payload(payload: dict) -> str:
-    mode = str(payload.get("router_mode") or payload.get("mode") or "guarded_authoritative").strip().lower()
-    return mode if mode in {"guarded_authoritative", "faq_authoritative"} else "guarded_authoritative"
-
-
-def _router_prompt_for_mode(router_mode: str) -> str:
-    if router_mode == "faq_authoritative":
-        return FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
-    return GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
 
 def _model_dump(response) -> dict:

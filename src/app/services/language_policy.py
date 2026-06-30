@@ -148,7 +148,6 @@ def _rewrite_language(state: dict[str, Any], supported: list[str]) -> tuple[str 
     authoritative_sources = {
         "llm_guarded_authoritative",
         "llm_guarded_authoritative_post_guard",
-        "llm_faq_authoritative",
         "llm_rewrite_authoritative",
         "llm_rewrite",
     }

@@ -133,16 +133,15 @@ async def run(argv: list[str] | None = None) -> dict:
         }
 
     if args.min_confidence is not None:
-        setattr(settings, "llm_router_min_confidence", args.min_confidence)
+        setattr(settings, "llm_intent_min_confidence", args.min_confidence)
 
     llm_provider = str(getattr(settings, "llm_provider", "") or "").strip().lower()
-    llm_router_mode = str(getattr(settings, "llm_router_mode", "") or "").strip().lower()
-    if llm_provider != "gemini" or llm_router_mode != "guarded_authoritative":
+    if llm_provider != "gemini":
         return {
             **base_summary,
             "error": {
                 "code": "invalid_settings",
-                "message": "real_gemini_guarded_smoke requires llm_provider=gemini and llm_router_mode=guarded_authoritative",
+                "message": "real_gemini_guarded_smoke requires llm_provider=gemini",
             },
         }
 

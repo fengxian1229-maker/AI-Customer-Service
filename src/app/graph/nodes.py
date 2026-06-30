@@ -27,7 +27,6 @@ from app.workflows.final_reply_policy import build_reply_plan
 LLM_AUTHORITATIVE_SOURCES = {
     "llm_guarded_authoritative",
     "llm_guarded_authoritative_post_guard",
-    "llm_faq_authoritative",
     "llm_rewrite_authoritative",
 }
 
@@ -332,20 +331,19 @@ def intent_router_node(state: GraphState) -> GraphState:
 def make_intent_router_node(
     llm_intent_service=None,
     *,
-    llm_router_mode: str = "shadow",
-    llm_router_min_confidence: float = 0.70,
-    llm_router_fallback_to_deterministic: bool = True,
+    llm_intent_min_confidence: float = 0.70,
+    llm_intent_fallback_to_deterministic: bool = True,
 ):
+    min_confidence = float(llm_intent_min_confidence)
+    fallback_to_deterministic = bool(llm_intent_fallback_to_deterministic)
+
     async def node(state: GraphState) -> GraphState:
         if state.get("route_locked") and state.get("route"):
             return state
-        router_mode = str(llm_router_mode or "shadow").strip().lower()
-        if router_mode not in {"guarded_authoritative", "faq_authoritative"}:
-            return intent_router_node(state)
         if not llm_intent_service or not hasattr(llm_intent_service, "route"):
-            return _router_fallback_state(state, "missing_provider", router_mode, llm_router_fallback_to_deterministic)
+            return _router_fallback_state(state, "missing_provider", "guarded_authoritative", fallback_to_deterministic)
 
-        payload = _build_llm_router_payload(state, router_mode)
+        payload = _build_llm_router_payload(state)
         try:
             raw_result = await llm_intent_service.route(payload)
             raw = dict(raw_result or {})
@@ -354,19 +352,19 @@ def make_intent_router_node(
             return _router_fallback_state(
                 state,
                 "exception" if not isinstance(exc, ValueError) else "validation_error",
-                router_mode,
-                llm_router_fallback_to_deterministic,
+                "guarded_authoritative",
+                fallback_to_deterministic,
                 exc=exc,
             )
 
         provider = raw.get("provider")
-        mode = raw.get("mode") or router_mode
-        if float(decision.get("confidence") or 0.0) < float(llm_router_min_confidence):
+        mode = raw.get("mode") or "guarded_authoritative"
+        if float(decision.get("confidence") or 0.0) < min_confidence:
             return _router_fallback_state(
                 state,
                 "low_confidence",
-                router_mode,
-                llm_router_fallback_to_deterministic,
+                "guarded_authoritative",
+                fallback_to_deterministic,
                 decision=decision,
                 provider=provider,
                 mode=mode,
@@ -375,8 +373,8 @@ def make_intent_router_node(
             return _router_fallback_state(
                 state,
                 "unsupported_route",
-                router_mode,
-                llm_router_fallback_to_deterministic,
+                "guarded_authoritative",
+                fallback_to_deterministic,
                 decision=decision,
                 provider=provider,
                 mode=mode,
@@ -400,7 +398,7 @@ def make_intent_router_node(
             "intent_result": intent_result,
             "llm_router_result": _router_result_summary("accepted", decision=decision, provider=provider, mode=mode),
             "route": route,
-            "route_source": "llm_router",
+            "route_source": "llm_guarded_authoritative",
         }
 
     return node
@@ -653,23 +651,18 @@ def _deterministic_rewrite_fallback(
     return fallback
 
 
-def _build_llm_router_payload(state: GraphState, router_mode: str) -> dict[str, Any]:
-    rewrite = state.get("rewrite_result") or {}
+def _build_llm_router_payload(state: GraphState) -> dict[str, Any]:
     return {
-        "router_mode": router_mode,
-        "mode": router_mode,
         "tenant_id": state.get("tenant_id"),
         "conversation_id": state.get("conversation_id"),
         "raw_user_input": state.get("raw_user_input"),
         "rewritten_question": state.get("rewritten_question"),
-        "normalized_query": rewrite.get("normalized_query") or state.get("rewritten_question"),
         "reply_language": state.get("reply_language"),
         "recent_messages": list(state.get("recent_messages") or []),
         "slot_memory": dict(state.get("slot_memory") or {}),
         "active_workflow": state.get("active_workflow"),
         "workflow_stage": state.get("workflow_stage"),
         "attachments_summary": _attachments_summary(state),
-        "deterministic_rewrite_result": None,
         "deterministic_intent_result": None,
         "deterministic_route": None,
     }
@@ -695,10 +688,10 @@ def _router_fallback_state(
                 "intent": "clarification_needed",
                 "route": "clarification",
                 "confidence": 0.0,
-                "reason": "LLM router failed and deterministic fallback is disabled.",
+                "reason": "LLM intent classifier failed and deterministic fallback is disabled.",
             },
             "route": "clarification",
-            "route_source": "llm_router",
+            "route_source": "llm_guarded_authoritative",
         }
     next_state["llm_router_result"] = _router_result_summary(
         "fallback",
@@ -732,9 +725,6 @@ def _router_result_summary(
         "route": decision.get("route"),
         "confidence": decision.get("confidence"),
         "reason": decision.get("reason"),
-        "rewritten_question": decision.get("rewritten_question"),
-        "normalized_query": decision.get("normalized_query"),
-        "language": decision.get("language"),
         "sop_name": decision.get("sop_name"),
         "faq_query": decision.get("faq_query"),
         "requires_human": decision.get("requires_human"),
