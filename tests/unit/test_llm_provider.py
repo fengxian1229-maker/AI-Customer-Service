@@ -1,6 +1,23 @@
 import pytest
 
 
+def test_settings_default_to_full_llm_mode():
+    from app.core.settings import Settings
+
+    settings = Settings(
+        livechat_agent_access_token="x",
+        livechat_account_id="y",
+        _env_file=None,
+    )
+
+    assert settings.llm_provider == "gemini"
+    assert settings.llm_sop_slot_enabled is True
+    assert settings.llm_final_reply_enabled is True
+    assert settings.llm_intent_fallback_to_deterministic is True
+    assert settings.llm_sop_slot_fallback_to_deterministic is True
+    assert settings.llm_final_reply_fallback_enabled is True
+
+
 def test_build_llm_provider_supports_off_and_mock():
     from app.llm.mock_provider import MockLLMProvider
     from app.llm.provider import build_llm_provider
@@ -48,25 +65,29 @@ def test_build_llm_provider_rejects_unknown_mode():
         build_llm_provider("openai")
 
 
-def test_mock_provider_faq_authoritative_routes_deposit_without_deterministic_context():
+def test_mock_provider_has_full_llm_surface_and_composes_final_reply():
     import asyncio
 
     from app.llm.mock_provider import MockLLMProvider
 
-    result = asyncio.run(
-        MockLLMProvider().route(
+    provider = MockLLMProvider()
+
+    assert hasattr(provider, "rewrite")
+    assert hasattr(provider, "route")
+    assert hasattr(provider, "extract_sop_slots")
+    assert hasattr(provider, "compose_final_reply")
+
+    final_reply = asyncio.run(
+        provider.compose_final_reply(
             {
-                "raw_user_input": "怎么存款？",
-                "router_mode": "faq_authoritative",
-                "deterministic_route": None,
-                "deterministic_intent_result": None,
-                "deterministic_rewrite_result": None,
+                "response_text_fallback": "请提供用户名或注册手机号以及存款付款截图。",
+                "reply_language": "zh-Hans",
+                "tenant_persona": {"tone": "polite"},
             }
         )
     )
 
-    assert result["mode"] == "faq_authoritative"
-    assert result["route"] == "faq"
-    assert result["intent"] == "deposit_howto"
-    assert result["faq_query"] == "怎么存款"
-    assert result["confidence"] >= 0.84
+    assert final_reply["text"] == "请提供用户名或注册手机号以及存款付款截图。"
+    assert final_reply["confidence"] >= 0.70
+    assert final_reply["provider"] == "mock"
+    assert final_reply["mode"] == "final_reply"

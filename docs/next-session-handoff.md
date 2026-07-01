@@ -4,6 +4,15 @@ Date: 2026-06-27
 Repository: `https://github.com/fengxian1229-maker/AI-Customer-Service.git`
 Local path: `/Users/andy/ai-agent`
 
+## Latest Full-LLM Default Runtime Status
+
+- Default runtime is now full LLM mode: `LLM_PROVIDER=gemini`, `LLM_SOP_SLOT_ENABLED=true`, and `LLM_FINAL_REPLY_ENABLED=true`.
+- A normal user message should prefer LLM rewrite, LLM intent/router, LLM SOP slot extraction for supported SOP routes, and LLM final reply composition.
+- Rule matching remains as guard/fallback only for explicit human requests, file-without-text protection, active workflow protection, provider missing/exception/low-confidence cases, and explicit `LLM_PROVIDER=off`.
+- `LLM_PROVIDER=mock` now supports rewrite, intent/router, SOP slot extraction, and final reply composition for local full-LLM validation without Gemini credentials.
+- `LLM_PROVIDER=off` remains supported for deterministic-only fallback testing.
+- If Gemini/Vertex AI credentials are not configured, default `gemini` mode may fail at startup or first model call; local development should use `LLM_PROVIDER=mock` or configure real credentials.
+
 ## Latest P10-A.1 Status
 
 - Added a tenant-aware backend provider boundary for `backend.query`:
@@ -67,9 +76,9 @@ Important current constraints:
 - Keep `.env` out of Git.
 - Normal FAQ/RAG path must not emit `RAG_PLACEHOLDER` or write `external_commands`.
 - In `faq_authoritative`, FAQ `answer_blocks` may write multiple `outbound_messages`; image is currently MVP URL text fallback and buttons are preview/skipped.
-- Keep `llm_provider=off`, `llm_rewrite_shadow_enabled=false`, and `llm_intent_shadow_enabled=false` unless the task is explicitly a shadow-only smoke.
-- Keep `llm_router_mode=shadow` unless the task is explicitly a guarded-authoritative or FAQ-authoritative router smoke.
-- Do not implement production LiveChat `send_image`, buttons/rich message, or LLM final answer generation unless explicitly requested.
+- Default runtime should stay full LLM: `llm_provider=gemini`, `llm_sop_slot_enabled=true`, and `llm_final_reply_enabled=true`.
+- Use `llm_provider=mock` for local development without Gemini credentials, and `llm_provider=off` only when explicitly testing deterministic fallback.
+- Do not implement production LiveChat `send_image`, buttons/rich message, LLM tool calling, or backend fact generation unless explicitly requested.
 
 Before coding:
 1. Inspect the latest local files.
@@ -80,9 +89,9 @@ Before coding:
 Recommended next task:
 - Run a real Gemini `faq_authoritative` FAQ route smoke on a tiny allowlisted case set before considering broader rollout
 - or replace image MVP URL fallback with a verified real LiveChat image/file event path
-- or add LLM/router review metrics while still not enabling final answer generation
+- or add LLM/router/final-reply review metrics while keeping backend facts deterministic
 - Keep polling-first; do not add WebSocketReceiver or WebhookReceiver in the same change.
-- Do not add vector DB, embeddings, LLM answer generation, or interrupt/resume in the same change.
+- Do not add vector DB, embeddings, LLM tool calling, backend fact generation, or interrupt/resume in the same change.
 ```
 
 ## Latest P8-B Status

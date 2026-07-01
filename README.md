@@ -51,7 +51,7 @@ Current RAG limits:
 
 - No vector database.
 - No embeddings.
-- No LLM answer generation.
+- Final customer wording is composed by the configured LLM final-reply provider by default, with deterministic fallback preserved.
 - No LLM tool calling.
 - No knowledge-base web admin UI.
 - No production-grade rich-message sender.
@@ -69,16 +69,17 @@ Current RAG limits:
 Current LLM boundary:
 
 - `llm_provider` supports `off`, `mock`, and `gemini`.
-- Default runtime is `llm_provider=off`.
+- Default runtime is full LLM mode: `llm_provider=gemini`, `llm_sop_slot_enabled=true`, and `llm_final_reply_enabled=true`.
+- In the default path, one ordinary message may call LLM rewrite, LLM intent/router, LLM SOP slot extraction for supported SOP routes, and LLM final reply composition.
+- Rule matching remains as guard/fallback only: explicit human requests, file-without-text protection, active workflow protection, provider errors, missing providers, low confidence, and local `LLM_PROVIDER=off` all still fall back deterministically.
+- Local development without Gemini credentials should use `LLM_PROVIDER=mock`; deterministic-only fallback testing should use `LLM_PROVIDER=off`.
 - Gemini uses Vertex AI through `ChatGoogleGenerativeAI` with:
   - `model=gemini-3.1-flash-lite`
   - `project=project-gemini-0306`
   - `location=global`
   - `vertexai=True`
-- Mock rewrite shadow records `llm_rewrite_result` but never overrides deterministic `rewritten_question`.
-- Mock intent shadow records `llm_intent_result` but never overrides deterministic `intent_result` or `route`.
-- Gemini rewrite shadow records only `llm_rewrite_result` and never overrides deterministic `rewritten_question` or `rewrite_result`.
-- Gemini intent shadow records only `llm_intent_result` and never overrides deterministic `intent_result` or `route`.
+- Mock mode implements rewrite, intent/router, SOP slot extraction, and final reply composition for offline full-LLM validation.
+- Gemini mode implements rewrite, intent/router, SOP slot extraction, and final reply composition when credentials are configured. If Gemini/Vertex AI credentials are missing, startup or first LLM use may fail; use `LLM_PROVIDER=mock` locally or configure real credentials.
 - Gemini shadow output is normalized by code-side guardrails for route, intent, confidence, and risk flags.
 - `llm_router_mode` supports `deterministic`, `shadow`, `guarded_authoritative`, and `faq_authoritative`; default is still `shadow`.
 - In `guarded_authoritative`, accepted LLM router decisions may set `rewritten_question`, `rewrite_result`, `intent_result`, and `route` before graph invoke.
@@ -95,9 +96,9 @@ Current LLM boundary:
 - LLM router/shadow error metadata redacts secret values in common `api_key=...`, `api-key=...`, `x-api-key: ...`, `Authorization: Bearer ...`, `password: ...`, `token=...`, and `Bearer ...` forms.
 - Gateway-path shadow result/error summaries are stored in `graph_checkpoint_runs.metadata_json.llm_shadow`.
 - Shadow failures are isolated from deterministic graph execution and do not create `graph_run_errors`.
-- Gemini is not used for final customer reply generation.
+- Gemini is used for final customer reply generation by default when `LLM_FINAL_REPLY_ENABLED=true`.
 - Gemini does not call third-party APIs or generate `external_commands`.
-- Gemini/LLM does not generate FAQ answer text, images, or buttons; those come from `knowledge_documents.answer_blocks`.
+- Gemini/LLM may polish the final customer wording but does not create source FAQ facts, images, or buttons; those come from `knowledge_documents.answer_blocks` and reply plans.
 - The full graph still re-runs rewrite/router on invoke, so the real Gemini call is kept outside graph nodes.
 - `models/` reference code is not part of the current MVP runtime boundary and is not used by the active provider path.
 - Third-party actions still must go through deterministic `external_commands` plus workers; the LLM boundary does not call external APIs directly.

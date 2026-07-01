@@ -133,7 +133,12 @@ def _build_final_reply_service(settings):
     if not settings or not getattr(settings, "llm_final_reply_enabled", False):
         return None
     provider_name = str(getattr(settings, "llm_provider", "off") or "off").lower()
-    provider = FinalReplyLLMProvider(settings) if provider_name == "gemini" else None
+    if provider_name == "gemini":
+        provider = FinalReplyLLMProvider(settings)
+    elif provider_name == "mock":
+        provider = build_llm_provider(provider_name, settings=settings)
+    else:
+        provider = None
     return FinalReplyService(
         provider=provider,
         enabled=getattr(settings, "llm_final_reply_enabled", False),

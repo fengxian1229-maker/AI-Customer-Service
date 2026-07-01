@@ -402,8 +402,9 @@ def test_process_next_batch_mysql_provider_failure_does_not_fetch_inbound(monkey
         asyncio.run(gateway_consumer.process_next_batch(pool=object(), limit=20, checkpoint_mode="mysql", settings=object()))
 
 
-def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monkeypatch):
+def test_process_next_batch_default_settings_injects_full_llm_dependencies(monkeypatch):
     from app.workers import gateway_consumer
+    from app.core.settings import Settings
 
     calls = {}
     fake_provider = object()
@@ -442,19 +443,6 @@ def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monke
         def close(self) -> None:
             return None
 
-    class FakeSettings:
-        llm_provider = "gemini"
-        gemini_model = "gemini-3.1-flash-lite"
-        gemini_project = "project-gemini-0306"
-        gemini_location = "global"
-        gemini_vertexai = True
-        llm_rewrite_shadow_enabled = True
-        llm_rewrite_fallback_enabled = False
-        llm_intent_shadow_enabled = True
-        llm_intent_fallback_enabled = False
-        llm_intent_min_confidence = 0.75
-        llm_intent_fallback_to_deterministic = True
-
     monkeypatch.setattr(gateway_consumer, "InboundEventRepository", FakeInboundRepository)
     monkeypatch.setattr(gateway_consumer, "GatewayTransactionRepository", FakeTransactionalRepository)
     monkeypatch.setattr(gateway_consumer, "KnowledgeDocumentRepository", FakeKnowledgeRepository)
@@ -470,12 +458,18 @@ def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monke
 
     monkeypatch.setattr(gateway_consumer, "build_llm_provider", fake_build_llm_provider)
 
+    settings = Settings(
+        livechat_agent_access_token="unused",
+        livechat_account_id="unused",
+        _env_file=None,
+    )
+
     result = asyncio.run(
         gateway_consumer.process_next_batch(
             pool=object(),
             limit=20,
             checkpoint_mode="off",
-            settings=FakeSettings(),
+            settings=settings,
         )
     )
 
@@ -483,6 +477,10 @@ def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monke
     assert calls["provider_settings"].gemini_project == "project-gemini-0306"
     assert calls["service_kwargs"]["llm_rewrite_service"] is fake_provider
     assert calls["service_kwargs"]["llm_intent_service"] is fake_provider
+    assert calls["service_kwargs"]["llm_sop_slot_service"] is fake_provider
+    assert calls["service_kwargs"]["llm_sop_slot_enabled"] is True
+    assert calls["service_kwargs"]["llm_final_reply_enabled"] is True
+    assert calls["service_kwargs"]["llm_final_reply_service"] is not None
     assert calls["service_kwargs"]["llm_intent_min_confidence"] == 0.75
     assert calls["service_kwargs"]["llm_intent_fallback_to_deterministic"] is True
     assert result["llm"] == {
@@ -491,15 +489,18 @@ def test_process_next_batch_builds_gemini_provider_and_reports_llm_summary(monke
         "vertexai": True,
         "project": "project-gemini-0306",
         "location": "global",
-        "rewrite_shadow_enabled": True,
-        "intent_shadow_enabled": True,
+        "rewrite_shadow_enabled": False,
+        "intent_shadow_enabled": False,
         "rewrite_fallback_enabled": False,
         "intent_fallback_enabled": False,
         "intent_mode": "guarded_authoritative",
         "intent_min_confidence": 0.75,
         "intent_fallback_to_deterministic": True,
-        "sop_slot_enabled": False,
+        "sop_slot_enabled": True,
         "sop_slot_min_confidence": 0.7,
+        "final_reply_enabled": True,
+        "final_reply_min_confidence": 0.7,
+        "final_reply_fallback_enabled": True,
         "fallback_enabled": False,
-        "shadow_active": True,
+        "shadow_active": False,
     }
