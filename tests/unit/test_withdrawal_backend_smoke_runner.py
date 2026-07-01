@@ -170,6 +170,8 @@ def test_runner_execute_mode_uses_scoped_gateway_sender_command_and_result(monke
 
     async def fake_sender(pool, sender_client, inbound_event_id, limit=20):
         calls.append(("sender", inbound_event_id, type(sender_client).__name__))
+        if len([call for call in calls if call[0] == "sender"]) == 1:
+            return []
         return [{"status": "SENT"}]
 
     async def fake_process_result_by_id(
@@ -181,6 +183,8 @@ def test_runner_execute_mode_uses_scoped_gateway_sender_command_and_result(monke
         worker_id=None,
         lease_seconds=60,
         max_retries=3,
+        final_reply_service=None,
+        llm_final_reply_enabled=False,
     ):
         calls.append(("consume_result", result_id, worker_id, lease_seconds))
         return {"id": result_id, "result_type": "backend.query.result", "status": "PROCESSED"}
@@ -215,8 +219,12 @@ def test_runner_execute_mode_uses_scoped_gateway_sender_command_and_result(monke
     assert ("lease_command", 10, "withdrawal-smoke-runner", 60) in calls
     assert ("backend_execute", "user-a", "default", "chat-1") in calls
     assert ("consume_result", 99, "withdrawal-smoke-runner", 60) in calls
+    assert result["steps"]["immediate_reply"]["processed"] == 0
+    assert result["steps"]["immediate_reply"]["sent"] == 0
+    assert result["steps"]["backend_answer"]["sent"] == 1
     assert result["steps"]["backend_command"]["duplicates_count"] == 1
     assert result["steps"]["backend_result_consume"]["status"] == "PROCESSED"
+    assert result["closed_loop"] is True
 
 
 def test_runner_resumes_sent_command_with_pending_result_without_reexecuting_backend(monkeypatch):

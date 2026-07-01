@@ -753,8 +753,7 @@ def test_external_command_worker_real_handoff_success_transfers_emits_result_and
             self.calls = []
 
         async def send_text(self, chat_id, thread_id, text):
-            self.calls.append(("send_text", chat_id, thread_id, text))
-            return {"event_id": "notice-1"}
+            raise AssertionError("handoff worker must not send user-visible notice")
 
         async def transfer_chat_to_group(self, chat_id, group_id, ignore_agents_availability=True, ignore_requester_presence=True):
             self.calls.append(
@@ -792,10 +791,7 @@ def test_external_command_worker_real_handoff_success_transfers_emits_result_and
         )
     )
 
-    assert sender_client.calls == [
-        ("send_text", "chat-1", "thread-1", "我会为你转接真人客服继续协助。"),
-        ("transfer", "chat-1", 23, True, True),
-    ]
+    assert sender_client.calls == [("transfer", "chat-1", 23, True, True)]
     assert result[0]["status"] == "SENT"
     assert result_repository.inserted[0]["result_type"] == "human_handoff.transfer_chat.result"
     assert result_repository.inserted[0]["result_json"]["status"] == "TRANSFERRED"
@@ -851,7 +847,7 @@ def test_external_command_worker_real_handoff_classifies_livechat_errors():
 
     class SenderClient:
         async def send_text(self, chat_id, thread_id, text):
-            return {}
+            raise AssertionError("handoff worker must not send user-visible notice")
 
         async def transfer_chat_to_group(self, *args, **kwargs):
             raise LiveChatApiError(429, {"error": "rate limited"})
@@ -1126,7 +1122,7 @@ def test_external_command_worker_transfer_success_conversation_update_failure_is
             self.calls = []
 
         async def send_text(self, chat_id, thread_id, text):
-            self.calls.append("notice")
+            raise AssertionError("handoff worker must not send user-visible notice")
 
         async def transfer_chat_to_group(self, *args, **kwargs):
             self.calls.append("transfer")
@@ -1153,7 +1149,7 @@ def test_external_command_worker_transfer_success_conversation_update_failure_is
         )
     )
 
-    assert sender_client.calls == ["notice", "transfer"]
+    assert sender_client.calls == ["transfer"]
     assert repository.stages[-1][1]["transfer_succeeded"] is True
     assert repository.statuses[0][0:2] == (14, "FAILED_AFTER_EXTERNAL_SUCCESS")
     assert "LiveChat transfer may have succeeded" in repository.statuses[0][2]
@@ -1202,7 +1198,7 @@ def test_external_command_worker_transfer_success_result_insert_failure_is_termi
 
     class SenderClient:
         async def send_text(self, chat_id, thread_id, text):
-            pass
+            raise AssertionError("handoff worker must not send user-visible notice")
 
         async def transfer_chat_to_group(self, *args, **kwargs):
             return {}

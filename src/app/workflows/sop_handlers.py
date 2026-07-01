@@ -121,22 +121,20 @@ def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
         "status": "WAITING_EXTERNAL",
         "active_workflow": "withdrawal_blocked_or_rollover",
         "workflow_stage": "backend_querying",
-        "response_text": "一般无法提款通常与流水要求或风控限制有关。已收到你的资料，我们正在进一步查询。",
-        "response_text_fallback": "一般无法提款通常与流水要求或风控限制有关。已收到你的资料，我们正在进一步查询。",
-        "reply_plan": build_reply_plan(
-            kind="backend_waiting",
-            fallback_text="一般无法提款通常与流水要求或风控限制有关。已收到你的资料，我们正在进一步查询。",
-            must_say=["正在进一步查询"],
-            semantic_required_items=["backend_waiting_notice"],
-            must_not_say=["已到账", "已完成", "保证", "马上到账", "一定"],
-            allowed_facts=["已收到客户提供的识别资料", "正在进一步查询"],
-        ),
+        "response_text": None,
+        "response_text_fallback": None,
+        "reply_plan": None,
         "commands": [
             {
                 "type": CommandType.BACKEND_QUERY,
                 "payload": {
                     "intent": "withdrawal_blocked_or_rollover",
                     "account_or_phone": slot_memory["account_or_phone"],
+                    "reply_language": state.get("reply_language"),
+                    "conversation_language": state.get("conversation_language"),
+                    "detected_language": state.get("detected_language"),
+                    "raw_user_input": state.get("raw_user_input"),
+                    "rewritten_question": state.get("rewritten_question"),
                 },
             }
         ],

@@ -220,10 +220,6 @@ async def _process_real_command(
         return {"id": command["id"], "command_type": command_type, "status": FAILED_AFTER_EXTERNAL_SUCCESS, "error": error}
 
     try:
-        if not handoff_stage.get("notice_sent"):
-            await sender_client.send_text(command["chat_id"], command.get("thread_id"), HUMAN_HANDOFF_NOTICE_TEXT)
-            handoff_stage["notice_sent"] = True
-            await _record_handoff_stage(repository, command["id"], handoff_stage)
         handoff_stage["transfer_attempted"] = True
         await _record_handoff_stage(repository, command["id"], handoff_stage)
         livechat_response = await sender_client.transfer_chat_to_group(
@@ -375,10 +371,12 @@ async def _process_real_backend_query_command(
     settings: Settings | None,
     max_retries: int = 3,
 ) -> dict:
+    command_payload = command.get("payload_json") or {}
     block_reason = _backend_block_reason(settings, execute_backend)
     if block_reason:
         result_insert = None
         result_json = {"status": "failed", "error_code": "FAILED_CONFIG", "error_message": block_reason}
+        _copy_backend_context_to_result(command_payload, result_json)
         if emit_result:
             if not result_repository:
                 raise ValueError("result_repository is required when emit_result=True")
@@ -393,11 +391,12 @@ async def _process_real_backend_query_command(
 
     service = _build_backend_query_service(settings)
     result_json = service.execute(
-        command.get("payload_json") or {},
-        tenant_id=(command.get("payload_json") or {}).get("tenant_id") or command.get("tenant_id"),
+        command_payload,
+        tenant_id=command_payload.get("tenant_id") or command.get("tenant_id"),
         channel_type="livechat",
         channel_instance_id=command.get("chat_id"),
     )
+    _copy_backend_context_to_result(command_payload, result_json)
     if result_json.get("status") != "success":
         status = result_json.get("error_code") or "FAILED_BACKEND_QUERY"
         result_insert = None
@@ -618,6 +617,18 @@ def _build_result_record(command: dict, result_type: str, result_json: dict, sta
         # Real handoff transfer already applied its side effects in this worker; keep this as an audit row.
         record["status"] = status
     return record
+
+
+def _copy_backend_context_to_result(command_payload: dict, result_json: dict) -> None:
+    for key in (
+        "reply_language",
+        "conversation_language",
+        "detected_language",
+        "raw_user_input",
+        "rewritten_question",
+    ):
+        if command_payload.get(key) is not None:
+            result_json[key] = command_payload[key]
 
 
 async def _record_handoff_stage(repository: ExternalCommandRepository, command_id: int, stage: dict) -> None:

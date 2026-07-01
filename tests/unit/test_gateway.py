@@ -492,10 +492,16 @@ def test_gateway_service_withdrawal_blocked_generates_backend_query_without_rag_
     assert rag_service.calls == []
     assert result["graph_state"]["intent_result"]["intent"] == "withdrawal_blocked_or_rollover"
     assert result["graph_state"]["workflow_stage"] == "backend_querying"
-    assert outbound_repository.inserted[0]["payload_json"]["text"] == "一般无法提款通常与流水要求或风控限制有关。已收到你的资料，我们正在进一步查询。"
+    assert result["outbound_messages"] == []
+    assert outbound_repository.inserted == []
+    assert result["graph_state"].get("response_text") is None
+    assert result["graph_state"].get("response_text_fallback") is None
     assert [command["command_type"] for command in external_repository.inserted] == ["backend.query"]
     assert external_repository.inserted[0]["payload_json"]["intent"] == "withdrawal_blocked_or_rollover"
     assert external_repository.inserted[0]["payload_json"]["account_or_phone"] == "andy123"
+    assert external_repository.inserted[0]["payload_json"]["reply_language"] == result["graph_state"]["reply_language"]
+    assert external_repository.inserted[0]["payload_json"]["conversation_language"] == result["graph_state"]["conversation_language"]
+    assert external_repository.inserted[0]["payload_json"]["detected_language"] == result["graph_state"]["detected_language"]
 
 
 def test_gateway_service_human_active_records_inbound_but_does_not_run_graph_or_enqueue_work():

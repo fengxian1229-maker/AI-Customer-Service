@@ -19,6 +19,7 @@ from app.db.repositories import (
     InboundEventRepository,
     OutboundMessageRepository,
 )
+from app.services.final_reply_factory import build_final_reply_service_from_settings
 from app.workers import (
     external_command_worker,
     external_result_consumer,
@@ -357,6 +358,7 @@ async def external_result_tick(context: ServiceRunnerContext) -> dict:
     result_repository = ExternalCommandResultRepository(context.pool)
     conversation_repository = ConversationRepository(context.pool)
     outbound_repository = OutboundMessageRepository(context.pool)
+    final_reply_service = build_final_reply_service_from_settings(context.settings)
     results = await external_result_consumer.process_pending_results(
         result_repository=result_repository,
         conversation_repository=conversation_repository,
@@ -369,6 +371,8 @@ async def external_result_tick(context: ServiceRunnerContext) -> dict:
         ),
         limit=context.config.external_result_limit,
         worker_id=context.external_result_worker_id,
+        final_reply_service=final_reply_service,
+        llm_final_reply_enabled=getattr(context.settings, "llm_final_reply_enabled", False),
     )
     return {
         "worker": "external_result_consumer",

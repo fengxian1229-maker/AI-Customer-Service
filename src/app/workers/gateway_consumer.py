@@ -12,11 +12,10 @@ from app.db.repositories import (
     KnowledgeDocumentRepository,
 )
 from app.graph.checkpointing import build_checkpointer
-from app.llm.final_reply_provider import FinalReplyLLMProvider
 from app.llm.provider import build_llm_provider
 from app.schemas.events import InboundEvent
+from app.services.final_reply_factory import build_final_reply_service_from_settings
 from app.services.gateway import GatewayService
-from app.services.final_reply_service import FinalReplyService
 from app.services.rag import RagService
 
 
@@ -130,28 +129,7 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
 
 
 def _build_final_reply_service(settings):
-    if not settings or not getattr(settings, "llm_final_reply_enabled", False):
-        return None
-    provider_name = str(getattr(settings, "llm_provider", "off") or "off").lower()
-    if provider_name == "gemini":
-        provider = FinalReplyLLMProvider(settings)
-    elif provider_name == "mock":
-        provider = build_llm_provider(provider_name, settings=settings)
-    else:
-        provider = None
-    return FinalReplyService(
-        provider=provider,
-        enabled=getattr(settings, "llm_final_reply_enabled", False),
-        min_confidence=getattr(settings, "llm_final_reply_min_confidence", 0.70),
-        fallback_enabled=getattr(settings, "llm_final_reply_fallback_enabled", True),
-        tenant_persona={
-            "default_language": getattr(settings, "tenant_persona_default_language", "zh-Hans"),
-            "supported_languages": getattr(settings, "tenant_supported_languages", "zh-Hans,zh-Hant,en,es,tl,th,my,ms"),
-            "tone": getattr(settings, "tenant_persona_tone", "polite"),
-            "assistant_name": getattr(settings, "tenant_persona_assistant_name", None),
-            "brand_name": getattr(settings, "tenant_persona_brand_name", None),
-        },
-    )
+    return build_final_reply_service_from_settings(settings)
 
 
 async def _process_rows(service, rows: list[dict]) -> dict:

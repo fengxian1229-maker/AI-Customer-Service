@@ -82,6 +82,30 @@ class FakeTransactionRepository:
         return {"outbound_inserts": outbound_inserts, "external_command_inserts": []}
 
 
+class FakeFinalReplyService:
+    def __init__(self, text: str | None = None, *, raise_error: bool = False, fallback: bool = False) -> None:
+        self.text = text
+        self.raise_error = raise_error
+        self.fallback = fallback
+        self.calls = []
+
+    async def compose(self, state: dict) -> dict:
+        self.calls.append(state)
+        if self.raise_error:
+            raise RuntimeError("final reply failed")
+        if self.fallback:
+            return {
+                **state,
+                "final_response_text": state["response_text_fallback"],
+                "final_reply_result": {"status": "fallback", "fallback_reason": "low_confidence"},
+            }
+        return {
+            **state,
+            "final_response_text": self.text or state["response_text_fallback"],
+            "final_reply_result": {"status": "accepted", "confidence": 0.91},
+        }
+
+
 def make_result(result_type: str, command_type: str | None = None) -> dict:
     command_type = command_type or result_type.removesuffix(".mock_result")
     return {
@@ -281,6 +305,8 @@ def test_backend_query_result_outbound_uses_backend_answer_dedup_after_instant_r
         existing_keys={"default:livechat:chat-1:11:send_event"}
     )
 
+    final_reply_service = FakeFinalReplyService("您好，后台显示还需要完成 1375.09 流水后再提款。")
+
     result = asyncio.run(
         process_result_by_id(
             result_repository=result_repository,
@@ -289,16 +315,20 @@ def test_backend_query_result_outbound_uses_backend_answer_dedup_after_instant_r
             result_id=700,
             transaction_repository=FakeTransactionRepository(result_repository, conversation_repository, outbound_repository),
             worker_id="consumer-scoped",
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
         )
     )
 
     assert result["status"] == "PROCESSED"
+    assert final_reply_service.calls
+    assert final_reply_service.calls[0]["reply_plan"]["kind"] == "backend_query_result"
     assert result["outbound_inserts"][0]["inserted"] is True
     outbound = outbound_repository.inserted[0]
     assert outbound["dedup_key"] == "default:livechat:chat-1:11:backend.query.result:700"
     assert outbound["message_kind"] == "backend_answer"
     assert outbound["command_type"] == "backend.query.result"
-    assert outbound["payload_json"]["text"] == "backend answer ok"
+    assert outbound["payload_json"]["text"] == "您好，后台显示还需要完成 1375.09 流水后再提款。"
 
 
 def test_external_result_consumer_process_result_by_id_reports_locked():
@@ -453,21 +483,106 @@ def test_result_consumer_pending_reply_lookup_result_found_writes_reply():
     assert "上一笔案件仍在处理中" in outbound_repository.inserted[0]["payload_json"]["text"]
 
 
-def test_result_consumer_backend_query_result_success_uses_result_answer():
-    _processed, result_repository, conversation_repository, outbound_repository = run_consumer_for(
-        make_result("backend.query.result")
-        | {"result_json": {"status": "success", "answer": "查询已完成，当前为 mock 后台结果。"}}
+def test_result_consumer_backend_query_result_success_uses_final_reply_text():
+    from app.workers.external_result_consumer import process_pending_results
+
+    final_reply_service = FakeFinalReplyService("润色后的后台回复。")
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "success",
+                    "answer": "查询已完成，当前为 mock 后台结果。",
+                    "query": {"remaining_turnover": 1375.09, "active_requirements_count": 2},
+                    "reply_language": "zh-Hans",
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
     )
 
+    assert processed[0]["status"] == "PROCESSED"
     assert result_repository.processed == [7]
+    assert final_reply_service.calls
+    assert final_reply_service.calls[0]["reply_language"] == "zh-Hans"
+    assert "1375.09" in final_reply_service.calls[0]["reply_plan"]["must_say_exact"]
     assert conversation_repository.updated[0][1]["workflow_stage"] == "completed"
-    assert "mock 后台结果" in outbound_repository.inserted[0]["payload_json"]["text"]
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "润色后的后台回复。"
     assert outbound_repository.inserted[0]["dedup_key"] == "default:livechat:chat-1:11:backend.query.result:7"
     assert outbound_repository.inserted[0]["message_kind"] == "backend_answer"
     assert outbound_repository.inserted[0]["command_type"] == "backend.query.result"
 
 
+def test_result_consumer_backend_query_result_final_reply_fallback_uses_internal_answer():
+    from app.workers.external_result_consumer import process_pending_results
+
+    final_reply_service = FakeFinalReplyService(fallback=True)
+    result_repository = FakeResultRepository(
+        [make_result("backend.query.result") | {"result_json": {"status": "success", "answer": "内部安全 answer"}}]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert final_reply_service.calls
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "内部安全 answer"
+
+
+def test_result_consumer_backend_query_result_final_reply_exception_uses_internal_answer():
+    from app.workers.external_result_consumer import process_pending_results
+
+    final_reply_service = FakeFinalReplyService(raise_error=True)
+    result_repository = FakeResultRepository(
+        [make_result("backend.query.result") | {"result_json": {"status": "success", "answer": "内部安全 answer"}}]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert final_reply_service.calls
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "内部安全 answer"
+
+
 def test_result_consumer_backend_query_result_failed_writes_safe_fallback_without_retry():
+    from app.workers.external_result_consumer import process_pending_results
+
+    final_reply_service = FakeFinalReplyService("后台暂时查不到结果，我们会继续人工复核。")
     result = make_result("backend.query.result") | {
         "result_json": {
             "status": "failed",
@@ -475,12 +590,27 @@ def test_result_consumer_backend_query_result_failed_writes_safe_fallback_withou
             "error_message": "Authorization Bearer secret-token password=secret",
         }
     }
-    processed, result_repository, conversation_repository, outbound_repository = run_consumer_for(result)
+    result_repository = FakeResultRepository([result])
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
 
     assert processed[0]["status"] == "PROCESSED"
     assert result_repository.processed == [7]
     assert result_repository.failed == []
-    assert outbound_repository.inserted[0]["payload_json"]["text"] == "后台查询暂时无法完成，我们会继续为你人工复核，请稍候。"
+    assert final_reply_service.calls
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "后台暂时查不到结果，我们会继续人工复核。"
     assert outbound_repository.inserted[0]["dedup_key"] == "default:livechat:chat-1:11:backend.query.result:7"
     assert outbound_repository.inserted[0]["message_kind"] == "backend_answer"
     assert outbound_repository.inserted[0]["command_type"] == "backend.query.result"

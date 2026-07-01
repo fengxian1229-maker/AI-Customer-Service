@@ -17,6 +17,7 @@ from app.db.repositories import (
     OutboundMessageRepository,
     json_loads,
 )
+from app.services.final_reply_factory import build_final_reply_service_from_settings
 from app.workers import backend_sop_smoke_admin, external_command_worker, external_result_consumer, gateway_consumer, sender_worker
 
 
@@ -226,6 +227,8 @@ async def run_smoke(
             result_id=backend_result["id"],
             worker_id=worker_id,
             lease_seconds=lease_seconds,
+            final_reply_service=build_final_reply_service_from_settings(settings),
+            llm_final_reply_enabled=getattr(settings, "llm_final_reply_enabled", False),
         )
     elif backend_result.get("status") == "PROCESSED":
         consume_result = {

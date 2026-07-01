@@ -489,7 +489,15 @@ def test_external_command_worker_execute_backend_success_emits_result(monkeypatc
                     "thread_id": "thread-1",
                     "inbound_event_id": 177,
                     "command_type": "backend.query",
-                    "payload_json": {"intent": "withdrawal_blocked_or_rollover", "account_or_phone": "andy"},
+                    "payload_json": {
+                        "intent": "withdrawal_blocked_or_rollover",
+                        "account_or_phone": "andy",
+                        "reply_language": "zh-Hans",
+                        "conversation_language": "zh-Hans",
+                        "detected_language": "zh-Hans",
+                        "raw_user_input": "提款不了，用户名是 andy",
+                        "rewritten_question": "提款不了，用户名是 andy",
+                    },
                 }
             ]
 
@@ -529,6 +537,11 @@ def test_external_command_worker_execute_backend_success_emits_result(monkeypatc
     assert result[0]["status"] == "SENT"
     assert result_repository.inserted[0]["result_type"] == "backend.query.result"
     assert result_repository.inserted[0]["result_json"]["answer"] == "后台查询完成"
+    assert result_repository.inserted[0]["result_json"]["reply_language"] == "zh-Hans"
+    assert result_repository.inserted[0]["result_json"]["conversation_language"] == "zh-Hans"
+    assert result_repository.inserted[0]["result_json"]["detected_language"] == "zh-Hans"
+    assert result_repository.inserted[0]["result_json"]["raw_user_input"] == "提款不了，用户名是 andy"
+    assert result_repository.inserted[0]["result_json"]["rewritten_question"] == "提款不了，用户名是 andy"
 
 
 def test_external_command_worker_execute_backend_disabled_returns_failed_config():
@@ -588,7 +601,11 @@ def test_external_command_worker_execute_backend_config_failure_emits_failed_res
                     "thread_id": "thread-1",
                     "inbound_event_id": 179,
                     "command_type": "backend.query",
-                    "payload_json": {"intent": "withdrawal_blocked_or_rollover", "account_or_phone": "andy"},
+                    "payload_json": {
+                        "intent": "withdrawal_blocked_or_rollover",
+                        "account_or_phone": "andy",
+                        "reply_language": "zh-Hans",
+                    },
                 }
             ]
 
@@ -622,4 +639,5 @@ def test_external_command_worker_execute_backend_config_failure_emits_failed_res
         "status": "failed",
         "error_code": "FAILED_CONFIG",
         "error_message": "backend_query_enabled is false",
+        "reply_language": "zh-Hans",
     }

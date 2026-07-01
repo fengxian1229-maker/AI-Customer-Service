@@ -15,8 +15,10 @@ from app.db.repositories import (
     ExternalResultTransactionRepository,
     OutboundMessageRepository,
 )
+from app.services.final_reply_factory import build_final_reply_service_from_settings
 from app.services.message_history import build_external_result_summary_message
 from app.services.outbox import build_text_outbox
+from app.workflows.final_reply_policy import build_reply_plan
 
 
 RESULT_HANDLERS = {
@@ -61,6 +63,8 @@ async def process_pending_results(
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
 ) -> list[dict]:
     worker_id = worker_id or default_worker_id()
     rows = await result_repository.lease_pending(limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
@@ -76,6 +80,12 @@ async def process_pending_results(
     for row in rows:
         try:
             handler = build_result_handler(row)
+            handler = await _apply_backend_final_reply(
+                row,
+                handler,
+                final_reply_service=final_reply_service,
+                llm_final_reply_enabled=llm_final_reply_enabled,
+            )
             graph_state = handler["graph_state"]
             outbound = build_result_outbox(row, handler["text"])
             transaction_result = await transaction_repository.process_result_transactionally(
@@ -108,6 +118,8 @@ async def process_result_by_id(
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
 ) -> dict:
     worker_id = worker_id or default_worker_id()
     row = await result_repository.lease_pending_by_id(
@@ -127,6 +139,12 @@ async def process_result_by_id(
         )
     try:
         handler = build_result_handler(row)
+        handler = await _apply_backend_final_reply(
+            row,
+            handler,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=llm_final_reply_enabled,
+        )
         outbound = build_result_outbox(row, handler["text"])
         transaction_result = await transaction_repository.process_result_transactionally(
             row,
@@ -286,6 +304,141 @@ def build_result_handler(row: dict) -> dict:
     return resolved
 
 
+async def _apply_backend_final_reply(
+    row: dict,
+    handler: dict,
+    *,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
+) -> dict:
+    if row.get("result_type") != "backend.query.result":
+        return handler
+
+    fallback_text = str(handler.get("text") or "").strip()
+    if not fallback_text:
+        return handler
+
+    final_state = _build_backend_final_reply_state(row, handler, fallback_text)
+    composed = None
+    if llm_final_reply_enabled and final_reply_service and hasattr(final_reply_service, "compose"):
+        try:
+            composed = await final_reply_service.compose(final_state)
+        except Exception as exc:
+            composed = {
+                **final_state,
+                "final_response_text": fallback_text,
+                "final_reply_result": {
+                    "status": "fallback",
+                    "fallback_reason": "exception",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:1000],
+                },
+            }
+    if composed is None:
+        composed = {
+            **final_state,
+            "final_response_text": fallback_text,
+            "final_reply_result": {
+                "status": "fallback",
+                "fallback_reason": "disabled_or_missing_provider",
+            },
+        }
+
+    final_text = str((composed or {}).get("final_response_text") or "").strip() or fallback_text
+    graph_state = {
+        **dict(handler.get("graph_state") or {}),
+        "response_text_fallback": fallback_text,
+        "final_response_text": final_text,
+        "final_reply_result": (composed or {}).get("final_reply_result"),
+    }
+    updated = {**handler, "text": final_text, "graph_state": graph_state}
+    updated["summary_message"] = build_external_result_summary_message(row, updated)
+    return updated
+
+
+def _build_backend_final_reply_state(row: dict, handler: dict, fallback_text: str) -> dict:
+    result_json = row.get("result_json") or {}
+    query = result_json.get("query") if isinstance(result_json.get("query"), dict) else {}
+    reply_language = (
+        result_json.get("reply_language")
+        or result_json.get("conversation_language")
+        or result_json.get("detected_language")
+        or "zh-Hans"
+    )
+    return {
+        "tenant_id": row.get("tenant_id") or "default",
+        "channel_type": "livechat",
+        "conversation_id": row.get("conversation_id"),
+        "raw_user_input": result_json.get("raw_user_input"),
+        "rewritten_question": result_json.get("rewritten_question"),
+        "recent_messages": [],
+        "route": "sop",
+        "intent_result": {"intent": "withdrawal_blocked_or_rollover"},
+        "active_workflow": "withdrawal_blocked_or_rollover",
+        "workflow_stage": (handler.get("graph_state") or {}).get("workflow_stage"),
+        "status": (handler.get("graph_state") or {}).get("status"),
+        "slot_memory": dict((handler.get("graph_state") or {}).get("slot_memory") or {}),
+        "missing_slots": [],
+        "sop_action": "backend_query_result",
+        "rag_result": None,
+        "detected_language": result_json.get("detected_language"),
+        "language_confidence": None,
+        "language_source": "backend_query_result",
+        "conversation_language": result_json.get("conversation_language"),
+        "reply_language": reply_language,
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
+        "reply_plan": build_reply_plan(
+            kind="backend_query_result",
+            fallback_text=fallback_text,
+            must_say_exact=_backend_result_must_say_exact(query),
+            must_not_say=["已到账", "已完成", "保证", "马上到账", "一定"],
+            allowed_facts=_backend_result_allowed_facts(result_json),
+        ),
+        "commands": [],
+    }
+
+
+def _backend_result_must_say_exact(query: dict) -> list[str]:
+    values = []
+    remaining = query.get("remaining_turnover")
+    if remaining is not None:
+        values.append(_format_number_for_reply_plan(remaining))
+    return values
+
+
+def _backend_result_allowed_facts(result_json: dict) -> list[str]:
+    facts = []
+    answer = str(result_json.get("answer") or "").strip()
+    if answer:
+        facts.append(answer)
+    query = result_json.get("query") if isinstance(result_json.get("query"), dict) else {}
+    for key in (
+        "player_found",
+        "active_requirements_count",
+        "remaining_turnover",
+        "required_turnover",
+        "valid_turnover",
+        "is_met",
+        "records_count",
+    ):
+        if key in query:
+            facts.append(f"{key}={_format_number_for_reply_plan(query[key])}")
+    return facts
+
+
+def _format_number_for_reply_plan(value) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        return str(int(number))
+    return str(round(number, 2))
+
+
 def _summary_sender_role_for_result_type(result_type: str) -> str:
     if result_type.startswith("telegram."):
         return "telegram"
@@ -328,6 +481,7 @@ async def run_once(
     )
     pool = await create_pool(settings)
     try:
+        final_reply_service = build_final_reply_service_from_settings(settings)
         results = await process_pending_results(
             result_repository=ExternalCommandResultRepository(pool),
             conversation_repository=ConversationRepository(pool),
@@ -337,6 +491,8 @@ async def run_once(
             worker_id=worker_id,
             lease_seconds=lease_seconds,
             max_retries=max_retries,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=getattr(settings, "llm_final_reply_enabled", False),
         )
         return {
             "worker": "external_result_consumer",
@@ -388,11 +544,14 @@ async def run_forever(
         conversation_repository = ConversationRepository(pool)
         outbound_repository = OutboundMessageRepository(pool)
         transaction_repository = ExternalResultTransactionRepository(pool)
+        final_reply_service = build_final_reply_service_from_settings(settings)
         await run_polling_loop(
             result_repository=result_repository,
             conversation_repository=conversation_repository,
             outbound_repository=outbound_repository,
             transaction_repository=transaction_repository,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=getattr(settings, "llm_final_reply_enabled", False),
             poll_seconds=settings.poll_seconds,
             limit=limit,
             worker_id=worker_id,
@@ -420,6 +579,8 @@ async def run_polling_loop(
     last_recovered_at: float | None = None,
     iterations: int | None = None,
     sleep=asyncio.sleep,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
 ) -> None:
     iteration = 0
     while iterations is None or iteration < iterations:
@@ -438,6 +599,8 @@ async def run_polling_loop(
                 worker_id=worker_id,
                 lease_seconds=lease_seconds,
                 max_retries=max_retries,
+                final_reply_service=final_reply_service,
+                llm_final_reply_enabled=llm_final_reply_enabled,
             )
         except Exception:
             logger.exception("external_result_consumer polling iteration failed.")
