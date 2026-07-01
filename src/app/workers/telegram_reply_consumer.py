@@ -206,6 +206,29 @@ async def run_once(
     client: TelegramUpdatesClient | None = None,
 ) -> dict:
     settings = settings or Settings()
+    pool = await create_pool(settings)
+    try:
+        return await process_telegram_updates_once(
+            pool=pool,
+            settings=settings,
+            limit=limit,
+            timeout=timeout,
+            offset_key=offset_key,
+            client=client,
+        )
+    finally:
+        pool.close()
+        await pool.wait_closed()
+
+
+async def process_telegram_updates_once(
+    pool,
+    settings: Settings,
+    limit: int = 20,
+    timeout: int = 0,
+    offset_key: str | None = None,
+    client: TelegramUpdatesClient | None = None,
+) -> dict:
     if not settings.telegram_sop_enabled:
         return {"worker": "telegram_reply_consumer", "status": "SKIPPED_DISABLED", "reason": "telegram_sop_enabled is false"}
     if not settings.telegram_bot_token:
@@ -214,51 +237,46 @@ async def run_once(
     if not target_chat_ids:
         return {"worker": "telegram_reply_consumer", "status": "FAILED_CONFIG", "reason": "telegram target chat id is missing"}
     offset_key = offset_key or _offset_key(settings, target_chat_ids)
-    pool = await create_pool(settings)
-    try:
-        offset_repository = TelegramUpdateOffsetRepository(pool)
-        case_repository = TelegramCaseRepository(pool)
-        result_repository = ExternalCommandResultRepository(pool)
-        transaction_repository = ExternalResultTransactionRepository(
-            pool,
-            conversation_repository=ConversationRepository(pool),
-            outbound_repository=OutboundMessageRepository(pool),
-            result_repository=result_repository,
-            conversation_message_repository=ConversationMessageRepository(pool),
-        )
-        mapping_sync = await case_repository.sync_recent_external_results()
-        last_update_id = await offset_repository.get_offset(offset_key)
-        client = client or TelegramUpdatesClient(
-            bot_token=settings.telegram_bot_token,
-            api_base=settings.telegram_api_base,
-            timeout_seconds=settings.telegram_request_timeout_seconds,
-        )
-        bot_user_id = _safe_bot_user_id(client)
-        updates = client.get_updates(offset=last_update_id + 1 if last_update_id else None, timeout=timeout, limit=limit)
-        processed = await process_telegram_updates(
-            updates,
-            case_repository=case_repository,
-            result_repository=result_repository,
-            transaction_repository=transaction_repository,
-            offset_repository=offset_repository,
-            offset_key=offset_key,
-            target_chat_ids=target_chat_ids,
-            bot_user_id=bot_user_id,
-        )
-        return {
-            "worker": "telegram_reply_consumer",
-            "mode": "once",
-            "updates": len(updates),
-            "recorded": sum(1 for item in processed if item.get("status") == "RECORDED"),
-            "duplicates": sum(1 for item in processed if item.get("status") == "DUPLICATE"),
-            "ignored": sum(1 for item in processed if item.get("status") == "IGNORED"),
-            "failed": sum(1 for item in processed if item.get("status") == "FAILED"),
-            "mapping_sync": mapping_sync,
-            "offset_key": offset_key,
-        }
-    finally:
-        pool.close()
-        await pool.wait_closed()
+    offset_repository = TelegramUpdateOffsetRepository(pool)
+    case_repository = TelegramCaseRepository(pool)
+    result_repository = ExternalCommandResultRepository(pool)
+    transaction_repository = ExternalResultTransactionRepository(
+        pool,
+        conversation_repository=ConversationRepository(pool),
+        outbound_repository=OutboundMessageRepository(pool),
+        result_repository=result_repository,
+        conversation_message_repository=ConversationMessageRepository(pool),
+    )
+    mapping_sync = await case_repository.sync_recent_external_results()
+    last_update_id = await offset_repository.get_offset(offset_key)
+    client = client or TelegramUpdatesClient(
+        bot_token=settings.telegram_bot_token,
+        api_base=settings.telegram_api_base,
+        timeout_seconds=settings.telegram_request_timeout_seconds,
+    )
+    bot_user_id = _safe_bot_user_id(client)
+    updates = client.get_updates(offset=last_update_id + 1 if last_update_id else None, timeout=timeout, limit=limit)
+    processed = await process_telegram_updates(
+        updates,
+        case_repository=case_repository,
+        result_repository=result_repository,
+        transaction_repository=transaction_repository,
+        offset_repository=offset_repository,
+        offset_key=offset_key,
+        target_chat_ids=target_chat_ids,
+        bot_user_id=bot_user_id,
+    )
+    return {
+        "worker": "telegram_reply_consumer",
+        "mode": "once",
+        "updates": len(updates),
+        "recorded": sum(1 for item in processed if item.get("status") == "RECORDED"),
+        "duplicates": sum(1 for item in processed if item.get("status") == "DUPLICATE"),
+        "ignored": sum(1 for item in processed if item.get("status") == "IGNORED"),
+        "failed": sum(1 for item in processed if item.get("status") == "FAILED"),
+        "mapping_sync": mapping_sync,
+        "offset_key": offset_key,
+    }
 
 
 async def run_forever(limit: int = 20, timeout: int = 20, offset_key: str | None = None) -> None:
