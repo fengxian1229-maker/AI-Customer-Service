@@ -20,6 +20,23 @@ CANONICAL_FAQ_INTENTS = (
     "withdrawal_howto",
     "forgot_password_howto",
     "screenshot_upload_howto",
+    "rollover_explanation",
+)
+
+WORKFLOW_RELATIONS_WITH_ACTIVE = (
+    "current_workflow_supplement",
+    "independent_faq",
+    "new_workflow_request",
+    "human_escalation",
+    "unclear",
+)
+WORKFLOW_RELATIONS_WITHOUT_ACTIVE = ("none",)
+
+SOP_INTENTS = (
+    "deposit_missing",
+    "withdrawal_missing",
+    "withdrawal_blocked_or_rollover",
+    "pending_reply_lookup",
 )
 
 ALLOWED_LLM_INTENTS = (
@@ -247,7 +264,10 @@ def validate_intent_output(payload: dict[str, Any], output: dict[str, Any]) -> d
 
 
 def validate_router_decision_output(payload: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
-    del payload
+    return validate_intent_classification_output(payload, output)
+
+
+def validate_intent_classification_output(payload: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
     route = validate_llm_route(_require_str(output, "route", "router decision"))
     requires_human = True if route == "human_handoff" else bool(output.get("requires_human", False))
     intent = normalize_router_decision_intent(
@@ -256,7 +276,11 @@ def validate_router_decision_output(payload: dict[str, Any], output: dict[str, A
         requires_human,
     )
     validate_route_intent_pair(route, intent)
-    return {
+    workflow_relation = _validate_workflow_relation(payload, output.get("workflow_relation"), route)
+    preserve_active_workflow = bool(output.get("preserve_active_workflow", True))
+    if payload.get("active_workflow") and route != "human_handoff" and not preserve_active_workflow:
+        raise ValueError("Active workflow must be preserved during intent classification.")
+    validated = {
         "intent": intent,
         "route": route,
         "confidence": normalize_confidence(output.get("confidence")),
@@ -266,8 +290,84 @@ def validate_router_decision_output(payload: dict[str, Any], output: dict[str, A
         "requires_human": requires_human,
         "requires_backend": bool(output.get("requires_backend", False)),
         "missing_slots": _string_list(output.get("missing_slots")),
+        "workflow_relation": workflow_relation,
+        "preserve_active_workflow": preserve_active_workflow,
         "reason": _require_str(output, "reason", "router decision"),
     }
+    _validate_intent_classification_contract(payload, validated)
+    return validated
+
+
+def _validate_workflow_relation(payload: dict[str, Any], value, route: str) -> str | None:
+    active_workflow = _optional_str(payload.get("active_workflow"))
+    relation = _optional_str(value)
+    if active_workflow:
+        if not relation:
+            raise ValueError("workflow_relation is required when active_workflow is present.")
+        if relation not in WORKFLOW_RELATIONS_WITH_ACTIVE:
+            raise ValueError(f"Unsupported workflow_relation with active workflow: {relation}")
+        return relation
+    if relation is None:
+        return None
+    if relation not in WORKFLOW_RELATIONS_WITHOUT_ACTIVE:
+        raise ValueError(f"workflow_relation without active workflow must be none or null: {relation}")
+    return relation
+
+
+def _validate_intent_classification_contract(payload: dict[str, Any], output: dict[str, Any]) -> None:
+    active_workflow = _optional_str(payload.get("active_workflow"))
+    route = output["route"]
+    intent = output["intent"]
+    relation = output.get("workflow_relation")
+    if route == "faq":
+        if intent not in CANONICAL_FAQ_INTENTS:
+            raise ValueError(f"FAQ route requires a canonical FAQ intent: {intent}")
+        if not output.get("faq_query"):
+            raise ValueError("FAQ route requires faq_query.")
+        if output.get("requires_backend"):
+            raise ValueError("FAQ route cannot require backend facts.")
+        if output.get("requires_human"):
+            raise ValueError("FAQ route cannot require human handoff.")
+        if output.get("missing_slots"):
+            raise ValueError("FAQ route cannot request SOP slots.")
+        if output.get("sop_name"):
+            raise ValueError("FAQ route cannot set sop_name.")
+    if route == "sop":
+        sop_name = _optional_str(output.get("sop_name"))
+        if sop_name and not get_sop_definition(sop_name):
+            raise ValueError(f"Unsupported SOP name: {sop_name}")
+        if intent in SOP_INTENTS and not output.get("requires_backend") and relation != "current_workflow_supplement":
+            raise ValueError("SOP route for backend workflows must set requires_backend=true.")
+    if route == "human_handoff" and not output.get("requires_human"):
+        raise ValueError("human_handoff route must set requires_human=true.")
+    if not active_workflow:
+        return
+    if relation == "current_workflow_supplement":
+        if route != "sop":
+            raise ValueError("current_workflow_supplement requires route=sop.")
+        if intent != active_workflow:
+            raise ValueError("current_workflow_supplement intent must match active_workflow.")
+        sop_name = _optional_str(output.get("sop_name"))
+        if sop_name and sop_name != active_workflow:
+            raise ValueError("current_workflow_supplement sop_name must match active_workflow.")
+    elif relation == "independent_faq":
+        if route != "faq":
+            raise ValueError("independent_faq requires route=faq.")
+        if not output.get("preserve_active_workflow"):
+            raise ValueError("independent_faq must preserve active workflow.")
+    elif relation == "new_workflow_request":
+        if route != "clarification" or intent != "clarification_needed":
+            raise ValueError("new_workflow_request must ask clarification before switching workflow.")
+        if not output.get("preserve_active_workflow"):
+            raise ValueError("new_workflow_request must preserve active workflow.")
+    elif relation == "human_escalation":
+        if route != "human_handoff":
+            raise ValueError("human_escalation requires route=human_handoff.")
+    elif relation == "unclear":
+        if route != "clarification":
+            raise ValueError("unclear workflow relation requires route=clarification.")
+        if not output.get("preserve_active_workflow"):
+            raise ValueError("unclear workflow relation must preserve active workflow.")
 
 
 def validate_sop_slot_extraction_output(payload: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:

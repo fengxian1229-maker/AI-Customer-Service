@@ -16,6 +16,7 @@ from app.workflows.slot_extractors import (
     attachment_urls,
     extract_amount,
     extract_identity,
+    extract_order_id,
     is_explicit_human_request,
     normalize_text,
 )
@@ -237,21 +238,10 @@ def intent_router_node(state: GraphState) -> GraphState:
     lower = text.lower()
     hints = extract_route_hints(state)
 
-    if active and stage in {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}:
-        return {
-            **state,
-            "intent_result": _intent_result(
-                intent=active,
-                route="sop",
-                reason="Continue active workflow through SOP handler.",
-                confidence=0.95,
-                sop_name=active,
-            ),
-            "route": "sop",
-        }
-
     if hints["has_explicit_human_request"]:
         return _with_route(state, "explicit_human_request", "human_handoff", "Customer explicitly requested a human agent.")
+    if active and stage in ACTIVE_WORKFLOW_GUARD_STAGES:
+        return _active_workflow_deterministic_route(state, str(active))
     if _is_service_frustration(lower):
         return _with_route(
             state,
@@ -340,6 +330,23 @@ def make_intent_router_node(
     async def node(state: GraphState) -> GraphState:
         if state.get("route_locked") and state.get("route"):
             return state
+        raw = normalize_text(state.get("raw_user_input"))
+        if is_explicit_human_request(raw):
+            next_state = _with_route(
+                state,
+                "explicit_human_request",
+                "human_handoff",
+                "Customer explicitly requested a human agent.",
+            )
+            next_state["llm_router_result"] = _router_result_summary(
+                "fallback",
+                mode="guarded_authoritative",
+                fallback_reason="explicit_human_request_guard",
+                fallback_to_deterministic=True,
+            )
+            return next_state
+        if state.get("event_type") == "FILE_RECEIVED" and not state.get("active_workflow") and not raw:
+            return intent_router_node(state)
         if not llm_intent_service or not hasattr(llm_intent_service, "route"):
             return _router_fallback_state(state, "missing_provider", "guarded_authoritative", fallback_to_deterministic)
 
@@ -391,6 +398,8 @@ def make_intent_router_node(
             "requires_human": decision.get("requires_human"),
             "requires_backend": decision.get("requires_backend"),
             "missing_slots": list(decision.get("missing_slots") or []),
+            "workflow_relation": decision.get("workflow_relation"),
+            "preserve_active_workflow": decision.get("preserve_active_workflow"),
         }
         route = "clarification" if decision["route"] == "unsupported" else decision["route"]
         return {
@@ -569,6 +578,8 @@ def _intent_result(
     faq_query: str | None = None,
     emotion: str | None = None,
     risk_level: str | None = None,
+    workflow_relation: str | None = None,
+    preserve_active_workflow: bool | None = None,
 ) -> dict[str, Any]:
     result = {
         "intent": intent,
@@ -584,6 +595,10 @@ def _intent_result(
         result["emotion"] = emotion
     if risk_level:
         result["risk_level"] = risk_level
+    if workflow_relation:
+        result["workflow_relation"] = workflow_relation
+    if preserve_active_workflow is not None:
+        result["preserve_active_workflow"] = preserve_active_workflow
     return result
 
 
@@ -597,6 +612,8 @@ def _with_route(
     faq_query: str | None = None,
     emotion: str | None = None,
     risk_level: str | None = None,
+    workflow_relation: str | None = None,
+    preserve_active_workflow: bool | None = None,
 ) -> GraphState:
     return {
         **state,
@@ -609,9 +626,56 @@ def _with_route(
             faq_query=faq_query,
             emotion=emotion,
             risk_level=risk_level,
+            workflow_relation=workflow_relation,
+            preserve_active_workflow=preserve_active_workflow,
         ),
         "route": route,
     }
+
+
+def _active_workflow_deterministic_route(state: GraphState, active_workflow: str) -> GraphState:
+    faq = _is_independent_faq_during_workflow(state)
+    if faq:
+        return _with_route(
+            state,
+            faq["intent"],
+            "faq",
+            "Independent FAQ during active workflow; preserve current SOP state.",
+            confidence=0.86,
+            faq_query=faq["faq_query"],
+            workflow_relation="independent_faq",
+            preserve_active_workflow=True,
+        )
+    if _is_new_workflow_request(state, active_workflow):
+        return _with_route(
+            state,
+            "clarification_needed",
+            "clarification",
+            "New SOP-like request during active workflow; ask whether to switch workflow before changing state.",
+            confidence=0.78,
+            workflow_relation="new_workflow_request",
+            preserve_active_workflow=True,
+        )
+    if _is_current_workflow_supplement(state, active_workflow):
+        return _with_route(
+            state,
+            active_workflow,
+            "sop",
+            "Message appears to supplement the active SOP workflow.",
+            confidence=0.86,
+            sop_name=active_workflow,
+            workflow_relation="current_workflow_supplement",
+            preserve_active_workflow=True,
+        )
+    return _with_route(
+        state,
+        "clarification_needed",
+        "clarification",
+        "Message relation to the active workflow is unclear.",
+        confidence=0.55,
+        workflow_relation="unclear",
+        preserve_active_workflow=True,
+    )
 
 
 def _build_llm_rewrite_payload(state: GraphState) -> dict[str, Any]:
@@ -730,6 +794,8 @@ def _router_result_summary(
         "requires_human": decision.get("requires_human"),
         "requires_backend": decision.get("requires_backend"),
         "missing_slots": decision.get("missing_slots"),
+        "workflow_relation": decision.get("workflow_relation"),
+        "preserve_active_workflow": decision.get("preserve_active_workflow"),
     }
     if fallback_reason:
         summary["fallback_reason"] = fallback_reason
@@ -740,6 +806,96 @@ def _router_result_summary(
     if fallback_to_deterministic is not None:
         summary["fallback_to_deterministic"] = fallback_to_deterministic
     return {key: value for key, value in summary.items() if value is not None}
+
+
+def _is_current_workflow_supplement(state: GraphState, active_workflow: str) -> bool:
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
+    lower = text.lower()
+    if state.get("attachments") and active_workflow in {"deposit_missing", "withdrawal_missing"}:
+        return True
+    if extract_amount(text) or extract_identity(text) or extract_order_id(text):
+        return True
+    if len(lower) <= 32 and any(char.isdigit() for char in lower):
+        return True
+    current_tokens = {
+        "deposit_missing": (
+            "截图",
+            "凭证",
+            "已付",
+            "已转",
+            "支付",
+            "付款",
+            "充值",
+            "存款",
+            "到账",
+            "没到账",
+            "未到账",
+            "deposit",
+            "paid",
+            "sent",
+            "submitted",
+            "mandé",
+            "mande",
+            "enviado",
+            "payment",
+            "receipt",
+            "proof",
+            "depósito",
+            "deposito",
+        ),
+        "withdrawal_missing": (
+            "截图",
+            "凭证",
+            "提款",
+            "提现",
+            "到账",
+            "没到账",
+            "未到账",
+            "withdraw",
+            "withdrawal",
+            "retiro",
+            "sent",
+            "submitted",
+            "mandé",
+            "mande",
+            "enviado",
+            "proof",
+        ),
+        "withdrawal_blocked_or_rollover": ("流水", "rollover", "提款", "提现", "withdraw", "限制", "blocked"),
+        "pending_reply_lookup": ("之前", "上一笔", "案件", "回复", "case", "ticket", "previous"),
+    }
+    return _contains_any(lower, current_tokens.get(active_workflow, ()))
+
+
+def _is_independent_faq_during_workflow(state: GraphState) -> dict[str, str] | None:
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    if _is_deposit_howto(text) or _contains_any(text, ("怎么存款", "如何存款", "怎么充值")):
+        return {"intent": "deposit_howto", "faq_query": "怎么存款"}
+    if _is_withdrawal_howto(text) or _contains_any(text, ("怎么提款", "怎么提现", "如何提现")):
+        return {"intent": "withdrawal_howto", "faq_query": "如何提款"}
+    if _is_forgot_password_howto(text):
+        return {"intent": "forgot_password_howto", "faq_query": "忘记密码"}
+    if _is_screenshot_upload_howto(text, extract_route_hints(state)) or _contains_any(text, ("怎么上传截图", "如何上传截图")):
+        return {"intent": "screenshot_upload_howto", "faq_query": "上传截图"}
+    if _is_rollover_explanation(text) or _contains_any(text, ("流水是什么意思", "流水是什么", "rollover 是什么")):
+        return {"intent": "rollover_explanation", "faq_query": "流水说明"}
+    return None
+
+
+def _is_new_workflow_request(state: GraphState, active_workflow: str) -> bool:
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    candidate: str | None = None
+    if _is_deposit_missing(text):
+        candidate = "deposit_missing"
+    elif _is_withdrawal_missing(text):
+        candidate = "withdrawal_missing"
+    elif _is_withdrawal_blocked_or_rollover(text):
+        candidate = "withdrawal_blocked_or_rollover"
+    elif _is_pending_reply_lookup(text):
+        candidate = "pending_reply_lookup"
+    elif _is_account_access_issue(text) or _is_account_profile_or_wallet_change(text):
+        candidate = "manual_support_workflow"
+    return bool(candidate and candidate != active_workflow)
 
 
 def _should_run_sop_slot_extraction(state: GraphState, service, enabled: bool) -> bool:

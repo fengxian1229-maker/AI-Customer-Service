@@ -504,6 +504,8 @@ class GatewayService:
                 "sop_name": decision.get("sop_name"),
                 "faq_query": decision.get("faq_query"),
                 "risk_level": decision.get("risk_level"),
+                "workflow_relation": decision.get("workflow_relation"),
+                "preserve_active_workflow": decision.get("preserve_active_workflow"),
             },
             "route": decision["route"],
             "route_source": "llm_guarded_authoritative",
@@ -516,8 +518,6 @@ class GatewayService:
         }
 
     def _router_hard_guard_reason(self, graph_state: dict) -> str | None:
-        if graph_state.get("active_workflow") and graph_state.get("workflow_stage") in ACTIVE_WORKFLOW_GUARD_STAGES:
-            return "active_workflow"
         if graph_state.get("event_type") == "FILE_RECEIVED" and not normalize_text(graph_state.get("raw_user_input")):
             return "file_without_text"
         if is_explicit_human_request(graph_state.get("raw_user_input")):
@@ -619,6 +619,8 @@ class GatewayService:
             "faq_query": decision.get("faq_query"),
             "requires_human": decision.get("requires_human"),
             "requires_backend": decision.get("requires_backend"),
+            "workflow_relation": decision.get("workflow_relation"),
+            "preserve_active_workflow": decision.get("preserve_active_workflow"),
         }
         if fallback_reason:
             summary["fallback_reason"] = fallback_reason
@@ -741,6 +743,8 @@ class GatewayService:
             "faq_query",
             "requires_human",
             "requires_backend",
+            "workflow_relation",
+            "preserve_active_workflow",
             "fallback_reason",
             "hard_guard",
             "fallback_to_deterministic",

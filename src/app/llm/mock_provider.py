@@ -57,16 +57,31 @@ class MockLLMProvider:
     async def route(self, payload: LLMIntentClassificationInput) -> LLMIntentClassificationOutput:
         deterministic = payload.get("deterministic_intent_result") or {}
         text = normalize_text(payload.get("raw_user_input"))
+        active_workflow = payload.get("active_workflow")
+        route = deterministic.get("route") or payload.get("deterministic_route") or "faq"
+        relation = "none"
+        preserve = True
+        if active_workflow:
+            if route == "faq":
+                relation = "independent_faq"
+            elif route == "human_handoff":
+                relation = "human_escalation"
+            elif route == "sop":
+                relation = "current_workflow_supplement"
+            else:
+                relation = "unclear"
         return {
             "intent": deterministic.get("intent") or "faq_general",
-            "route": deterministic.get("route") or payload.get("deterministic_route") or "faq",
+            "route": route,
             "confidence": 0.84,
             "sop_name": deterministic.get("sop_name"),
             "faq_query": deterministic.get("faq_query"),
             "risk_level": "elevated" if _risk_flags(text) else None,
-            "requires_human": (deterministic.get("route") == "human_handoff"),
+            "requires_human": (route == "human_handoff"),
             "requires_backend": bool(_risk_flags(text)),
             "missing_slots": [],
+            "workflow_relation": relation,
+            "preserve_active_workflow": preserve,
             "reason": "Mock guarded intent classifier mirrors deterministic decision for offline validation.",
             "provider": self.provider_name,
             "mode": "guarded_authoritative",

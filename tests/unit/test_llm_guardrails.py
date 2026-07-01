@@ -89,6 +89,50 @@ def test_validate_router_decision_forces_requires_human_for_handoff_route():
     assert decision["requires_human"] is True
 
 
+def test_validate_intent_classification_allows_independent_faq_during_active_workflow():
+    from app.llm.guardrails import validate_intent_classification_output
+
+    decision = validate_intent_classification_output(
+        {"active_workflow": "deposit_missing"},
+        {
+            "intent": "withdrawal_howto",
+            "route": "faq",
+            "confidence": 0.9,
+            "faq_query": "如何提款",
+            "requires_human": False,
+            "requires_backend": False,
+            "missing_slots": [],
+            "workflow_relation": "independent_faq",
+            "preserve_active_workflow": True,
+            "reason": "standalone FAQ",
+        },
+    )
+
+    assert decision["workflow_relation"] == "independent_faq"
+    assert decision["preserve_active_workflow"] is True
+
+
+def test_validate_intent_classification_rejects_direct_new_workflow_switch():
+    from app.llm.guardrails import validate_intent_classification_output
+
+    with pytest.raises(ValueError, match="new_workflow_request"):
+        validate_intent_classification_output(
+            {"active_workflow": "deposit_missing"},
+            {
+                "intent": "withdrawal_missing",
+                "route": "sop",
+                "confidence": 0.9,
+                "sop_name": "withdrawal_missing",
+                "requires_human": False,
+                "requires_backend": True,
+                "missing_slots": [],
+                "workflow_relation": "new_workflow_request",
+                "preserve_active_workflow": True,
+                "reason": "bad direct switch",
+            },
+        )
+
+
 def test_validate_router_decision_normalizes_handoff_intent_when_model_omits_requires_human():
     from app.llm.guardrails import validate_router_decision_output
 

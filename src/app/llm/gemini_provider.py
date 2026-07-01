@@ -63,6 +63,12 @@ FAQ_KNOWLEDGE_TARGETS = """FAQ knowledge targets. For FAQ route, choose the clos
    - intent: screenshot_upload_howto
    - faq_query: 上传截图
    - Use for: how to upload/send screenshot or proof image.
+
+5. 流水说明
+   - route: faq
+   - intent: rollover_explanation
+   - faq_query: 流水说明
+   - Use for: what rollover/流水 means, wagering requirement explanation, turnover explanation.
 """
 
 ALLOWED_INTENT_CONTRACT = """Allowed intents. The intent field must be exactly one of these values. Do not invent, translate, rename, or paraphrase intent names:
@@ -115,6 +121,8 @@ Allowed routes. The route field must be exactly one of these values:
 {FAQ_KNOWLEDGE_TARGETS}
 
 Routing rules:
+- You are an intent classifier, not a reply writer and not a rewrite model.
+- FAQ is static knowledge. SOP is stateful service handling.
 - For ordinary how-to, manual, guide, or instruction questions that match the FAQ knowledge targets, use route: faq.
 - For FAQ route, intent and faq_query must match one of the FAQ knowledge targets above.
 - For user wording like "I just registered and want to put money into my account to start playing", use route: faq, intent: deposit_howto, faq_query: 怎么存款.
@@ -125,8 +133,28 @@ Routing rules:
 - For account, order, payment, balance, deposit status, withdrawal status, or other backend fact-like requests, prefer SOP/human/backend-safe handling and set requires_backend: true when backend facts are needed.
 - For escalation, take-over requests, specialist review requests, or cases where automated replies are not helping, use route: human_handoff, intent: explicit_human_request, requires_human: true.
 - If the customer explicitly asks for a human, route must be human_handoff.
-- If the conversation is in an active workflow, continue SOP and do not switch to FAQ.
 - If no route is safe because the message is too ambiguous, use route: clarification and intent: clarification_needed.
+
+Workflow relation rules:
+- Always set workflow_relation and preserve_active_workflow.
+- If active_workflow is absent, set workflow_relation: none.
+- If active_workflow is present, do not assume every new message must continue SOP.
+- When active_workflow is present, classify the latest message relation to the current workflow:
+  - current_workflow_supplement: the user is supplying account, phone, amount, order ID, screenshot/proof, payment channel, confirmation, or follow-up for the current SOP. Use route: sop, intent: active_workflow, sop_name: active_workflow.
+  - independent_faq: the user temporarily asks a standalone FAQ. Use route: faq, canonical FAQ intent, faq_query, requires_backend: false, requires_human: false, preserve_active_workflow: true.
+  - new_workflow_request: the user raises a different new SOP issue unrelated to the current workflow. Use route: clarification, intent: clarification_needed, preserve_active_workflow: true. Do not switch workflows directly.
+  - human_escalation: the user explicitly asks for a human/manager/real support. Use route: human_handoff, intent: explicit_human_request, requires_human: true.
+  - unclear: relation to the current workflow is unclear. Use route: clarification, intent: clarification_needed, preserve_active_workflow: true.
+- Never clear, replace, or switch active_workflow. The system owns workflow state.
+
+Examples when active_workflow=deposit_missing:
+- "账号 abc123" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_supplement, preserve_active_workflow: true.
+- "金额1000" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_supplement, preserve_active_workflow: true.
+- "截图发给你了" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_supplement, preserve_active_workflow: true.
+- "怎么提款？" -> route: faq, intent: withdrawal_howto, faq_query: 如何提款, workflow_relation: independent_faq, preserve_active_workflow: true.
+- "流水是什么意思？" -> route: faq, intent: rollover_explanation, faq_query: 流水说明, workflow_relation: independent_faq, preserve_active_workflow: true.
+- "我还有一笔提款没到账" -> route: clarification, intent: clarification_needed, workflow_relation: new_workflow_request, preserve_active_workflow: true.
+- "我要人工" -> route: human_handoff, intent: explicit_human_request, workflow_relation: human_escalation, requires_human: true.
 
 Return only structured JSON matching the schema."""
 

@@ -96,6 +96,8 @@ class LLMIntentClassificationOutput(TypedDict, total=False):
     requires_human: bool
     requires_backend: bool
     missing_slots: list[str]
+    workflow_relation: str | None
+    preserve_active_workflow: bool
     reason: str
     provider: str
     mode: str
@@ -212,6 +214,8 @@ class LLMIntentClassificationSchema(BaseModel):
     requires_human: bool = False
     requires_backend: bool = False
     missing_slots: list[str] = Field(default_factory=list)
+    workflow_relation: str | None = None
+    preserve_active_workflow: bool = True
     reason: str
 
 

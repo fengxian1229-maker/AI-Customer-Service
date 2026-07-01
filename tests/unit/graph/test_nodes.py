@@ -3,6 +3,7 @@ from app.graph.nodes import (
     command_planner_node,
     human_handoff_node,
     intent_router_node,
+    make_intent_router_node,
     prepare_route_state,
     rewrite_question_node,
 )
@@ -134,11 +135,11 @@ def test_howto_issue_must_not_route_to_sop():
     assert result["route"] != "sop"
 
 
-def test_active_collecting_workflow_routes_directly_to_sop():
+def test_active_collecting_workflow_supplement_routes_to_current_sop():
     result = intent_router_node(
         {
-            "raw_user_input": "ya lo mandé",
-            "rewritten_question": "ya lo mandé",
+            "raw_user_input": "账号 abc123 金额1000",
+            "rewritten_question": "账号 abc123 金额1000",
             "active_workflow": "deposit_missing",
             "workflow_stage": "collecting_slots",
         }
@@ -146,6 +147,76 @@ def test_active_collecting_workflow_routes_directly_to_sop():
 
     assert result["intent_result"]["intent"] == "deposit_missing"
     assert result["route"] == "sop"
+    assert result["intent_result"]["workflow_relation"] == "current_workflow_supplement"
+
+
+def test_active_collecting_workflow_allows_independent_faq_without_clearing_workflow():
+    result = intent_router_node(
+        {
+            "raw_user_input": "怎么提款？",
+            "rewritten_question": "怎么提款？",
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "collecting_slots",
+            "slot_memory": {"account_or_phone": "abc123"},
+        }
+    )
+
+    assert result["route"] == "faq"
+    assert result["intent_result"]["intent"] == "withdrawal_howto"
+    assert result["intent_result"]["workflow_relation"] == "independent_faq"
+    assert result["active_workflow"] == "deposit_missing"
+    assert result["slot_memory"] == {"account_or_phone": "abc123"}
+
+
+def test_active_collecting_workflow_new_sop_request_asks_before_switching():
+    result = intent_router_node(
+        {
+            "raw_user_input": "我还有一笔提款没到账",
+            "rewritten_question": "我还有一笔提款没到账",
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "collecting_slots",
+        }
+    )
+
+    assert result["route"] == "clarification"
+    assert result["intent_result"]["workflow_relation"] == "new_workflow_request"
+    assert result["active_workflow"] == "deposit_missing"
+
+
+def test_llm_intent_invalid_active_workflow_switch_falls_back_to_deterministic_faq():
+    import asyncio
+
+    class BadSwitchService:
+        async def route(self, payload):
+            return {
+                "intent": "withdrawal_missing",
+                "route": "sop",
+                "confidence": 0.95,
+                "sop_name": "withdrawal_missing",
+                "requires_backend": True,
+                "workflow_relation": "new_workflow_request",
+                "preserve_active_workflow": True,
+                "reason": "bad direct switch",
+                "provider": "fake",
+                "mode": "guarded_authoritative",
+            }
+
+    node = make_intent_router_node(BadSwitchService())
+    result = asyncio.run(
+        node(
+            {
+                "raw_user_input": "怎么提款？",
+                "rewritten_question": "怎么提款？",
+                "active_workflow": "deposit_missing",
+                "workflow_stage": "collecting_slots",
+            }
+        )
+    )
+
+    assert result["route"] == "faq"
+    assert result["intent_result"]["workflow_relation"] == "independent_faq"
+    assert result["llm_router_result"]["status"] == "fallback"
+    assert result["llm_router_result"]["fallback_reason"] == "validation_error"
 
 
 def test_command_planner_node_prefers_final_response_text():
