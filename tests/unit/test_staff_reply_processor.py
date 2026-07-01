@@ -17,6 +17,13 @@ def test_staff_reply_fallback_detects_ask_customer():
     assert "abc12345" in text
 
 
+def test_staff_reply_fallback_detects_phone_recheck_as_ask_customer():
+    result = StaffReplyProcessor(enabled=False).process("未查到该笔订单，请再检查一遍电话是否提供错误", target_lang="zh")
+
+    assert result.type == "ask_customer"
+    assert "补充资料" in result.text
+
+
 def test_staff_reply_fact_validation_rejects_added_success_status():
     result = validate_staff_reply_facts("still checking order 987654321", "已经成功处理 order 987654321")
 

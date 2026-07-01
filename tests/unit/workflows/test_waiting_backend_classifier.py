@@ -105,6 +105,54 @@ def test_waiting_backend_followup_only_reassures():
     assert state["commands"] == []
 
 
+def test_waiting_backend_acknowledgement_does_not_append_or_expose_case_id():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {"telegram_case_id": "tg:21", "telegram_message_id": 21},
+            "attachments": [],
+            "raw_user_input": "好的",
+            "intent_result": {
+                "intent": "acknowledgement",
+                "route": "contextual_reply",
+                "workflow_relation": "acknowledgement",
+                "preserve_active_workflow": True,
+            },
+        }
+    )
+
+    assert state["commands"] == []
+    assert state["sop_action"] == "acknowledgement"
+    assert "tg:" not in state["response_text"]
+    assert state["workflow_stage"] == "waiting_backend"
+
+
+def test_waiting_backend_contextual_followup_answers_name_offer_without_append():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "collecting_slots",
+            "slot_memory": {},
+            "attachments": [],
+            "raw_user_input": "May I provide my name?",
+            "reply_language": "en",
+            "intent_result": {
+                "intent": "contextual_followup",
+                "route": "contextual_reply",
+                "workflow_relation": "contextual_followup",
+                "preserve_active_workflow": True,
+            },
+        }
+    )
+
+    assert state["commands"] == []
+    assert state["sop_action"] == "contextual_followup"
+    assert "name" in state["response_text"].lower()
+    assert "phone" in state["response_text"].lower()
+    assert "screenshot" in state["response_text"].lower()
+
+
 def test_waiting_backend_text_supplement_without_telegram_case_does_not_append():
     state = handle_waiting_backend(
         {
@@ -135,6 +183,27 @@ def test_waiting_backend_text_supplement_with_telegram_case_generates_append_com
     assert state["commands"][0]["payload"]["telegram_case_id"] == "tg:123"
     assert state["commands"][0]["payload"]["telegram_message_id"] == 123
     assert state["commands"][0]["payload"]["supplement"]["text"] == "补一下交易号 TX123456"
+
+
+def test_waiting_customer_supplement_phone_correction_generates_append_command():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "waiting_customer_supplement",
+            "slot_memory": {
+                "telegram_case_id": "tg:21",
+                "telegram_message_id": 21,
+                "last_telegram_staff_reply_type": "ask_customer",
+            },
+            "attachments": [],
+            "raw_user_input": "那电话应该是123456",
+        }
+    )
+
+    assert state["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE
+    assert state["commands"][0]["payload"]["telegram_case_id"] == "tg:21"
+    assert state["commands"][0]["payload"]["telegram_message_id"] == 21
+    assert state["commands"][0]["payload"]["supplement"]["text"] == "那电话应该是123456"
 
 
 def test_waiting_backend_text_supplement_and_human_with_telegram_case_appends_first():

@@ -315,6 +315,8 @@ def intent_router_node(state: GraphState) -> GraphState:
         return _with_route(state, "clarification_needed", "clarification", "Menu recovery is outside canonical FAQ.")
     if state.get("event_type") == "FILE_RECEIVED":
         return _with_route(state, "clarification_needed", "clarification", "File upload without a clear issue needs clarification.")
+    if _is_casual_chat(state):
+        return _with_route(state, "casual_chat", "casual_chat", "Non-business greeting or small talk.", confidence=0.82)
     if text:
         return _with_route(state, "clarification_needed", "clarification", "Question is outside canonical FAQ targets.", confidence=0.55)
     return _with_route(state, "clarification_needed", "clarification", "No clear question content provided.", confidence=0.2)
@@ -416,7 +418,7 @@ def make_intent_router_node(
 
 
 def sop_node(state: GraphState) -> GraphState:
-    if state.get("workflow_stage") in {"waiting_backend", "backend_querying"}:
+    if state.get("workflow_stage") in {"waiting_backend", "backend_querying", "waiting_customer_supplement"}:
         return handle_waiting_backend(state)
     return run_sop(state)
 
@@ -531,6 +533,29 @@ def emotion_care_node(state: GraphState) -> GraphState:
     }
 
 
+def contextual_reply_node(state: GraphState) -> GraphState:
+    relation = (state.get("intent_result") or {}).get("workflow_relation")
+    if relation == "contextual_followup":
+        return _contextual_followup_state(state)
+    return _acknowledgement_state(state)
+
+
+def casual_chat_node(state: GraphState) -> GraphState:
+    fallback_text = _casual_reply_text(str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans"))
+    return {
+        **state,
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
+        "reply_plan": build_reply_plan(
+            kind="casual_chat",
+            fallback_text=fallback_text,
+            must_not_say=["已到账", "已完成", "已处理", "已同步", "tg:"],
+            allowed_facts=["用户发送非业务闲聊或问候"],
+        ),
+        "commands": [],
+    }
+
+
 def clarification_node(state: GraphState) -> GraphState:
     fallback_text = "请补充你要咨询的问题，或说明是存款、提款、流水还是需要真人客服。"
     return {
@@ -565,6 +590,42 @@ def command_planner_node(state: GraphState) -> GraphState:
                 },
             )
     return {**state, "commands": commands}
+
+
+def _acknowledgement_state(state: GraphState) -> GraphState:
+    fallback_text = _acknowledgement_reply_text(state)
+    return {
+        **state,
+        "sop_action": "acknowledgement",
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
+        "reply_plan": build_reply_plan(
+            kind="acknowledgement",
+            fallback_text=fallback_text,
+            must_not_say=["已到账", "已完成", "已处理", "已同步", "已补充给后台", "tg:"],
+            allowed_facts=[fallback_text],
+            metadata={"workflow_relation": "acknowledgement"},
+        ),
+        "commands": [],
+    }
+
+
+def _contextual_followup_state(state: GraphState) -> GraphState:
+    fallback_text = _contextual_followup_reply_text(state)
+    return {
+        **state,
+        "sop_action": "contextual_followup",
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
+        "reply_plan": build_reply_plan(
+            kind="contextual_followup",
+            fallback_text=fallback_text,
+            must_not_say=["已到账", "已完成", "已处理", "已同步", "已补充给后台", "tg:"],
+            allowed_facts=[fallback_text],
+            metadata={"workflow_relation": "contextual_followup"},
+        ),
+        "commands": [],
+    }
 
 
 def persist_state_node(state: GraphState) -> GraphState:
@@ -636,6 +697,26 @@ def _with_route(
 
 
 def _active_workflow_deterministic_route(state: GraphState, active_workflow: str) -> GraphState:
+    if _is_acknowledgement(state):
+        return _with_route(
+            state,
+            "acknowledgement",
+            "contextual_reply",
+            "Customer acknowledged the previous message; preserve active workflow without SOP side effects.",
+            confidence=0.88,
+            workflow_relation="acknowledgement",
+            preserve_active_workflow=True,
+        )
+    if _is_contextual_followup(state):
+        return _with_route(
+            state,
+            "contextual_followup",
+            "contextual_reply",
+            "Customer asks a context-dependent follow-up about the active workflow requirements.",
+            confidence=0.86,
+            workflow_relation="contextual_followup",
+            preserve_active_workflow=True,
+        )
     faq = _is_independent_faq_during_workflow(state)
     if faq:
         return _with_route(
@@ -688,6 +769,99 @@ def _active_workflow_deterministic_route(state: GraphState, active_workflow: str
         workflow_relation="unclear",
         preserve_active_workflow=True,
     )
+
+
+def _is_acknowledgement(state: GraphState) -> bool:
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    normalized = re.sub(r"[.!?。！？…\s]+", "", text)
+    return normalized in {
+        "ok",
+        "okay",
+        "好的",
+        "好",
+        "谢谢",
+        "謝謝",
+        "明白",
+        "了解",
+        "收到",
+        "知道了",
+        "thanks",
+        "thankyou",
+        "gracias",
+        "vale",
+        "bueno",
+        "listo",
+    }
+
+
+def _is_contextual_followup(state: GraphState) -> bool:
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    if not text:
+        return False
+    name_patterns = (
+        r"\bmay i provide my name\b",
+        r"\bcan i provide my name\b",
+        r"\bcan i give (?:you )?my name\b",
+        r"\bwould my name\b",
+        r"\bname (?:instead|enough|ok|okay)\b",
+        r"可以.*(姓名|名字)",
+        r"(姓名|名字).*可以",
+    )
+    return any(re.search(pattern, text, flags=re.I) for pattern in name_patterns)
+
+
+def _is_casual_chat(state: GraphState) -> bool:
+    if state.get("active_workflow") or state.get("workflow_stage"):
+        return False
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    normalized = re.sub(r"[,，.!?。！？…\s]+", " ", text).strip()
+    if _is_acknowledgement(state):
+        return True
+    return bool(
+        re.fullmatch(
+            r"(hi|hello|hey|hola|你好|您好|how are you|hello how are you|hi how are you|你好吗|在吗|在嗎)",
+            normalized,
+            flags=re.I,
+        )
+    )
+
+
+def _acknowledgement_reply_text(state: GraphState) -> str:
+    language = str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans").lower()
+    stage = str(state.get("workflow_stage") or "")
+    if language.startswith("en"):
+        if stage in {"waiting_backend", "backend_querying"}:
+            return "Got it. The case is still being checked, and I will update you here once there is progress."
+        if stage == "waiting_customer_supplement":
+            return "Got it. Please send the requested details here when you have them, and I will continue helping you check this."
+        return "Got it. You can send the requested details here whenever you are ready."
+    if stage in {"waiting_backend", "backend_querying"}:
+        return "收到，案件仍在确认中，有更新会在这里通知你。"
+    if stage == "waiting_customer_supplement":
+        return "收到，请你确认后把需要补充的资料发给我，我会继续协助核实。"
+    return "收到，你准备好后可以继续把需要补充的资料发给我。"
+
+
+def _contextual_followup_reply_text(state: GraphState) -> str:
+    language = str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans").lower()
+    active = str(state.get("active_workflow") or "")
+    if language.startswith("en"):
+        if active == "withdrawal_missing":
+            return (
+                "Yes, you may provide your name, but for checking this withdrawal case we still need your registered "
+                "phone number and a screenshot of the withdrawal request or receipt. Your name alone may not be enough "
+                "to locate the record."
+            )
+        return "Yes, you may provide your name, but we may still need the requested account details and screenshot to continue checking."
+    if active == "withdrawal_missing":
+        return "可以提供姓名，但为了查询这笔提款，我们仍需要你的注册手机号和提款截图或凭证。只有姓名可能无法准确核实记录。"
+    return "可以提供姓名，但为了继续核实，我们可能仍需要你按前面要求提供账号资料和截图。"
+
+
+def _casual_reply_text(language: str) -> str:
+    if language.lower().startswith("en"):
+        return "Hello, I am here to help. Please tell me what you need assistance with."
+    return "你好，我在这里协助你。请告诉我需要咨询的问题。"
 
 
 def _build_llm_rewrite_payload(state: GraphState) -> dict[str, Any]:

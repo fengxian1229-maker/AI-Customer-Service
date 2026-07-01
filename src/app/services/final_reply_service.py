@@ -109,5 +109,6 @@ class FinalReplyService:
             "supported_languages": list(state.get("supported_languages") or self.supported_languages),
             "response_text_fallback": fallback_text,
             "reply_plan": dict(state.get("reply_plan") or {}),
+            "commands": list(state.get("commands") or []),
             "tenant_persona": dict(self.tenant_persona),
         }

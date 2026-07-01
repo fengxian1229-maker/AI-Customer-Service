@@ -12,6 +12,8 @@ ALLOWED_LLM_ROUTES = (
     "human_handoff",
     "emotion_care",
     "clarification",
+    "contextual_reply",
+    "casual_chat",
     "unsupported",
 )
 
@@ -29,6 +31,8 @@ WORKFLOW_RELATIONS_WITH_ACTIVE = (
     "independent_faq",
     "new_workflow_request",
     "human_escalation",
+    "acknowledgement",
+    "contextual_followup",
     "unclear",
 )
 WORKFLOW_RELATIONS_WITHOUT_ACTIVE = ("none",)
@@ -56,6 +60,9 @@ ALLOWED_LLM_INTENTS = (
     "abusive_or_emotional",
     "unsupported_concrete_issue",
     "clarification_needed",
+    "acknowledgement",
+    "contextual_followup",
+    "casual_chat",
     "backend_fact_like",
 )
 
@@ -151,6 +158,8 @@ def normalize_llm_route(route: str) -> str:
         "sop": "sop",
         "faq": "faq",
         "clarification": "clarification",
+        "contextual_reply": "contextual_reply",
+        "casual_chat": "casual_chat",
         "unsupported": "unsupported",
         "human": "human_handoff",
         "human handoff": "human_handoff",
@@ -195,6 +204,10 @@ def normalize_router_decision_intent(intent: str, route: str, requires_human: bo
         return "explicit_human_request"
     if route == "clarification":
         return "clarification_needed"
+    if route == "contextual_reply":
+        return "contextual_followup"
+    if route == "casual_chat":
+        return "casual_chat"
     if route == "unsupported":
         return "unsupported_concrete_issue"
     raise ValueError(f"Unsupported llm intent: {normalized or intent}")
@@ -350,6 +363,10 @@ def _validate_intent_classification_contract(payload: dict[str, Any], output: di
             raise ValueError("SOP route for backend workflows must set requires_backend=true.")
     if route == "human_handoff" and not output.get("requires_human"):
         raise ValueError("human_handoff route must set requires_human=true.")
+    if route == "contextual_reply" and intent not in {"acknowledgement", "contextual_followup"}:
+        raise ValueError("contextual_reply route requires acknowledgement or contextual_followup intent.")
+    if route == "casual_chat" and intent != "casual_chat":
+        raise ValueError("casual_chat route requires casual_chat intent.")
     if not active_workflow:
         return
     if relation == "current_workflow_supplement":
@@ -387,6 +404,16 @@ def _validate_intent_classification_contract(payload: dict[str, Any], output: di
     elif relation == "human_escalation":
         if route != "human_handoff":
             raise ValueError("human_escalation requires route=human_handoff.")
+    elif relation == "acknowledgement":
+        if route != "contextual_reply" or intent != "acknowledgement":
+            raise ValueError("acknowledgement requires contextual_reply route.")
+        if not output.get("preserve_active_workflow"):
+            raise ValueError("acknowledgement must preserve active workflow.")
+    elif relation == "contextual_followup":
+        if route != "contextual_reply" or intent != "contextual_followup":
+            raise ValueError("contextual_followup requires contextual_reply route.")
+        if not output.get("preserve_active_workflow"):
+            raise ValueError("contextual_followup must preserve active workflow.")
     elif relation == "unclear":
         if route != "clarification":
             raise ValueError("unclear workflow relation requires route=clarification.")

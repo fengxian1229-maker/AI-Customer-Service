@@ -150,6 +150,39 @@ def test_active_collecting_workflow_supplement_routes_to_current_sop():
     assert result["intent_result"]["workflow_relation"] == "current_workflow_supplement"
 
 
+def test_active_workflow_acknowledgement_routes_to_contextual_reply_without_sop_side_effect():
+    result = intent_router_node(
+        {
+            "raw_user_input": "好的",
+            "rewritten_question": "好的",
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "waiting_backend",
+        }
+    )
+
+    assert result["route"] == "contextual_reply"
+    assert result["intent_result"]["intent"] == "acknowledgement"
+    assert result["intent_result"]["workflow_relation"] == "acknowledgement"
+    assert result["intent_result"]["preserve_active_workflow"] is True
+
+
+def test_active_workflow_name_offer_routes_to_contextual_followup():
+    result = intent_router_node(
+        {
+            "raw_user_input": "May I provide my name?",
+            "rewritten_question": "May I provide my name?",
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "collecting_slots",
+            "slot_memory": {},
+        }
+    )
+
+    assert result["route"] == "contextual_reply"
+    assert result["intent_result"]["intent"] == "contextual_followup"
+    assert result["intent_result"]["workflow_relation"] == "contextual_followup"
+    assert result["intent_result"]["preserve_active_workflow"] is True
+
+
 def test_active_collecting_workflow_allows_independent_faq_without_clearing_workflow():
     result = intent_router_node(
         {
@@ -195,6 +228,13 @@ def test_active_withdrawal_workflow_deposit_resolution_is_not_current_supplement
 
     assert result["route"] == "clarification"
     assert result["intent_result"]["workflow_relation"] == "new_workflow_request"
+
+
+def test_without_active_workflow_greeting_routes_to_casual_chat():
+    result = intent_router_node({"raw_user_input": "hello, how are you?", "rewritten_question": "hello, how are you?"})
+
+    assert result["route"] == "casual_chat"
+    assert result["intent_result"]["intent"] == "casual_chat"
 
 
 def test_llm_intent_invalid_active_workflow_switch_falls_back_to_deterministic_faq():

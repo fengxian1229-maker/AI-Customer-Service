@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 from app.workflows.command_contracts import CommandType
@@ -30,13 +31,24 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
         latest_text=text,
         attachments=state.get("attachments", []),
     )
-    relation = dialogue_plan.get("intent_relation")
+    relation = (state.get("intent_result") or {}).get("workflow_relation") or dialogue_plan.get("intent_relation")
     explicit_human = relation == "human_request" or is_explicit_human_request(text)
+    if relation == "acknowledgement" or _is_acknowledgement(text):
+        return _acknowledgement_state(state, slot_memory)
+    if relation == "contextual_followup" or _is_name_offer_followup(text):
+        return _contextual_followup_state(state, slot_memory)
     if relation == "current_workflow_resolution":
         return _resolved_state(state, slot_memory)
+    waiting_customer_supplement = (
+        state.get("workflow_stage") == "waiting_customer_supplement"
+        or slot_memory.get("last_telegram_staff_reply_type") == "ask_customer"
+    )
+    if waiting_customer_supplement:
+        _merge_waiting_customer_supplement(slot_memory, text)
     has_supplement = bool(
         urls
         or any(value for value in (dialogue_plan.get("slot_updates") or {}).values())
+        or (waiting_customer_supplement and _has_customer_supplement_signal(text))
         or (dialogue_plan.get("status") == "accepted" and relation == "current_sop_supplement")
     )
 
@@ -97,6 +109,47 @@ def _waiting_followup_state(state: dict[str, Any], slot_memory: dict[str, Any]) 
         "response_text": CASE_PENDING_REPLY,
         "response_text_fallback": CASE_PENDING_REPLY,
         "reply_plan": _waiting_reply_plan("backend_waiting", CASE_PENDING_REPLY),
+        "commands": [],
+    }
+
+
+def _acknowledgement_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
+    text = _acknowledgement_reply_text(str(state.get("reply_language") or "zh-Hans"), str(state.get("workflow_stage") or ""))
+    return {
+        **state,
+        "slot_memory": slot_memory,
+        "workflow_stage": state.get("workflow_stage") or "waiting_backend",
+        "sop_action": "acknowledgement",
+        "response_text": text,
+        "response_text_fallback": text,
+        "reply_plan": build_reply_plan(
+            kind="acknowledgement",
+            fallback_text=text,
+            must_not_say=["已到账", "已完成", "已处理", "已同步", "已补充给后台", "tg:"],
+            allowed_facts=[text],
+        ),
+        "commands": [],
+    }
+
+
+def _contextual_followup_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
+    text = _contextual_followup_reply_text(
+        str(state.get("reply_language") or "zh-Hans"),
+        str(state.get("active_workflow") or ""),
+    )
+    return {
+        **state,
+        "slot_memory": slot_memory,
+        "workflow_stage": state.get("workflow_stage") or "collecting_slots",
+        "sop_action": "contextual_followup",
+        "response_text": text,
+        "response_text_fallback": text,
+        "reply_plan": build_reply_plan(
+            kind="contextual_followup",
+            fallback_text=text,
+            must_not_say=["已到账", "已完成", "已处理", "已同步", "已补充给后台", "tg:"],
+            allowed_facts=[text],
+        ),
         "commands": [],
     }
 
@@ -165,3 +218,64 @@ def _waiting_reply_plan(kind: str, fallback_text: str) -> dict[str, Any]:
         must_not_say=["已到账", "已完成", "保证", "马上到账", "已处理"],
         allowed_facts=[fallback_text],
     )
+
+
+def _is_acknowledgement(text: str) -> bool:
+    normalized = re.sub(r"[.!?。！？…\s]+", "", str(text or "").lower())
+    return normalized in {"ok", "okay", "好的", "好", "谢谢", "謝謝", "明白", "了解", "收到", "知道了", "thanks", "thankyou", "gracias", "vale", "bueno", "listo"}
+
+
+def _is_name_offer_followup(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(
+        re.search(pattern, lowered, flags=re.I)
+        for pattern in (
+            r"\bmay i provide my name\b",
+            r"\bcan i provide my name\b",
+            r"\bcan i give (?:you )?my name\b",
+            r"\bwould my name\b",
+            r"\bname (?:instead|enough|ok|okay)\b",
+            r"可以.*(姓名|名字)",
+            r"(姓名|名字).*可以",
+        )
+    )
+
+
+def _has_customer_supplement_signal(text: str) -> bool:
+    raw = str(text or "")
+    return bool(raw.strip() and (re.search(r"\d{4,}", raw) or re.search(r"(电话|電話|手机号|手機號|phone|tel[eé]fono|name|姓名|名字|账号|帳號|账户|賬戶)", raw, re.I)))
+
+
+def _merge_waiting_customer_supplement(slot_memory: dict[str, Any], text: str) -> None:
+    phone = re.search(r"(?:电话|電話|手机号|手機號|phone|tel[eé]fono)\D{0,8}(\d{4,18})", str(text or ""), re.I)
+    if phone:
+        slot_memory["phone"] = phone.group(1)
+        slot_memory["account_or_phone"] = phone.group(1)
+
+
+def _acknowledgement_reply_text(language: str, stage: str) -> str:
+    if language.lower().startswith("en"):
+        if stage in {"waiting_backend", "backend_querying"}:
+            return "Got it. The case is still being checked, and I will update you here once there is progress."
+        if stage == "waiting_customer_supplement":
+            return "Got it. Please send the requested details here when you have them, and I will continue helping you check this."
+        return "Got it. You can send the requested details here whenever you are ready."
+    if stage in {"waiting_backend", "backend_querying"}:
+        return "收到，案件仍在确认中，有更新会在这里通知你。"
+    if stage == "waiting_customer_supplement":
+        return "收到，请你确认后把需要补充的资料发给我，我会继续协助核实。"
+    return "收到，你准备好后可以继续把需要补充的资料发给我。"
+
+
+def _contextual_followup_reply_text(language: str, active_workflow: str) -> str:
+    if language.lower().startswith("en"):
+        if active_workflow == "withdrawal_missing":
+            return (
+                "Yes, you may provide your name, but for checking this withdrawal case we still need your registered "
+                "phone number and a screenshot of the withdrawal request or receipt. Your name alone may not be enough "
+                "to locate the record."
+            )
+        return "Yes, you may provide your name, but we may still need the requested account details and screenshot to continue checking."
+    if active_workflow == "withdrawal_missing":
+        return "可以提供姓名，但为了查询这笔提款，我们仍需要你的注册手机号和提款截图或凭证。只有姓名可能无法准确核实记录。"
+    return "可以提供姓名，但为了继续核实，我们可能仍需要你按前面要求提供账号资料和截图。"

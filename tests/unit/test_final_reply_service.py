@@ -217,3 +217,70 @@ def test_final_reply_service_faq_cannot_add_policy_not_in_reply_plan_or_rag():
 
     assert result["final_response_text"] == "存款请按照页面提示操作。"
     assert "forbidden_phrase" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_service_rejects_internal_telegram_case_id():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "好的，案件 tg:21 仍在确认中，有更新会通知你。",
+            "language": "zh",
+            "tone": "polite",
+            "confidence": 0.94,
+            "safety_flags": [],
+            "reason": "leaked internal id",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+    state = base_state(
+        route="contextual_reply",
+        intent_result={"intent": "acknowledgement", "route": "contextual_reply"},
+        active_workflow="withdrawal_missing",
+        workflow_stage="waiting_backend",
+        response_text="收到，案件仍在确认中，有更新会在这里通知你。",
+        response_text_fallback="收到，案件仍在确认中，有更新会在这里通知你。",
+        reply_plan={
+            "kind": "acknowledgement",
+            "fallback_text": "收到，案件仍在确认中，有更新会在这里通知你。",
+            "must_not_say": ["已到账", "已完成"],
+            "allowed_facts": ["案件仍在确认中"],
+        },
+    )
+
+    result = asyncio.run(service.compose(state))
+
+    assert result["final_response_text"] == "收到，案件仍在确认中，有更新会在这里通知你。"
+    assert "internal_telegram_identifier" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_service_rejects_backend_sync_claim_without_append_command():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "好的，收到您的更正，已同步给后台继续核实，请稍等。",
+            "language": "zh",
+            "tone": "polite",
+            "confidence": 0.94,
+            "safety_flags": [],
+            "reason": "unverified sync claim",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+    state = base_state(
+        route="contextual_reply",
+        intent_result={"intent": "acknowledgement", "route": "contextual_reply"},
+        active_workflow="withdrawal_missing",
+        workflow_stage="waiting_backend",
+        response_text="收到，案件仍在确认中，有更新会在这里通知你。",
+        response_text_fallback="收到，案件仍在确认中，有更新会在这里通知你。",
+        reply_plan={
+            "kind": "acknowledgement",
+            "fallback_text": "收到，案件仍在确认中，有更新会在这里通知你。",
+            "must_not_say": ["已到账", "已完成"],
+            "allowed_facts": ["案件仍在确认中"],
+        },
+        commands=[],
+    )
+
+    result = asyncio.run(service.compose(state))
+
+    assert result["final_response_text"] == "收到，案件仍在确认中，有更新会在这里通知你。"
+    assert "unverified_backend_sync_claim" in result["final_reply_result"]["violations"]

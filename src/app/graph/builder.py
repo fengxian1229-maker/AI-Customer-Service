@@ -5,6 +5,8 @@ from app.graph.node_logging import wrap_graph_node
 from app.graph.nodes import (
     clarification_node,
     command_planner_node,
+    casual_chat_node,
+    contextual_reply_node,
     emotion_care_node,
     human_handoff_node,
     intent_router_node,
@@ -91,6 +93,8 @@ def build_workflow_graph(
     graph.add_node("rag_node", wrap_graph_node("rag_node", make_rag_node(rag_service)))
     graph.add_node("emotion_care_node", wrap_graph_node("emotion_care_node", emotion_care_node))
     graph.add_node("human_handoff_node", wrap_graph_node("human_handoff_node", human_handoff_node))
+    graph.add_node("contextual_reply_node", wrap_graph_node("contextual_reply_node", contextual_reply_node))
+    graph.add_node("casual_chat_node", wrap_graph_node("casual_chat_node", casual_chat_node))
     graph.add_node("clarification_node", wrap_graph_node("clarification_node", clarification_node))
     graph.add_node(
         "final_reply_node",
@@ -116,10 +120,20 @@ def build_workflow_graph(
             "rag": "rag_node",
             "emotion_care": "emotion_care_node",
             "human_handoff": "human_handoff_node",
+            "contextual_reply": "contextual_reply_node",
+            "casual_chat": "casual_chat_node",
             "clarification": "clarification_node",
         },
     )
-    for node in ("sop_node", "rag_node", "emotion_care_node", "human_handoff_node", "clarification_node"):
+    for node in (
+        "sop_node",
+        "rag_node",
+        "emotion_care_node",
+        "human_handoff_node",
+        "contextual_reply_node",
+        "casual_chat_node",
+        "clarification_node",
+    ):
         graph.add_edge(node, "final_reply_node")
     graph.add_edge("final_reply_node", "command_planner_node")
     graph.add_edge("command_planner_node", "persist_state_node")

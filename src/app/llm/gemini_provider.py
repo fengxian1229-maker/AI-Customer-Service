@@ -149,7 +149,9 @@ Workflow relation rules:
 - If active_workflow is absent, set workflow_relation: none.
 - If active_workflow is present, do not assume every new message must continue SOP.
 - When active_workflow is present, classify the latest message relation to the current workflow:
-  - current_workflow_supplement: the user is supplying account, phone, amount, order ID, screenshot/proof, payment channel, confirmation, or follow-up for the current SOP. Use route: sop, intent: active_workflow, sop_name: active_workflow.
+  - current_workflow_supplement: the user is supplying account, phone, amount, order ID, screenshot/proof, payment channel, or concrete follow-up details for the current SOP. Use route: sop, intent: active_workflow, sop_name: active_workflow.
+  - acknowledgement: the user only acknowledges or thanks, such as OK, 好的, 明白, 收到, thanks. Use route: contextual_reply, intent: acknowledgement, preserve_active_workflow: true. Do not treat this as a supplement.
+  - contextual_followup: the user asks a question about the current requested information or whether another detail can substitute, such as "May I provide my name?". Use route: contextual_reply, intent: contextual_followup, preserve_active_workflow: true.
   - current_workflow_resolution: the user says the current active SOP is solved, arrived, credited, received, fixed, or no longer needs checking. Use route: sop, intent: active_workflow, sop_name: active_workflow, requires_backend: false, preserve_active_workflow: false.
   - independent_faq: the user temporarily asks a standalone FAQ. Use route: faq, canonical FAQ intent, faq_query, requires_backend: false, requires_human: false, preserve_active_workflow: true.
   - new_workflow_request: the user raises a different new SOP issue or mentions a different business object unrelated to the current workflow. Use route: clarification, intent: clarification_needed, preserve_active_workflow: true. Do not switch workflows directly.
@@ -162,6 +164,8 @@ Examples when active_workflow=deposit_missing:
 - "账号 abc123" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_supplement, preserve_active_workflow: true.
 - "金额1000" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_supplement, preserve_active_workflow: true.
 - "截图发给你了" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_supplement, preserve_active_workflow: true.
+- "好的" -> route: contextual_reply, intent: acknowledgement, workflow_relation: acknowledgement, preserve_active_workflow: true.
+- "May I provide my name?" -> route: contextual_reply, intent: contextual_followup, workflow_relation: contextual_followup, preserve_active_workflow: true.
 - "ya llegó el depósito" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_resolution, preserve_active_workflow: false, requires_backend: false.
 - "怎么提款？" -> route: faq, intent: withdrawal_howto, faq_query: 如何提款, workflow_relation: independent_faq, preserve_active_workflow: true.
 - "流水是什么意思？" -> route: faq, intent: rollover_explanation, faq_query: 流水说明, workflow_relation: independent_faq, preserve_active_workflow: true.

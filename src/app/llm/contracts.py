@@ -9,6 +9,8 @@ LLMRouteLiteral = Literal[
     "human_handoff",
     "emotion_care",
     "clarification",
+    "contextual_reply",
+    "casual_chat",
     "unsupported",
 ]
 
@@ -151,6 +153,7 @@ class LLMFinalReplyInput(TypedDict, total=False):
     supported_languages: list[str]
     response_text_fallback: str
     reply_plan: dict[str, Any]
+    commands: list[dict[str, Any]]
     tenant_persona: dict[str, Any]
 
 

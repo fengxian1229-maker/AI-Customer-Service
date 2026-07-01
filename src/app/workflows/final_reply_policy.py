@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.services.language_policy import detect_language_deterministic, normalize_language_code
@@ -126,6 +127,9 @@ HUMAN_HANDOFF_FORBIDDEN_PROMISES = (
     "agent has joined",
 )
 
+INTERNAL_TELEGRAM_IDENTIFIER_PATTERN = re.compile(r"\b(?:tg|mock_tg):\d+\b|telegram_message_id|telegram_case_id", re.I)
+BACKEND_SYNC_CLAIM_PATTERN = re.compile(r"(已同步|同步至|同步给后台|已补充给后台|補充給後台|已補充給後台|sent to backend|synced to backend)", re.I)
+
 
 def build_reply_plan(
     *,
@@ -214,6 +218,12 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
         if phrase.lower() in lowered and not _is_verified_staff_backend_fact(str(phrase), plan):
             violations.append("forbidden_backend_fact")
 
+    if INTERNAL_TELEGRAM_IDENTIFIER_PATTERN.search(text):
+        violations.append("internal_telegram_identifier")
+
+    if BACKEND_SYNC_CLAIM_PATTERN.search(text) and not _has_append_to_case_command(state, plan):
+        violations.append("unverified_backend_sync_claim")
+
     if plan.get("kind") == "ask_missing_slots":
         for slot in plan.get("missing_slots") or state.get("missing_slots") or []:
             if not _contains_semantic_item(lowered, str(slot), reply_language):
@@ -280,5 +290,14 @@ def _is_verified_staff_backend_fact(phrase: str, plan: dict[str, Any]) -> bool:
     )
     for group in fact_groups:
         if any(token in phrase_lower for token in group) and any(token in allowed_text for token in group):
+            return True
+    return False
+
+
+def _has_append_to_case_command(state: dict[str, Any], plan: dict[str, Any]) -> bool:
+    if plan.get("kind") == "append_backend_case":
+        return True
+    for command in state.get("commands") or []:
+        if str(command.get("type")) == "telegram.append_to_case":
             return True
     return False
