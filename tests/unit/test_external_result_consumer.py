@@ -18,6 +18,25 @@ class FakeOutboundRepository:
         return {"inserted": True, "duplicate": False, "id": len(self.inserted)}
 
 
+class DedupingFakeOutboundRepository:
+    def __init__(self, existing_keys: set[str] | None = None) -> None:
+        self.keys = set(existing_keys or set())
+        self.inserted = []
+
+    async def insert_idempotent(self, message: dict) -> dict:
+        key = message.get("dedup_key") or (
+            f"{message.get('tenant_id') or 'default'}:"
+            f"{message.get('conversation_id') or ''}:"
+            f"{message.get('inbound_event_id') or ''}:"
+            f"{message['action_type']}"
+        )
+        if key in self.keys:
+            return {"inserted": False, "duplicate": True, "id": None}
+        self.keys.add(key)
+        self.inserted.append(message)
+        return {"inserted": True, "duplicate": False, "id": len(self.inserted)}
+
+
 class FakeResultRepository:
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
@@ -56,10 +75,11 @@ class FakeTransactionRepository:
     ):
         self.calls.append((result, graph_state, outbound_messages, external_commands or [], summary_message))
         await self.conversation_repository.update_workflow_state(result["conversation_id"], graph_state)
+        outbound_inserts = []
         for message in outbound_messages:
-            await self.outbound_repository.insert_idempotent(message)
+            outbound_inserts.append(await self.outbound_repository.insert_idempotent(message))
         await self.result_repository.mark_processed(result["id"])
-        return {"outbound_inserts": [{"inserted": True}], "external_command_inserts": []}
+        return {"outbound_inserts": outbound_inserts, "external_command_inserts": []}
 
 
 def make_result(result_type: str, command_type: str | None = None) -> dict:
@@ -243,6 +263,44 @@ def test_external_result_consumer_process_result_by_id_leases_only_requested_res
     assert outbound_repository.inserted[0]["payload_json"]["text"] == "scoped ok"
 
 
+def test_backend_query_result_outbound_uses_backend_answer_dedup_after_instant_reply():
+    from app.workers.external_result_consumer import process_result_by_id
+
+    row = make_result("backend.query.result") | {
+        "id": 700,
+        "result_json": {"status": "success", "answer": "backend answer ok"},
+    }
+
+    class ScopedResultRepository(FakeResultRepository):
+        async def lease_pending_by_id(self, result_id: int, worker_id: str, lease_seconds: int):
+            return row
+
+    result_repository = ScopedResultRepository([])
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = DedupingFakeOutboundRepository(
+        existing_keys={"default:livechat:chat-1:11:send_event"}
+    )
+
+    result = asyncio.run(
+        process_result_by_id(
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            result_id=700,
+            transaction_repository=FakeTransactionRepository(result_repository, conversation_repository, outbound_repository),
+            worker_id="consumer-scoped",
+        )
+    )
+
+    assert result["status"] == "PROCESSED"
+    assert result["outbound_inserts"][0]["inserted"] is True
+    outbound = outbound_repository.inserted[0]
+    assert outbound["dedup_key"] == "default:livechat:chat-1:11:backend.query.result:700"
+    assert outbound["message_kind"] == "backend_answer"
+    assert outbound["command_type"] == "backend.query.result"
+    assert outbound["payload_json"]["text"] == "backend answer ok"
+
+
 def test_external_result_consumer_process_result_by_id_reports_locked():
     from app.workers.external_result_consumer import process_result_by_id
 
@@ -404,6 +462,9 @@ def test_result_consumer_backend_query_result_success_uses_result_answer():
     assert result_repository.processed == [7]
     assert conversation_repository.updated[0][1]["workflow_stage"] == "completed"
     assert "mock 后台结果" in outbound_repository.inserted[0]["payload_json"]["text"]
+    assert outbound_repository.inserted[0]["dedup_key"] == "default:livechat:chat-1:11:backend.query.result:7"
+    assert outbound_repository.inserted[0]["message_kind"] == "backend_answer"
+    assert outbound_repository.inserted[0]["command_type"] == "backend.query.result"
 
 
 def test_result_consumer_backend_query_result_failed_writes_safe_fallback_without_retry():
@@ -420,6 +481,9 @@ def test_result_consumer_backend_query_result_failed_writes_safe_fallback_withou
     assert result_repository.processed == [7]
     assert result_repository.failed == []
     assert outbound_repository.inserted[0]["payload_json"]["text"] == "后台查询暂时无法完成，我们会继续为你人工复核，请稍候。"
+    assert outbound_repository.inserted[0]["dedup_key"] == "default:livechat:chat-1:11:backend.query.result:7"
+    assert outbound_repository.inserted[0]["message_kind"] == "backend_answer"
+    assert outbound_repository.inserted[0]["command_type"] == "backend.query.result"
     graph_state = conversation_repository.updated[0][1]
     assert graph_state["status"] == "WAITING_EXTERNAL"
     assert graph_state["active_workflow"] == "withdrawal_blocked_or_rollover"

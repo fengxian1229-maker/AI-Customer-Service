@@ -37,6 +37,27 @@ def test_backend_sop_smoke_admin_infers_closed_loop_success():
     assert result["smoke_status"] == "BACKEND_ANSWER_SENT"
 
 
+def test_backend_sop_smoke_admin_identifies_backend_answer_by_message_kind():
+    from app.workers.backend_sop_smoke_admin import assert_closed_loop, infer_smoke_status
+
+    snapshot = complete_snapshot()
+    answer = snapshot["external_command_results"][0]["result_json"]["answer"]
+    snapshot["outbound_messages"] = [
+        {"id": 1, "status": "SENT", "message_kind": "text", "payload_json": {"text": "即时回复"}},
+        {
+            "id": 2,
+            "status": "SENT",
+            "message_kind": "backend_answer",
+            "command_type": "backend.query.result",
+            "dedup_key": "default:livechat:chat-1:11:backend.query.result:7",
+            "payload_json": {"text": answer},
+        },
+    ]
+
+    assert infer_smoke_status(snapshot) == "BACKEND_ANSWER_SENT"
+    assert assert_closed_loop(snapshot)["closed_loop"] is True
+
+
 def test_backend_sop_smoke_admin_assert_closed_loop_reports_missing_step():
     from app.workers.backend_sop_smoke_admin import assert_closed_loop, infer_smoke_status
 

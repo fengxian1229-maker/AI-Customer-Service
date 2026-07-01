@@ -77,21 +77,22 @@ async def process_pending_results(
         try:
             handler = build_result_handler(row)
             graph_state = handler["graph_state"]
-            outbound = build_text_outbox(
-                chat_id=row["chat_id"],
-                thread_id=row.get("thread_id"),
-                conversation_id=row["conversation_id"],
-                inbound_event_id=row.get("inbound_event_id"),
-                text=handler["text"],
-            )
-            await transaction_repository.process_result_transactionally(
+            outbound = build_result_outbox(row, handler["text"])
+            transaction_result = await transaction_repository.process_result_transactionally(
                 row,
                 graph_state=graph_state,
                 outbound_messages=[outbound],
                 external_commands=[],
                 summary_message=handler["summary_message"],
             )
-            processed.append({"id": row["id"], "result_type": row["result_type"], "status": "PROCESSED"})
+            processed.append(
+                {
+                    "id": row["id"],
+                    "result_type": row["result_type"],
+                    "status": "PROCESSED",
+                    "outbound_inserts": transaction_result.get("outbound_inserts") or [],
+                }
+            )
         except Exception as exc:
             await result_repository.mark_processing_failed(row["id"], str(exc), max_retries=max_retries)
             processed.append({"id": row["id"], "result_type": row.get("result_type"), "status": "FAILED", "error": str(exc)})
@@ -126,24 +127,44 @@ async def process_result_by_id(
         )
     try:
         handler = build_result_handler(row)
-        outbound = build_text_outbox(
-            chat_id=row["chat_id"],
-            thread_id=row.get("thread_id"),
-            conversation_id=row["conversation_id"],
-            inbound_event_id=row.get("inbound_event_id"),
-            text=handler["text"],
-        )
-        await transaction_repository.process_result_transactionally(
+        outbound = build_result_outbox(row, handler["text"])
+        transaction_result = await transaction_repository.process_result_transactionally(
             row,
             graph_state=handler["graph_state"],
             outbound_messages=[outbound],
             external_commands=[],
             summary_message=handler["summary_message"],
         )
-        return {"id": row["id"], "result_type": row["result_type"], "status": "PROCESSED"}
+        return {
+            "id": row["id"],
+            "result_type": row["result_type"],
+            "status": "PROCESSED",
+            "outbound_inserts": transaction_result.get("outbound_inserts") or [],
+        }
     except Exception as exc:
         await result_repository.mark_processing_failed(row["id"], str(exc), max_retries=max_retries)
         return {"id": row["id"], "result_type": row.get("result_type"), "status": "FAILED", "error": str(exc)}
+
+
+def build_result_outbox(row: dict, text: str) -> dict:
+    outbound = build_text_outbox(
+        chat_id=row["chat_id"],
+        thread_id=row.get("thread_id"),
+        conversation_id=row["conversation_id"],
+        inbound_event_id=row.get("inbound_event_id"),
+        text=text,
+    )
+    if row.get("result_type") == "backend.query.result":
+        tenant_id = row.get("tenant_id") or "default"
+        outbound |= {
+            "dedup_key": (
+                f"{tenant_id}:{row['conversation_id']}:{row.get('inbound_event_id') or ''}:"
+                f"backend.query.result:{row['id']}"
+            ),
+            "message_kind": "backend_answer",
+            "command_type": "backend.query.result",
+        }
+    return outbound
 
 
 def build_result_handler(row: dict) -> dict:
