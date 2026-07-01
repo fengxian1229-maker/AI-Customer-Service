@@ -45,10 +45,18 @@ def plan_sop_dialogue_from_state(state: dict[str, Any], intent: str) -> dict[str
     if definition is None:
         return _fallback_plan(state, intent, "unsupported_sop")
 
-    llm_plan = _normalise_llm_plan(state.get("llm_sop_dialogue_plan") or state.get("llm_sop_slot_result"))
-    if llm_plan and llm_plan.get("status") == "accepted" and not _has_low_confidence(llm_plan):
-        return apply_llm_sop_plan(state, intent, llm_plan)
-    return _fallback_plan(state, intent, (llm_plan or {}).get("fallback_reason") or "llm_unavailable")
+    dialogue_plan = _normalise_llm_plan(state.get("llm_sop_dialogue_plan"))
+    if dialogue_plan and dialogue_plan.get("status") == "accepted" and not _has_low_confidence(dialogue_plan):
+        return apply_llm_sop_plan(state, intent, dialogue_plan)
+
+    slot_result = _normalise_llm_plan(state.get("llm_sop_slot_result"))
+    if slot_result and slot_result.get("status") == "accepted" and not _has_low_confidence(slot_result):
+        if dialogue_plan and dialogue_plan.get("fallback_reason"):
+            slot_result["fallback_reason"] = dialogue_plan["fallback_reason"]
+        return apply_llm_sop_plan(state, intent, slot_result)
+
+    fallback_reason = (dialogue_plan or slot_result or {}).get("fallback_reason") or "llm_unavailable"
+    return _fallback_plan(state, intent, fallback_reason)
 
 
 def apply_llm_sop_plan(state: dict[str, Any], intent: str, llm_plan: dict[str, Any]) -> dict[str, Any]:
@@ -58,7 +66,7 @@ def apply_llm_sop_plan(state: dict[str, Any], intent: str, llm_plan: dict[str, A
 
     slot_memory = dict(state.get("slot_memory") or {})
     slot_updates: dict[str, Any] = {}
-    dropped_slots: list[str] = []
+    dropped_slots: list[str] = list(dict.fromkeys(str(key) for key in llm_plan.get("dropped_slots") or []))
     allowed_keys = set(definition.slot_keys) | _legacy_schema_keys(intent)
     allowed_attachment_urls = _allowed_attachment_urls(state, slot_memory)
 
@@ -90,6 +98,7 @@ def apply_llm_sop_plan(state: dict[str, Any], intent: str, llm_plan: dict[str, A
         "should_ask_confirmation": bool(llm_plan.get("should_ask_confirmation")),
         "reply_draft": str(llm_plan.get("reply_draft") or ""),
         "reason": str(llm_plan.get("reason") or ""),
+        "fallback_reason": llm_plan.get("fallback_reason"),
         "dropped_slots": dropped_slots,
     }
 
@@ -122,6 +131,7 @@ def _fallback_plan(state: dict[str, Any], intent: str, reason: str) -> dict[str,
         "should_ask_confirmation": False,
         "reply_draft": "",
         "reason": reason,
+        "fallback_reason": reason,
         "dropped_slots": [],
     }
 

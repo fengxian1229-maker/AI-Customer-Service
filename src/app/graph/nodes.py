@@ -2,7 +2,7 @@ from typing import Any
 import re
 
 from app.graph.state import GraphState
-from app.llm.guardrails import validate_router_decision_output, validate_sop_slot_extraction_output
+from app.llm.guardrails import validate_router_decision_output, validate_sop_dialogue_planner_output, validate_sop_slot_extraction_output
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
 from app.services.rag import answer_from_rag_context, answer_from_static_knowledge
@@ -23,6 +23,8 @@ from app.workflows.slot_extractors import (
 from app.workflows.sop_handlers import run_sop
 from app.workflows.waiting_backend_classifier import handle_waiting_backend
 from app.workflows.final_reply_policy import build_reply_plan
+from app.workflows.llm_sop_dialogue_planner import build_llm_sop_dialogue_input
+from app.workflows.sop_definitions import get_sop_definition
 
 
 LLM_AUTHORITATIVE_SOURCES = {
@@ -903,7 +905,7 @@ def _should_run_sop_slot_extraction(state: GraphState, service, enabled: bool) -
     return bool(
         enabled
         and service
-        and hasattr(service, "extract_sop_slots")
+        and (hasattr(service, "plan_sop_dialogue") or hasattr(service, "extract_sop_slots"))
         and state.get("route") == "sop"
         and intent in {"deposit_missing", "withdrawal_missing"}
         and state.get("workflow_stage") not in {"waiting_backend", "backend_querying"}
@@ -911,6 +913,64 @@ def _should_run_sop_slot_extraction(state: GraphState, service, enabled: bool) -
 
 
 async def _run_sop_slot_extraction(state: GraphState, service, min_confidence: float) -> GraphState:
+    if hasattr(service, "plan_sop_dialogue"):
+        planned_state = await _run_sop_dialogue_planning(state, service, min_confidence)
+        if planned_state.get("sop_slot_source") == "llm_dialogue_planner":
+            return planned_state
+        if hasattr(service, "extract_sop_slots"):
+            return await _run_legacy_sop_slot_extraction(planned_state, service, min_confidence)
+        return planned_state
+    return await _run_legacy_sop_slot_extraction(state, service, min_confidence)
+
+
+async def _run_sop_dialogue_planning(state: GraphState, service, min_confidence: float) -> GraphState:
+    intent = (state.get("intent_result") or {}).get("intent")
+    definition = get_sop_definition(intent)
+    if definition is None:
+        return _sop_slot_fallback_state(state, "unsupported_sop")
+    payload = build_llm_sop_dialogue_input(state, str(intent), definition)
+    try:
+        raw_result = await service.plan_sop_dialogue(payload)
+        result = validate_sop_dialogue_planner_output(payload, dict(raw_result or {}))
+        if _sop_dialogue_low_confidence(result, min_confidence):
+            return _sop_slot_fallback_state(
+                state,
+                "low_confidence",
+                result=result,
+                dialogue_plan=_sop_dialogue_plan_summary("fallback", raw_result, result, fallback_reason="low_confidence"),
+            )
+        slot_memory = dict(state.get("slot_memory") or {})
+        for key, value in (result.get("slot_updates") or {}).items():
+            if value:
+                slot_memory[key] = value
+        plan_summary = _sop_dialogue_plan_summary("accepted", raw_result, result)
+        return {
+            **state,
+            "slot_memory": slot_memory,
+            "llm_sop_dialogue_plan": plan_summary,
+            "llm_sop_slot_result": {
+                "status": "accepted",
+                "provider": (raw_result or {}).get("provider"),
+                "mode": (raw_result or {}).get("mode") or "sop_dialogue_planner",
+                "intent": intent,
+                "missing_slots": result.get("missing_slots"),
+                "confidence": result.get("slot_confidence"),
+                "reason": result.get("reason"),
+                "dropped_slots": result.get("dropped_slots"),
+            },
+            "sop_slot_source": "llm_dialogue_planner",
+        }
+    except Exception as exc:
+        fallback_reason = "validation_error" if isinstance(exc, ValueError) else "exception"
+        return _sop_slot_fallback_state(
+            state,
+            fallback_reason,
+            exc=exc,
+            dialogue_plan=_sop_dialogue_plan_summary("fallback", None, None, fallback_reason=fallback_reason, exc=exc),
+        )
+
+
+async def _run_legacy_sop_slot_extraction(state: GraphState, service, min_confidence: float) -> GraphState:
     payload = {
         "intent": (state.get("intent_result") or {}).get("intent"),
         "current_slot_memory": dict(state.get("slot_memory") or {}),
@@ -955,8 +1015,53 @@ def _sop_slot_low_confidence(result: dict, min_confidence: float) -> bool:
     return False
 
 
-def _sop_slot_fallback_state(state: GraphState, fallback_reason: str, result: dict | None = None, exc: Exception | None = None) -> GraphState:
-    return {
+def _sop_dialogue_low_confidence(result: dict, min_confidence: float) -> bool:
+    updates = result.get("slot_updates") or {}
+    confidence = result.get("slot_confidence") or {}
+    for key, value in updates.items():
+        if value and float(confidence.get(key) or 0.0) < float(min_confidence):
+            return True
+    return False
+
+
+def _sop_dialogue_plan_summary(
+    status: str,
+    raw_result: dict | None,
+    result: dict | None,
+    *,
+    fallback_reason: str | None = None,
+    exc: Exception | None = None,
+) -> dict[str, Any]:
+    raw_result = raw_result or {}
+    result = result or {}
+    summary = {
+        "status": status,
+        "provider": raw_result.get("provider"),
+        "mode": raw_result.get("mode") or "sop_dialogue_planner",
+        "intent_relation": result.get("intent_relation"),
+        "extracted_slots": result.get("extracted_slots"),
+        "slot_updates": result.get("slot_updates"),
+        "slot_confidence": result.get("slot_confidence"),
+        "missing_slots": result.get("missing_slots"),
+        "should_ask_confirmation": result.get("should_ask_confirmation"),
+        "reply_draft": result.get("reply_draft"),
+        "reason": result.get("reason"),
+        "dropped_slots": result.get("dropped_slots"),
+        "fallback_reason": fallback_reason,
+        "error_type": type(exc).__name__ if exc else None,
+        "error_message": _redact_sensitive_text(str(exc)[:1000]) if exc else None,
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _sop_slot_fallback_state(
+    state: GraphState,
+    fallback_reason: str,
+    result: dict | None = None,
+    exc: Exception | None = None,
+    dialogue_plan: dict | None = None,
+) -> GraphState:
+    next_state = {
         **state,
         "llm_sop_slot_result": {
             "status": "fallback",
@@ -967,6 +1072,9 @@ def _sop_slot_fallback_state(state: GraphState, fallback_reason: str, result: di
         },
         "sop_slot_source": "deterministic",
     }
+    if dialogue_plan is not None:
+        next_state["llm_sop_dialogue_plan"] = dialogue_plan
+    return next_state
 
 
 def _attachments_summary(state: GraphState) -> list[dict[str, Any]]:
