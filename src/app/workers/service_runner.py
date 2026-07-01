@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import logging
+import signal
 import socket
 import time
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ class ServiceRunnerConfig:
     telegram_reply_limit: int
     max_iterations: int | None
     stop_on_error: bool
+    shutdown_timeout_seconds: float
 
 
 @dataclass
@@ -96,11 +98,12 @@ class RunnerSummary:
         self.errors.append(error)
         return error
 
-    def to_result(self, status: str) -> dict:
+    def to_result(self, status: str, shutdown_reason: str | None = None) -> dict:
         return {
             "service_runner": "service_runner",
             "status": status,
             "mode": "all",
+            "shutdown_reason": shutdown_reason,
             "workers": self.workers,
             "errors": self.errors,
         }
@@ -135,6 +138,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--external-command-limit", type=int, default=20)
     parser.add_argument("--external-result-limit", type=int, default=20)
     parser.add_argument("--telegram-reply-limit", type=int, default=20)
+    parser.add_argument(
+        "--shutdown-timeout-seconds",
+        type=float,
+        default=30.0,
+        help="Maximum seconds to wait for running worker tasks to stop after shutdown is requested.",
+    )
     return parser
 
 
@@ -173,11 +182,12 @@ async def run_async(args: argparse.Namespace) -> dict:
         context = build_context(settings=settings, pool=pool, groups=groups, config=config)
         return await run_all_workers(context)
     except asyncio.CancelledError:
-        _log_event("service_runner.shutdown", status="CANCELLED", worker_iterations={}, errors_count=0)
+        _log_event("service_runner.shutdown", status="CANCELLED", shutdown_reason="cancelled", worker_iterations={}, errors_count=0)
         return {
             "service_runner": "service_runner",
             "status": "CANCELLED",
             "mode": "all",
+            "shutdown_reason": "cancelled",
             "workers": {},
             "errors": [],
         }
@@ -203,6 +213,7 @@ def build_config(args: argparse.Namespace, settings: Settings) -> ServiceRunnerC
         telegram_reply_limit=args.telegram_reply_limit,
         max_iterations=max_iterations,
         stop_on_error=bool(args.stop_on_error),
+        shutdown_timeout_seconds=args.shutdown_timeout_seconds,
     )
 
 
@@ -379,6 +390,9 @@ async def telegram_reply_tick(context: ServiceRunnerContext) -> dict:
 async def run_all_workers(context: ServiceRunnerContext) -> dict:
     summary = RunnerSummary()
     stop_event = asyncio.Event()
+    shutdown_reason = {"value": None}
+    loop = asyncio.get_running_loop()
+    registered_signals = install_signal_handlers(loop, stop_event, shutdown_reason)
     worker_defs = [
         ("polling_receiver", context.config.poll_seconds, lambda: polling_tick(context)),
         ("gateway_consumer", context.config.gateway_seconds, lambda: gateway_tick(context)),
@@ -398,31 +412,68 @@ async def run_all_workers(context: ServiceRunnerContext) -> dict:
                 max_iterations=context.config.max_iterations,
                 stop_on_error=context.config.stop_on_error,
                 summary=summary,
+                shutdown_reason=shutdown_reason,
             ),
             name=f"service_runner:{name}",
         )
         for name, interval, tick in worker_defs
     ]
     status = "OK"
+    stop_waiter = asyncio.create_task(stop_event.wait(), name="service_runner:stop_event")
     try:
-        await asyncio.gather(*tasks)
+        pending_workers: set[asyncio.Task] = set(tasks)
+        while pending_workers:
+            done, pending = await asyncio.wait(
+                [*pending_workers, stop_waiter],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            pending_workers = {task for task in pending_workers if not task.done()}
+            if stop_waiter in done or stop_event.is_set():
+                break
+            if not pending_workers:
+                break
+
+        if stop_event.is_set() and pending_workers:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending_workers, return_exceptions=True),
+                    timeout=context.config.shutdown_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                status = "SHUTDOWN_TIMEOUT"
+                pending_names = _pending_worker_names(pending_workers)
+                _log_event(
+                    "service_runner.shutdown.timeout",
+                    timeout_seconds=context.config.shutdown_timeout_seconds,
+                    pending_workers=pending_names,
+                )
+                for task in pending_workers:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*pending_workers, return_exceptions=True)
+        elif pending_workers:
+            await asyncio.gather(*pending_workers, return_exceptions=True)
     except asyncio.CancelledError:
         status = "CANCELLED"
+        if not shutdown_reason.get("value"):
+            shutdown_reason["value"] = "cancelled"
         stop_event.set()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        stop_waiter.cancel()
+        await asyncio.gather(stop_waiter, return_exceptions=True)
+        remove_signal_handlers(loop, registered_signals)
     if context.config.stop_on_error and summary.errors:
         status = "STOPPED_ON_ERROR"
-    if stop_event.is_set() and any(not task.done() for task in tasks):
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-    result = summary.to_result(status)
+    elif status == "OK" and str(shutdown_reason.get("value") or "").startswith("signal:"):
+        status = "CANCELLED"
+    result = summary.to_result(status, shutdown_reason=shutdown_reason["value"])
     _log_event(
         "service_runner.shutdown",
         status=status,
+        shutdown_reason=shutdown_reason["value"],
         worker_iterations={name: data["iterations"] for name, data in summary.workers.items()},
         errors_count=len(summary.errors),
     )
@@ -437,6 +488,7 @@ async def run_periodic_worker(
     max_iterations: int | None,
     stop_on_error: bool,
     summary: RunnerSummary,
+    shutdown_reason: dict | None = None,
 ) -> None:
     iteration = 0
     _log_event("service_runner.worker.start", worker=name, interval_seconds=interval_seconds, max_iterations=max_iterations)
@@ -470,6 +522,8 @@ async def run_periodic_worker(
                 elapsed_ms=elapsed_ms,
             )
             if stop_on_error:
+                if shutdown_reason is not None and not shutdown_reason.get("value"):
+                    shutdown_reason["value"] = "stop_on_error"
                 stop_event.set()
                 return
         if max_iterations is not None and iteration >= max_iterations:
@@ -485,7 +539,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = run(argv)
     except KeyboardInterrupt:
-        result = {"service_runner": "service_runner", "status": "CANCELLED", "mode": "all", "workers": {}, "errors": []}
+        result = {
+            "service_runner": "service_runner",
+            "status": "CANCELLED",
+            "mode": "all",
+            "shutdown_reason": "keyboard_interrupt",
+            "workers": {},
+            "errors": [],
+        }
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     if result["status"] == "OK":
         return 0
@@ -495,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if result["status"] == "CANCELLED":
         return 130
+    if result["status"] == "SHUTDOWN_TIMEOUT":
+        return 1
     return 1
 
 
@@ -514,7 +577,40 @@ def _validate_usage(args: argparse.Namespace) -> dict | None:
         value = getattr(args, name)
         if value is not None and value < 0:
             return _failed_usage(f"--{name.replace('_', '-')} must be greater than or equal to 0")
+    if args.shutdown_timeout_seconds < 0:
+        return _failed_usage("--shutdown-timeout-seconds must be greater than or equal to 0")
     return None
+
+
+def install_signal_handlers(
+    loop: asyncio.AbstractEventLoop,
+    stop_event: asyncio.Event,
+    shutdown_reason: dict,
+) -> list[int]:
+    registered_signals = []
+    for sig in [signal.SIGTERM, signal.SIGINT]:
+        try:
+            loop.add_signal_handler(sig, _request_shutdown, stop_event, shutdown_reason, f"signal:{sig.name}")
+            registered_signals.append(sig)
+        except (NotImplementedError, RuntimeError):
+            continue
+    return registered_signals
+
+
+def remove_signal_handlers(loop: asyncio.AbstractEventLoop, registered_signals: list[int]) -> None:
+    for sig in registered_signals:
+        try:
+            loop.remove_signal_handler(sig)
+        except (NotImplementedError, RuntimeError):
+            continue
+
+
+def _request_shutdown(stop_event: asyncio.Event, shutdown_reason: dict, reason: str) -> None:
+    if not stop_event.is_set():
+        if not shutdown_reason.get("value"):
+            shutdown_reason["value"] = reason
+        _log_event("service_runner.shutdown.requested", reason=shutdown_reason["value"])
+        stop_event.set()
 
 
 def _failed_usage(error: str) -> dict:
@@ -549,6 +645,14 @@ def _elapsed_ms(started: float) -> float:
     return round((time.monotonic() - started) * 1000, 3)
 
 
+def _pending_worker_names(tasks: set[asyncio.Task]) -> list[str]:
+    names = []
+    for task in tasks:
+        name = task.get_name()
+        names.append(name.split("service_runner:", 1)[-1])
+    return sorted(names)
+
+
 def _log_event(event: str, **kwargs) -> None:
     print(json.dumps({"event": event, **kwargs}, ensure_ascii=False, default=str))
 
@@ -570,6 +674,8 @@ __all__ = [
     "external_result_tick",
     "telegram_reply_tick",
     "run_periodic_worker",
+    "install_signal_handlers",
+    "remove_signal_handlers",
     "run",
     "main",
 ]

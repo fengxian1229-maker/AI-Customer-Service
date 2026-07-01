@@ -1,4 +1,5 @@
 import asyncio
+import signal
 
 
 class FakeSettings:
@@ -79,6 +80,14 @@ def test_parser_supports_all():
     assert args.all is True
 
 
+def test_parser_supports_shutdown_timeout_seconds():
+    from app.workers.service_runner import build_arg_parser
+
+    args = build_arg_parser().parse_args(["--all", "--shutdown-timeout-seconds", "2.5"])
+
+    assert args.shutdown_timeout_seconds == 2.5
+
+
 def test_no_all_returns_failed_usage(monkeypatch):
     from app.workers import service_runner
 
@@ -91,6 +100,21 @@ def test_no_all_returns_failed_usage(monkeypatch):
     result = service_runner.run([])
 
     assert result["status"] == "FAILED_USAGE"
+
+
+def test_negative_shutdown_timeout_returns_failed_usage(monkeypatch):
+    from app.workers import service_runner
+
+    class FailSettings:
+        def __init__(self):
+            raise AssertionError("Settings must not load for usage errors")
+
+    monkeypatch.setattr(service_runner, "Settings", FailSettings)
+
+    result = service_runner.run(["--all", "--shutdown-timeout-seconds", "-1"])
+
+    assert result["status"] == "FAILED_USAGE"
+    assert "--shutdown-timeout-seconds" in result["error"]
 
 
 def test_preflight_missing_config_does_not_start_tasks(monkeypatch):
@@ -241,7 +265,113 @@ def test_stop_on_error_stops_runner(monkeypatch):
     result = service_runner.run(["--all", "--stop-on-error"])
 
     assert result["status"] == "STOPPED_ON_ERROR"
+    assert result["shutdown_reason"] == "stop_on_error"
     assert result["errors"][0]["worker"] == "sender_worker"
+
+
+def test_install_signal_handlers_registers_sigterm_and_sigint():
+    from app.workers import service_runner
+
+    class FakeLoop:
+        def __init__(self):
+            self.calls = []
+
+        def add_signal_handler(self, sig, callback, *args):
+            self.calls.append((sig, callback, args))
+
+    loop = FakeLoop()
+    stop_event = asyncio.Event()
+    shutdown_reason = {"value": None}
+
+    registered = service_runner.install_signal_handlers(loop, stop_event, shutdown_reason)
+
+    assert registered == [signal.SIGTERM, signal.SIGINT]
+    assert [call[0] for call in loop.calls] == [signal.SIGTERM, signal.SIGINT]
+
+
+def test_signal_handler_sets_stop_event_and_shutdown_reason():
+    from app.workers import service_runner
+
+    stop_event = asyncio.Event()
+    shutdown_reason = {"value": None}
+
+    service_runner._request_shutdown(stop_event, shutdown_reason, "signal:SIGTERM")
+
+    assert stop_event.is_set() is True
+    assert shutdown_reason["value"] == "signal:SIGTERM"
+
+
+def test_run_all_workers_exits_gracefully_after_signal(monkeypatch):
+    from app.workers import service_runner
+
+    context = make_context(service_runner)
+    callbacks = {}
+    removed = {"called": False}
+    calls = {"polling": 0}
+
+    def fake_install(loop, stop_event, shutdown_reason):
+        callbacks["sigterm"] = lambda: service_runner._request_shutdown(stop_event, shutdown_reason, "signal:SIGTERM")
+        return [signal.SIGTERM]
+
+    def fake_remove(loop, registered_signals):
+        removed["called"] = True
+        removed["registered"] = registered_signals
+
+    async def signal_polling(context):
+        calls["polling"] += 1
+        callbacks["sigterm"]()
+        return {"worker": "polling_receiver"}
+
+    async def fast_tick(context):
+        return {"worker": "ok"}
+
+    monkeypatch.setattr(service_runner, "install_signal_handlers", fake_install)
+    monkeypatch.setattr(service_runner, "remove_signal_handlers", fake_remove)
+    monkeypatch.setattr(service_runner, "polling_tick", signal_polling)
+    monkeypatch.setattr(service_runner, "gateway_tick", fast_tick)
+    monkeypatch.setattr(service_runner, "sender_tick", fast_tick)
+    monkeypatch.setattr(service_runner, "external_command_tick", fast_tick)
+    monkeypatch.setattr(service_runner, "external_result_tick", fast_tick)
+    monkeypatch.setattr(service_runner, "telegram_reply_tick", fast_tick)
+
+    result = asyncio.run(service_runner.run_all_workers(context))
+
+    assert result["status"] == "CANCELLED"
+    assert result["shutdown_reason"] == "signal:SIGTERM"
+    assert calls["polling"] == 1
+    assert removed == {"called": True, "registered": [signal.SIGTERM]}
+
+
+def test_shutdown_timeout_cancels_pending_worker(monkeypatch):
+    from app.workers import service_runner
+
+    context = make_context(service_runner, shutdown_timeout_seconds=0.01)
+    callbacks = {}
+
+    def fake_install(loop, stop_event, shutdown_reason):
+        callbacks["sigint"] = lambda: service_runner._request_shutdown(stop_event, shutdown_reason, "signal:SIGINT")
+        return [signal.SIGINT]
+
+    async def stuck_polling(context):
+        callbacks["sigint"]()
+        await asyncio.Event().wait()
+        return {"worker": "polling_receiver"}
+
+    async def fast_tick(context):
+        return {"worker": "ok"}
+
+    monkeypatch.setattr(service_runner, "install_signal_handlers", fake_install)
+    monkeypatch.setattr(service_runner, "polling_tick", stuck_polling)
+    monkeypatch.setattr(service_runner, "gateway_tick", fast_tick)
+    monkeypatch.setattr(service_runner, "sender_tick", fast_tick)
+    monkeypatch.setattr(service_runner, "external_command_tick", fast_tick)
+    monkeypatch.setattr(service_runner, "external_result_tick", fast_tick)
+    monkeypatch.setattr(service_runner, "telegram_reply_tick", fast_tick)
+
+    result = asyncio.run(service_runner.run_all_workers(context))
+
+    assert result["status"] == "SHUTDOWN_TIMEOUT"
+    assert result["shutdown_reason"] == "signal:SIGINT"
 
 
 def test_service_runner_does_not_call_worker_run_once(monkeypatch):
@@ -377,6 +507,7 @@ def make_context(
     external_command_limit=20,
     external_result_limit=20,
     telegram_reply_limit=20,
+    shutdown_timeout_seconds=30.0,
 ):
     config = service_runner.ServiceRunnerConfig(
         poll_seconds=0,
@@ -393,6 +524,7 @@ def make_context(
         telegram_reply_limit=telegram_reply_limit,
         max_iterations=1,
         stop_on_error=False,
+        shutdown_timeout_seconds=shutdown_timeout_seconds,
     )
     return service_runner.ServiceRunnerContext(
         settings=FakeSettings(),
