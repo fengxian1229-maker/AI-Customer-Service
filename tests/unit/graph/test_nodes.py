@@ -183,6 +183,20 @@ def test_active_collecting_workflow_new_sop_request_asks_before_switching():
     assert result["active_workflow"] == "deposit_missing"
 
 
+def test_active_withdrawal_workflow_deposit_resolution_is_not_current_supplement():
+    result = intent_router_node(
+        {
+            "raw_user_input": "Gracias.. ya llego el deposito",
+            "rewritten_question": "Gracias.. ya llego el deposito",
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "waiting_backend",
+        }
+    )
+
+    assert result["route"] == "clarification"
+    assert result["intent_result"]["workflow_relation"] == "new_workflow_request"
+
+
 def test_llm_intent_invalid_active_workflow_switch_falls_back_to_deterministic_faq():
     import asyncio
 

@@ -192,6 +192,26 @@ def test_llm_phone_only_updates_phone():
     assert state["slot_memory"]["account_or_phone"] == "13800138000"
 
 
+def test_llm_username_and_phone_preserves_username_account_slot():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "withdrawal_missing"},
+            "raw_user_input": "我说错了用户名是frank，手机号是12335",
+            "slot_memory": {},
+            "llm_sop_dialogue_plan": {
+                "status": "accepted",
+                "intent_relation": "current_sop_supplement",
+                "slot_updates": {"account_or_phone": "frank", "phone": "12335"},
+                "slot_confidence": {"account_or_phone": 0.96, "phone": 0.97},
+                "reason": "username and phone supplied",
+            },
+        }
+    )
+
+    assert state["slot_memory"]["account_or_phone"] == "frank"
+    assert state["slot_memory"]["phone"] == "12335"
+
+
 def test_attachment_without_text_is_receipt_screenshot():
     state = run_sop(
         {

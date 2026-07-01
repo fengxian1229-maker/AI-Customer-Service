@@ -25,6 +25,7 @@ CANONICAL_FAQ_INTENTS = (
 
 WORKFLOW_RELATIONS_WITH_ACTIVE = (
     "current_workflow_supplement",
+    "current_workflow_resolution",
     "independent_faq",
     "new_workflow_request",
     "human_escalation",
@@ -278,7 +279,12 @@ def validate_intent_classification_output(payload: dict[str, Any], output: dict[
     validate_route_intent_pair(route, intent)
     workflow_relation = _validate_workflow_relation(payload, output.get("workflow_relation"), route)
     preserve_active_workflow = bool(output.get("preserve_active_workflow", True))
-    if payload.get("active_workflow") and route != "human_handoff" and not preserve_active_workflow:
+    if (
+        payload.get("active_workflow")
+        and route != "human_handoff"
+        and workflow_relation != "current_workflow_resolution"
+        and not preserve_active_workflow
+    ):
         raise ValueError("Active workflow must be preserved during intent classification.")
     validated = {
         "intent": intent,
@@ -336,7 +342,11 @@ def _validate_intent_classification_contract(payload: dict[str, Any], output: di
         sop_name = _optional_str(output.get("sop_name"))
         if sop_name and not get_sop_definition(sop_name):
             raise ValueError(f"Unsupported SOP name: {sop_name}")
-        if intent in SOP_INTENTS and not output.get("requires_backend") and relation != "current_workflow_supplement":
+        if (
+            intent in SOP_INTENTS
+            and not output.get("requires_backend")
+            and relation not in {"current_workflow_supplement", "current_workflow_resolution"}
+        ):
             raise ValueError("SOP route for backend workflows must set requires_backend=true.")
     if route == "human_handoff" and not output.get("requires_human"):
         raise ValueError("human_handoff route must set requires_human=true.")
@@ -350,6 +360,20 @@ def _validate_intent_classification_contract(payload: dict[str, Any], output: di
         sop_name = _optional_str(output.get("sop_name"))
         if sop_name and sop_name != active_workflow:
             raise ValueError("current_workflow_supplement sop_name must match active_workflow.")
+        if _business_object_conflicts_with_active_workflow(payload, active_workflow):
+            raise ValueError("current_workflow_supplement business object conflicts with active_workflow.")
+    elif relation == "current_workflow_resolution":
+        if route != "sop":
+            raise ValueError("current_workflow_resolution requires route=sop.")
+        if intent != active_workflow:
+            raise ValueError("current_workflow_resolution intent must match active_workflow.")
+        sop_name = _optional_str(output.get("sop_name"))
+        if sop_name and sop_name != active_workflow:
+            raise ValueError("current_workflow_resolution sop_name must match active_workflow.")
+        if output.get("preserve_active_workflow"):
+            raise ValueError("current_workflow_resolution must not preserve active workflow.")
+        if _business_object_conflicts_with_active_workflow(payload, active_workflow):
+            raise ValueError("current_workflow_resolution business object conflicts with active_workflow.")
     elif relation == "independent_faq":
         if route != "faq":
             raise ValueError("independent_faq requires route=faq.")
@@ -368,6 +392,22 @@ def _validate_intent_classification_contract(payload: dict[str, Any], output: di
             raise ValueError("unclear workflow relation requires route=clarification.")
         if not output.get("preserve_active_workflow"):
             raise ValueError("unclear workflow relation must preserve active workflow.")
+
+
+def _business_object_conflicts_with_active_workflow(payload: dict[str, Any], active_workflow: str) -> bool:
+    text = " ".join(
+        str(payload.get(key) or "").lower()
+        for key in ("rewritten_question", "raw_user_input", "latest_user_text")
+    )
+    if not text:
+        return False
+    mentions_deposit = any(token in text for token in ("deposit", "depósito", "deposito", "存款", "充值"))
+    mentions_withdrawal = any(token in text for token in ("withdraw", "withdrawal", "retiro", "提款", "提现"))
+    if active_workflow == "withdrawal_missing" and mentions_deposit and not mentions_withdrawal:
+        return True
+    if active_workflow == "deposit_missing" and mentions_withdrawal and not mentions_deposit:
+        return True
+    return False
 
 
 def validate_sop_slot_extraction_output(payload: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:

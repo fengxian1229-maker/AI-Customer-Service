@@ -22,9 +22,13 @@ from app.db.telegram_repositories import (
     TelegramUpdateOffsetRepository,
     build_telegram_staff_reply_dedup_key,
 )
+from app.llm.final_reply_provider import FinalReplyLLMProvider
+from app.llm.provider import build_llm_provider
+from app.services.final_reply_service import FinalReplyService
 from app.services.message_history import build_external_result_summary_message
 from app.services.outbox import build_text_outbox
 from app.services.staff_reply_processor import StaffReplyProcessor
+from app.workflows.final_reply_policy import build_reply_plan
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,8 @@ async def process_telegram_updates(
     target_chat_ids: set[str] | None = None,
     bot_user_id: int | str | None = None,
     staff_reply_processor: StaffReplyProcessor | None = None,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     processed = []
     for update in updates:
@@ -55,6 +61,8 @@ async def process_telegram_updates(
                 target_chat_ids=target_chat_ids,
                 bot_user_id=bot_user_id,
                 staff_reply_processor=staff_reply_processor,
+                final_reply_service=final_reply_service,
+                llm_final_reply_enabled=llm_final_reply_enabled,
             )
             processed.append(item)
         except Exception as exc:
@@ -74,6 +82,8 @@ async def process_single_update(
     target_chat_ids: set[str] | None = None,
     bot_user_id: int | str | None = None,
     staff_reply_processor: StaffReplyProcessor | None = None,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
 ) -> dict[str, Any]:
     message = update.get("message") or {}
     update_id = int(update.get("update_id") or 0)
@@ -117,6 +127,12 @@ async def process_single_update(
 
     result_row["id"] = insert["id"]
     handler = build_staff_reply_handler(result_row, staff_reply_processor=staff_reply_processor)
+    handler = await finalize_staff_reply_handler(
+        handler,
+        result_row,
+        final_reply_service=final_reply_service,
+        llm_final_reply_enabled=llm_final_reply_enabled,
+    )
     outbound = build_text_outbox(
         chat_id=result_row["chat_id"],
         thread_id=result_row.get("thread_id"),
@@ -186,6 +202,73 @@ def build_staff_reply_handler(row: dict, staff_reply_processor: StaffReplyProces
     }
     resolved["summary_message"] = build_external_result_summary_message(row, resolved)
     return resolved
+
+
+async def finalize_staff_reply_handler(
+    handler: dict,
+    row: dict,
+    *,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
+) -> dict:
+    if not llm_final_reply_enabled or not final_reply_service or not hasattr(final_reply_service, "compose"):
+        return handler
+    result_json = row.get("result_json") or {}
+    raw_text = str(result_json.get("raw_text") or result_json.get("caption") or "").strip()
+    fallback_text = str(handler.get("text") or "").strip()
+    if not raw_text or not fallback_text:
+        return handler
+    graph_state = dict(handler.get("graph_state") or {})
+    state = {
+        **graph_state,
+        "tenant_id": row.get("tenant_id"),
+        "channel_type": "livechat",
+        "conversation_id": row.get("conversation_id"),
+        "chat_id": row.get("chat_id"),
+        "thread_id": row.get("thread_id"),
+        "raw_user_input": raw_text,
+        "rewritten_question": raw_text,
+        "route": "sop",
+        "intent_result": {
+            "route": "sop",
+            "intent": result_json.get("active_workflow") or result_json.get("intent"),
+        },
+        "active_workflow": graph_state.get("active_workflow") or result_json.get("active_workflow") or result_json.get("intent"),
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
+        "reply_language": result_json.get("language") or "zh-Hans",
+        "conversation_language": result_json.get("language") or "zh-Hans",
+        "detected_language": result_json.get("language") or "zh-Hans",
+        "reply_plan": build_reply_plan(
+            kind="telegram_staff_reply",
+            fallback_text=fallback_text,
+            allowed_facts=[raw_text],
+            staff_reply_key_facts=[],
+            must_not_say=["保证", "一定", "马上到账", "立即到账"],
+            metadata={
+                "source": "telegram_staff_reply",
+                "telegram_message_id": result_json.get("telegram_message_id"),
+                "reply_to_message_id": result_json.get("reply_to_message_id"),
+                "staff_reply_type": (graph_state.get("slot_memory") or {}).get("last_telegram_staff_reply_type"),
+            },
+        ),
+    }
+    try:
+        final_state = await final_reply_service.compose(state)
+    except Exception:
+        return handler
+    final_text = str((final_state or {}).get("final_response_text") or "").strip()
+    if not final_text:
+        return handler
+    updated = dict(handler)
+    updated["text"] = final_text
+    updated["graph_state"] = {
+        **graph_state,
+        "final_reply_result": (final_state or {}).get("final_reply_result"),
+        "reply_plan": state["reply_plan"],
+    }
+    updated["summary_message"] = build_external_result_summary_message(row, updated)
+    return updated
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -265,6 +348,8 @@ async def process_telegram_updates_once(
         offset_key=offset_key,
         target_chat_ids=target_chat_ids,
         bot_user_id=bot_user_id,
+        final_reply_service=_build_final_reply_service(settings),
+        llm_final_reply_enabled=getattr(settings, "llm_final_reply_enabled", False),
     )
     return {
         "worker": "telegram_reply_consumer",
@@ -277,6 +362,31 @@ async def process_telegram_updates_once(
         "mapping_sync": mapping_sync,
         "offset_key": offset_key,
     }
+
+
+def _build_final_reply_service(settings):
+    if not settings or not getattr(settings, "llm_final_reply_enabled", False):
+        return None
+    provider_name = str(getattr(settings, "llm_provider", "off") or "off").lower()
+    if provider_name == "gemini":
+        provider = FinalReplyLLMProvider(settings)
+    elif provider_name == "mock":
+        provider = build_llm_provider(provider_name, settings=settings)
+    else:
+        provider = None
+    return FinalReplyService(
+        provider=provider,
+        enabled=getattr(settings, "llm_final_reply_enabled", False),
+        min_confidence=getattr(settings, "llm_final_reply_min_confidence", 0.70),
+        fallback_enabled=getattr(settings, "llm_final_reply_fallback_enabled", True),
+        tenant_persona={
+            "default_language": getattr(settings, "tenant_persona_default_language", "zh-Hans"),
+            "supported_languages": getattr(settings, "tenant_supported_languages", "zh-Hans,zh-Hant,en,es,tl,th,my,ms"),
+            "tone": getattr(settings, "tenant_persona_tone", "polite"),
+            "assistant_name": getattr(settings, "tenant_persona_assistant_name", None),
+            "brand_name": getattr(settings, "tenant_persona_brand_name", None),
+        },
+    )
 
 
 async def run_forever(limit: int = 20, timeout: int = 20, offset_key: str | None = None) -> None:

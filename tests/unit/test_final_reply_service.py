@@ -98,6 +98,40 @@ def test_final_reply_service_falls_back_when_output_adds_unverified_credited_fac
     assert "forbidden_backend_fact" in result["final_reply_result"]["violations"]
 
 
+def test_final_reply_service_allows_credited_fact_from_staff_reply_plan():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "后台回复款项已到账，请刷新页面后确认账户余额。",
+            "language": "zh",
+            "tone": "polite",
+            "confidence": 0.92,
+            "safety_flags": [],
+            "reason": "polished staff reply",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                workflow_stage="backend_replied",
+                response_text="后台已回复，我们会按照这个更新继续协助你处理。",
+                response_text_fallback="后台已回复，我们会按照这个更新继续协助你处理。",
+                reply_plan={
+                    "kind": "telegram_staff_reply",
+                    "fallback_text": "后台已回复，我们会按照这个更新继续协助你处理。",
+                    "allowed_facts": ["已经到账，刷新一下页面看看"],
+                    "staff_reply_key_facts": [],
+                    "must_not_say": ["保证", "一定"],
+                },
+            )
+        )
+    )
+
+    assert result["final_response_text"] == "后台回复款项已到账，请刷新页面后确认账户余额。"
+    assert result["final_reply_result"]["status"] == "accepted"
+
+
 def test_final_reply_service_falls_back_when_ask_missing_slots_omits_account():
     provider = FakeFinalReplyProvider(
         {

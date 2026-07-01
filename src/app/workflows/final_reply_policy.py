@@ -211,7 +211,7 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
             violations.append("forbidden_phrase")
 
     for phrase in UNVERIFIED_BACKEND_FACT_PHRASES:
-        if phrase.lower() in lowered:
+        if phrase.lower() in lowered and not _is_verified_staff_backend_fact(str(phrase), plan):
             violations.append("forbidden_backend_fact")
 
     if plan.get("kind") == "ask_missing_slots":
@@ -258,4 +258,27 @@ def _contains_semantic_item(lowered_text: str, item: str, reply_language: str) -
         for alias in aliases_by_language.get(language, ()):
             if alias and alias.lower() in lowered_text:
                 return True
+    return False
+
+
+def _is_verified_staff_backend_fact(phrase: str, plan: dict[str, Any]) -> bool:
+    if plan.get("kind") != "telegram_staff_reply":
+        return False
+    allowed_text = " ".join(str(fact or "").lower() for fact in plan.get("allowed_facts") or [])
+    if not allowed_text:
+        return False
+    phrase_lower = phrase.lower()
+    if phrase_lower in allowed_text:
+        return True
+    fact_groups = (
+        ("到账", "credited", "successfully credited"),
+        ("成功", "success", "successful"),
+        ("完成", "处理完成", "completed", "done", "processed"),
+        ("拒绝", "拒絕", "rejected"),
+        ("失败", "失敗", "failed"),
+        ("退款", "refunded"),
+    )
+    for group in fact_groups:
+        if any(token in phrase_lower for token in group) and any(token in allowed_text for token in group):
+            return True
     return False

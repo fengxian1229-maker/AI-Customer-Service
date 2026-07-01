@@ -15,6 +15,7 @@ PROTECTED_SLOT_KEYS = {
 
 INTENT_RELATIONS = {
     "current_sop_supplement",
+    "current_workflow_resolution",
     "faq_interrupt",
     "new_issue",
     "human_request",
@@ -187,7 +188,7 @@ def _merge_attachment_slots(intent: str, slot_memory: dict[str, Any], attachment
 def _sync_legacy_aliases(intent: str, slot_memory: dict[str, Any]) -> None:
     screenshot_key = "deposit_screenshot" if intent == "deposit_missing" else "withdrawal_screenshot"
     order_key = "deposit_order_id" if intent == "deposit_missing" else "withdrawal_order_id"
-    if slot_memory.get("phone"):
+    if slot_memory.get("phone") and not slot_memory.get("account_or_phone"):
         slot_memory["account_or_phone"] = slot_memory["phone"]
     elif slot_memory.get("account_or_phone"):
         slot_memory.setdefault("phone", slot_memory["account_or_phone"])

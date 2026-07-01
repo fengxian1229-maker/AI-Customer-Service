@@ -648,6 +648,16 @@ def _active_workflow_deterministic_route(state: GraphState, active_workflow: str
             workflow_relation="independent_faq",
             preserve_active_workflow=True,
         )
+    if _is_cross_workflow_business_object(state, active_workflow):
+        return _with_route(
+            state,
+            "clarification_needed",
+            "clarification",
+            "Message mentions a different business object than the active workflow; ask before changing state.",
+            confidence=0.78,
+            workflow_relation="new_workflow_request",
+            preserve_active_workflow=True,
+        )
     if _is_new_workflow_request(state, active_workflow):
         return _with_route(
             state,
@@ -898,6 +908,17 @@ def _is_new_workflow_request(state: GraphState, active_workflow: str) -> bool:
     elif _is_account_access_issue(text) or _is_account_profile_or_wallet_change(text):
         candidate = "manual_support_workflow"
     return bool(candidate and candidate != active_workflow)
+
+
+def _is_cross_workflow_business_object(state: GraphState, active_workflow: str) -> bool:
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    mentions_deposit = _contains_any(text, ("deposit", "depósito", "deposito", "存款", "充值"))
+    mentions_withdrawal = _contains_any(text, ("withdraw", "withdrawal", "retiro", "提款", "提现"))
+    if active_workflow == "withdrawal_missing" and mentions_deposit and not mentions_withdrawal:
+        return True
+    if active_workflow == "deposit_missing" and mentions_withdrawal and not mentions_deposit:
+        return True
+    return False
 
 
 def _should_run_sop_slot_extraction(state: GraphState, service, enabled: bool) -> bool:

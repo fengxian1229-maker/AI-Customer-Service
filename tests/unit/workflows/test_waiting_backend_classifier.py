@@ -173,3 +173,34 @@ def test_waiting_backend_llm_screenshot_supplement_appends_to_existing_case():
 
     assert state["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE
     assert state["commands"][0]["payload"]["supplement"]["attachment_urls"] == ["https://cdn.example/supplement.png"]
+
+
+def test_waiting_backend_current_workflow_resolution_acknowledges_without_tg_append():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "intent_result": {
+                "intent": "deposit_missing",
+                "workflow_relation": "current_workflow_resolution",
+                "preserve_active_workflow": False,
+            },
+            "workflow_stage": "waiting_backend",
+            "reply_language": "es",
+            "slot_memory": {"telegram_case_id": "tg:123", "telegram_message_id": 123},
+            "attachments": [],
+            "raw_user_input": "Gracias.. ya llegó el depósito",
+            "llm_sop_dialogue_plan": {
+                "status": "accepted",
+                "intent_relation": "current_workflow_resolution",
+                "slot_updates": {},
+                "slot_confidence": {},
+                "reason": "customer confirms deposit arrived",
+            },
+        }
+    )
+
+    assert state["commands"] == []
+    assert state["sop_action"] == "customer_confirmed_resolved"
+    assert state["workflow_stage"] == "completed"
+    assert state["active_workflow"] is None
+    assert state["response_text"] == "Gracias por avisarnos. Me alegra saber que ya llegó. Si necesitas ayuda con algo más, puedes escribirme aquí."

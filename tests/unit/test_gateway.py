@@ -284,6 +284,28 @@ class FakeFinalReplyService:
         }
 
 
+class FakeBlockFinalReplyService:
+    def __init__(self, translations: dict[str, str] | None = None, error_on: str | None = None) -> None:
+        self.translations = translations or {}
+        self.error_on = error_on
+        self.calls = []
+
+    async def compose(self, graph_state: dict) -> dict:
+        self.calls.append(graph_state)
+        fallback = graph_state["response_text_fallback"]
+        if self.error_on and self.error_on in fallback:
+            return {
+                **graph_state,
+                "final_response_text": fallback,
+                "final_reply_result": {"status": "fallback", "fallback_reason": "test_error"},
+            }
+        return {
+            **graph_state,
+            "final_response_text": self.translations.get(fallback, fallback),
+            "final_reply_result": {"status": "accepted", "confidence": 0.9},
+        }
+
+
 class ExplodingLLMService:
     async def rewrite(self, payload: dict) -> dict:
         raise RuntimeError("shadow failed with api_key=hidden")
@@ -977,43 +999,128 @@ def test_gateway_faq_multiblock_uses_reply_language_for_outbound_plan(monkeypatc
     service = GatewayService()
     event = make_inbound_event()
 
-    rows = service._build_outbound_messages(
-        77,
-        event,
-        "livechat:chat-1",
-        {
-            "tenant_id": "default",
-            "channel_type": "livechat",
-            "route": "faq",
-            "reply_language": "tl",
-            "rewrite_result": {"language": "zh-Hans"},
-            "rag_context": {"answer_blocks": [{"type": "text", "text": "FAQ text"}]},
-            "commands": [],
-        },
+    rows = asyncio.run(
+        service._build_outbound_messages(
+            77,
+            event,
+            "livechat:chat-1",
+            {
+                "tenant_id": "default",
+                "channel_type": "livechat",
+                "route": "faq",
+                "reply_language": "tl",
+                "rewrite_result": {"language": "zh-Hans"},
+                "rag_context": {"answer_blocks": [{"type": "text", "text": "FAQ text"}]},
+                "commands": [],
+            },
+        )
     )
 
     assert captured["language"] == "tl"
     assert rows[0]["payload_json"]["text"] == "FAQ text"
 
 
+def test_gateway_faq_multiblock_finalizes_each_text_block_and_preserves_media():
+    final_reply_service = FakeBlockFinalReplyService(
+        {
+            "第一段中文": "First English block",
+            "第二段中文": "Second English block",
+        }
+    )
+    service = GatewayService(llm_final_reply_service=final_reply_service, llm_final_reply_enabled=True)
+    event = make_inbound_event()
+
+    rows = asyncio.run(
+        service._build_outbound_messages(
+            77,
+            event,
+            "livechat:chat-1",
+            {
+                "tenant_id": "default",
+                "channel_type": "livechat",
+                "conversation_id": "livechat:chat-1",
+                "raw_user_input": "How do I withdraw?",
+                "route": "faq",
+                "reply_language": "en",
+                "rag_context": {
+                    "answer_blocks": [
+                        {"type": "text", "text": "第一段中文"},
+                        {
+                            "type": "image",
+                            "asset_key": "withdrawal_howto",
+                            "platform_asset_map": {"JUE999": "https://cdn.example/withdrawal.png"},
+                            "caption": "提款教程",
+                            "position": "before",
+                        },
+                        {"type": "text", "text": "第二段中文"},
+                        {"type": "buttons", "menu_key": "withdrawal_recovery"},
+                    ]
+                },
+                "commands": [],
+            },
+        )
+    )
+
+    assert [row["message_type"] for row in rows] == ["text", "image", "text", "buttons"]
+    assert rows[0]["payload_json"]["text"] == "First English block"
+    assert rows[1]["payload_json"]["asset_ref"] == "https://cdn.example/withdrawal.png"
+    assert rows[2]["payload_json"]["text"] == "Second English block"
+    assert rows[3]["payload_json"] == {"menu_key": "withdrawal_recovery"}
+    assert [call["response_text_fallback"] for call in final_reply_service.calls] == ["第一段中文", "第二段中文"]
+    assert all(call["reply_language"] == "en" for call in final_reply_service.calls)
+
+
+def test_gateway_faq_multiblock_text_finalization_falls_back_per_block():
+    final_reply_service = FakeBlockFinalReplyService({"第一段中文": "First English block"}, error_on="第二段")
+    service = GatewayService(llm_final_reply_service=final_reply_service, llm_final_reply_enabled=True)
+    event = make_inbound_event()
+
+    rows = asyncio.run(
+        service._build_outbound_messages(
+            77,
+            event,
+            "livechat:chat-1",
+            {
+                "tenant_id": "default",
+                "channel_type": "livechat",
+                "route": "faq",
+                "reply_language": "en",
+                "rag_context": {
+                    "answer_blocks": [
+                        {"type": "text", "text": "第一段中文"},
+                        {"type": "text", "text": "第二段中文"},
+                    ]
+                },
+                "commands": [],
+            },
+        )
+    )
+
+    assert rows[0]["payload_json"]["text"] == "First English block"
+    assert rows[1]["payload_json"]["text"] == "第二段中文"
+    assert len(final_reply_service.calls) == 2
+
+
 def test_gateway_allows_handoff_route_only_for_handoff_ack_command():
     service = GatewayService()
     event = make_inbound_event()
 
-    rows = service._build_outbound_messages(
-        77,
-        event,
-        "livechat:chat-1",
-        {
-            "route": "human_handoff",
-            "final_response_text": "我会为你转接真人客服继续协助。",
-            "commands": [
-                {
-                    "type": CommandType.LIVECHAT_SEND_TEXT,
-                    "payload": {"text": "fallback", "handoff_ack": True},
-                }
-            ],
-        },
+    rows = asyncio.run(
+        service._build_outbound_messages(
+            77,
+            event,
+            "livechat:chat-1",
+            {
+                "route": "human_handoff",
+                "final_response_text": "我会为你转接真人客服继续协助。",
+                "commands": [
+                    {
+                        "type": CommandType.LIVECHAT_SEND_TEXT,
+                        "payload": {"text": "fallback", "handoff_ack": True},
+                    }
+                ],
+            },
+        )
     )
 
     assert len(rows) == 1
@@ -1025,19 +1132,21 @@ def test_gateway_blocks_handoff_route_without_handoff_ack_command():
     service = GatewayService()
     event = make_inbound_event()
 
-    rows = service._build_outbound_messages(
-        77,
-        event,
-        "livechat:chat-1",
-        {
-            "route": "human_handoff",
-            "commands": [
-                {
-                    "type": CommandType.LIVECHAT_SEND_TEXT,
-                    "payload": {"text": "ordinary bot reply"},
-                }
-            ],
-        },
+    rows = asyncio.run(
+        service._build_outbound_messages(
+            77,
+            event,
+            "livechat:chat-1",
+            {
+                "route": "human_handoff",
+                "commands": [
+                    {
+                        "type": CommandType.LIVECHAT_SEND_TEXT,
+                        "payload": {"text": "ordinary bot reply"},
+                    }
+                ],
+            },
+        )
     )
 
     assert rows == []

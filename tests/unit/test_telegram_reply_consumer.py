@@ -44,6 +44,23 @@ class FakeTransactionRepository:
         return {"outbound_inserts": [{"inserted": True}], "external_command_inserts": []}
 
 
+class FakeFinalReplyService:
+    def __init__(self, text: str | None = None, *, raise_error: bool = False) -> None:
+        self.text = text
+        self.raise_error = raise_error
+        self.calls = []
+
+    async def compose(self, state: dict) -> dict:
+        self.calls.append(state)
+        if self.raise_error:
+            raise RuntimeError("final reply unavailable")
+        return {
+            **state,
+            "final_response_text": self.text,
+            "final_reply_result": {"status": "accepted", "confidence": 0.91},
+        }
+
+
 def make_case():
     return {
         "id": 42,
@@ -147,6 +164,56 @@ def test_telegram_reply_consumer_staff_reply_outbox_uses_independent_dedup():
     assert outbound["dedup_key"] == f"{result_row['dedup_key']}:outbound"
     assert outbound["command_type"] == "telegram.staff_reply"
     assert outbound["message_kind"] == "telegram_staff_reply"
+
+
+def test_telegram_reply_consumer_staff_reply_uses_final_reply_when_available():
+    case_repository = FakeCaseRepository(case=make_case())
+    result_repository = FakeResultRepository()
+    transaction_repository = FakeTransactionRepository()
+    final_reply_service = FakeFinalReplyService("后台回复款项已到账，请刷新页面后确认账户余额。")
+
+    result = asyncio.run(
+        process_single_update(
+            make_update("已经到账，刷新一下页面看看"),
+            case_repository=case_repository,
+            result_repository=result_repository,
+            transaction_repository=transaction_repository,
+            target_chat_ids={"-1001"},
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert result["status"] == "RECORDED"
+    outbound = transaction_repository.calls[0]["outbound_messages"][0]
+    assert outbound["payload_json"]["text"] == "后台回复款项已到账，请刷新页面后确认账户余额。"
+    assert final_reply_service.calls[0]["response_text"] == "后台已回复，我们会按照这个更新继续协助你处理。"
+    assert final_reply_service.calls[0]["reply_plan"]["kind"] == "telegram_staff_reply"
+    assert final_reply_service.calls[0]["reply_plan"]["allowed_facts"] == ["已经到账，刷新一下页面看看"]
+    assert final_reply_service.calls[0]["workflow_stage"] == "backend_replied"
+
+
+def test_telegram_reply_consumer_staff_reply_final_reply_failure_uses_fallback():
+    case_repository = FakeCaseRepository(case=make_case())
+    result_repository = FakeResultRepository()
+    transaction_repository = FakeTransactionRepository()
+    final_reply_service = FakeFinalReplyService(raise_error=True)
+
+    result = asyncio.run(
+        process_single_update(
+            make_update("已经到账，刷新一下页面看看"),
+            case_repository=case_repository,
+            result_repository=result_repository,
+            transaction_repository=transaction_repository,
+            target_chat_ids={"-1001"},
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert result["status"] == "RECORDED"
+    outbound = transaction_repository.calls[0]["outbound_messages"][0]
+    assert outbound["payload_json"]["text"] == "后台已回复，我们会按照这个更新继续协助你处理。"
 
 
 def test_telegram_reply_consumer_duplicate_result_does_not_write_outbox():

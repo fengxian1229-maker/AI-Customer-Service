@@ -1,4 +1,28 @@
-from app.services.telegram_case_card import build_telegram_case_append
+from app.services.telegram_case_card import build_telegram_case_append, build_telegram_case_card
+
+
+def test_case_card_includes_username_and_phone_separately():
+    card = build_telegram_case_card(
+        {
+            "conversation_id": "livechat:chat-1",
+            "chat_id": "chat-1",
+            "payload_json": {
+                "intent": "withdrawal_missing",
+                "active_workflow": "withdrawal_missing",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "slot_memory": {
+                    "account_or_phone": "frank",
+                    "phone": "12335",
+                    "withdrawal_screenshot": "https://cdn.example/withdrawal.png",
+                },
+            },
+        },
+        {"chat_id": "-100test", "message_thread_id": None},
+    )
+
+    assert "Username / account: frank" in card["card_text"]
+    assert "Phone: 12335" in card["card_text"]
 
 
 def _append_command(supplement):

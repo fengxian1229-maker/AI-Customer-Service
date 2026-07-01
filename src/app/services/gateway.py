@@ -12,6 +12,7 @@ from app.services.language_policy import normalize_language_code, parse_supporte
 from app.services.message_history import build_customer_message_from_inbound
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
 from app.workflows.command_contracts import CommandType
+from app.workflows.final_reply_policy import build_reply_plan
 from app.workflows.slot_extractors import is_explicit_human_request, normalize_text
 
 
@@ -154,7 +155,7 @@ class GatewayService:
                 if graph_state or (human_active and (should_reply or event.standard_event_type == "FILE_RECEIVED"))
                 else None
             )
-            outbound_messages = self._build_outbound_messages(inbound_event_id, event, conversation["conversation_id"], graph_state)
+            outbound_messages = await self._build_outbound_messages(inbound_event_id, event, conversation["conversation_id"], graph_state)
             external_commands = self._build_external_commands(inbound_event_id, event, conversation, graph_state)
             result = await self.transactional_repository.process_event_transactionally(
                 inbound_event_id,
@@ -195,7 +196,7 @@ class GatewayService:
             recent_messages = await self._load_recent_messages(conversation)
             graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation, recent_messages)
             customer_message = build_customer_message_from_inbound(event, conversation, inbound_event_id)
-            outbound_messages = self._build_outbound_messages(
+            outbound_messages = await self._build_outbound_messages(
                 inbound_event_id,
                 event,
                 conversation["conversation_id"],
@@ -860,7 +861,7 @@ class GatewayService:
             "slot_memory": {},
         }
 
-    def _build_outbound_messages(
+    async def _build_outbound_messages(
         self,
         inbound_event_id: int,
         event: InboundEvent,
@@ -891,6 +892,7 @@ class GatewayService:
                 channel_type=graph_state.get("channel_type") or "livechat",
             )
             if rows:
+                rows = await self._finalize_faq_text_rows(rows, graph_state)
                 return rows
         return [
             build_command_outbox(
@@ -903,6 +905,48 @@ class GatewayService:
             for command in graph_state.get("commands", [])
             if str(command["type"]) == str(CommandType.LIVECHAT_SEND_TEXT)
         ]
+
+    async def _finalize_faq_text_rows(self, rows: list[dict], graph_state: dict) -> list[dict]:
+        if not self.llm_final_reply_enabled or not self.llm_final_reply_service:
+            return rows
+        finalized_rows = []
+        for row in rows:
+            if row.get("message_type") != "text":
+                finalized_rows.append(row)
+                continue
+            payload = dict(row.get("payload_json") or {})
+            text = normalize_text(payload.get("text"))
+            if not text:
+                finalized_rows.append(row)
+                continue
+            finalized_text = await self._finalize_faq_text_block(text, graph_state, row)
+            finalized_rows.append({**row, "payload_json": {**payload, "text": finalized_text}})
+        return finalized_rows
+
+    async def _finalize_faq_text_block(self, text: str, graph_state: dict, row: dict) -> str:
+        block_state = {
+            **graph_state,
+            "response_text": text,
+            "response_text_fallback": text,
+            "final_response_text": None,
+            "final_reply_result": None,
+            "reply_plan": build_reply_plan(
+                kind="faq_answer",
+                fallback_text=text,
+                allowed_facts=[text],
+                must_not_say=["已到账", "已完成", "已退款", "保证到账", "手续费全免"],
+                metadata={
+                    "faq_block_index": row.get("block_index"),
+                    "faq_message_kind": row.get("message_kind") or row.get("message_type"),
+                    "faq_finalization": True,
+                },
+            ),
+        }
+        try:
+            result = await self.llm_final_reply_service.compose(block_state)
+        except Exception:
+            return text
+        return normalize_text((result or {}).get("final_response_text")) or text
 
     def _has_handoff_ack_command(self, graph_state: dict | None) -> bool:
         if not graph_state:

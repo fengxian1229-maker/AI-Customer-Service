@@ -32,6 +32,8 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     )
     relation = dialogue_plan.get("intent_relation")
     explicit_human = relation == "human_request" or is_explicit_human_request(text)
+    if relation == "current_workflow_resolution":
+        return _resolved_state(state, slot_memory)
     has_supplement = bool(
         urls
         or any(value for value in (dialogue_plan.get("slot_updates") or {}).values())
@@ -121,6 +123,37 @@ def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> 
             }
         ],
     }
+
+
+def _resolved_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
+    text = _resolved_ack_text(str(state.get("reply_language") or "zh-Hans"))
+    next_slot_memory = dict(slot_memory)
+    next_slot_memory["customer_confirmed_resolved"] = True
+    return {
+        **state,
+        "slot_memory": next_slot_memory,
+        "active_workflow": None,
+        "workflow_stage": "completed",
+        "sop_action": "customer_confirmed_resolved",
+        "response_text": text,
+        "response_text_fallback": text,
+        "reply_plan": build_reply_plan(
+            kind="sop_resolved_ack",
+            fallback_text=text,
+            must_not_say=["仍在确认", "请稍等", "waiting", "checking"],
+            allowed_facts=["客户确认当前案件已解决或款项已到账"],
+        ),
+        "commands": [],
+    }
+
+
+def _resolved_ack_text(language: str) -> str:
+    normalized = language.lower()
+    if normalized.startswith("es"):
+        return "Gracias por avisarnos. Me alegra saber que ya llegó. Si necesitas ayuda con algo más, puedes escribirme aquí."
+    if normalized.startswith("en"):
+        return "Thanks for letting us know. I'm glad it has arrived. If you need help with anything else, you can message me here."
+    return "感谢告知，款项已到账就好。如还需要其他协助，可以继续在这里告诉我。"
 
 
 def _waiting_reply_plan(kind: str, fallback_text: str) -> dict[str, Any]:

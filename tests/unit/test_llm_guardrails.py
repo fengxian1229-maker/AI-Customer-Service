@@ -133,6 +133,58 @@ def test_validate_intent_classification_rejects_direct_new_workflow_switch():
         )
 
 
+def test_validate_intent_classification_allows_current_workflow_resolution():
+    from app.llm.guardrails import validate_intent_classification_output
+
+    decision = validate_intent_classification_output(
+        {
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "waiting_backend",
+            "rewritten_question": "ya llegó el retiro",
+        },
+        {
+            "intent": "withdrawal_missing",
+            "route": "sop",
+            "confidence": 0.94,
+            "sop_name": "withdrawal_missing",
+            "requires_human": False,
+            "requires_backend": False,
+            "missing_slots": [],
+            "workflow_relation": "current_workflow_resolution",
+            "preserve_active_workflow": False,
+            "reason": "customer confirms the active withdrawal case is resolved",
+        },
+    )
+
+    assert decision["workflow_relation"] == "current_workflow_resolution"
+    assert decision["preserve_active_workflow"] is False
+
+
+def test_validate_intent_classification_rejects_cross_object_current_workflow_supplement():
+    from app.llm.guardrails import validate_intent_classification_output
+
+    with pytest.raises(ValueError, match="business object conflicts"):
+        validate_intent_classification_output(
+            {
+                "active_workflow": "withdrawal_missing",
+                "workflow_stage": "waiting_backend",
+                "rewritten_question": "Gracias.. ya llego el deposito",
+            },
+            {
+                "intent": "withdrawal_missing",
+                "route": "sop",
+                "confidence": 1.0,
+                "sop_name": "withdrawal_missing",
+                "requires_human": False,
+                "requires_backend": True,
+                "missing_slots": [],
+                "workflow_relation": "current_workflow_supplement",
+                "preserve_active_workflow": True,
+                "reason": "badly treats deposit as withdrawal supplement",
+            },
+        )
+
+
 def test_validate_router_decision_normalizes_handoff_intent_when_model_omits_requires_human():
     from app.llm.guardrails import validate_router_decision_output
 
