@@ -98,6 +98,159 @@ def test_gateway_cli_parser_accepts_once_and_limit():
     assert args.limit == 20
 
 
+def test_service_runner_cli_parser_accepts_all_loop_controls():
+    from app.workers.service_runner import build_arg_parser
+
+    args = build_arg_parser().parse_args([
+        "--all",
+        "--once",
+        "--max-iterations",
+        "2",
+        "--stop-on-error",
+        "--poll-seconds",
+        "0.5",
+        "--gateway-seconds",
+        "0.25",
+        "--sender-seconds",
+        "0.75",
+        "--external-command-seconds",
+        "1.25",
+        "--external-result-seconds",
+        "1.5",
+        "--telegram-reply-seconds",
+        "2.5",
+        "--poll-limit",
+        "3",
+        "--gateway-limit",
+        "4",
+        "--sender-limit",
+        "5",
+        "--external-command-limit",
+        "6",
+        "--external-result-limit",
+        "7",
+    ])
+
+    assert args.all is True
+    assert args.once is True
+    assert args.max_iterations == 2
+    assert args.stop_on_error is True
+    assert args.poll_seconds == 0.5
+    assert args.gateway_seconds == 0.25
+    assert args.sender_seconds == 0.75
+    assert args.external_command_seconds == 1.25
+    assert args.external_result_seconds == 1.5
+    assert args.telegram_reply_seconds == 2.5
+    assert args.poll_limit == 3
+    assert args.gateway_limit == 4
+    assert args.sender_limit == 5
+    assert args.external_command_limit == 6
+    assert args.external_result_limit == 7
+
+
+def test_service_runner_all_once_runs_full_chain_with_real_external_execution(monkeypatch):
+    from app.workers import service_runner
+
+    calls = []
+
+    class FakeSettings:
+        poll_seconds = 5
+        poll_limit = 20
+        livechat_allowed_group_ids = "23"
+
+    async def fake_polling_run_once(limit: int, groups: set[int]):
+        calls.append(("polling_receiver", limit, groups))
+        return {"worker": "polling_receiver"}
+
+    async def fake_gateway_run_once(limit: int):
+        calls.append(("gateway_consumer", limit))
+        return {"worker": "gateway_consumer"}
+
+    async def fake_sender_run_once(limit: int):
+        calls.append(("sender_worker", limit))
+        return {"worker": "sender_worker"}
+
+    async def fake_external_command_run_once(**kwargs):
+        calls.append(("external_command_worker", kwargs))
+        return {"worker": "external_command_worker"}
+
+    async def fake_external_result_run_once(limit: int):
+        calls.append(("external_result_consumer", limit))
+        return {"worker": "external_result_consumer"}
+
+    async def fake_telegram_reply_run_once(limit: int, timeout: int, settings):
+        calls.append(("telegram_reply_consumer", limit, timeout, settings))
+        return {"worker": "telegram_reply_consumer"}
+
+    monkeypatch.setattr(service_runner, "Settings", FakeSettings)
+    monkeypatch.setattr(service_runner.polling_receiver, "run_once", fake_polling_run_once)
+    monkeypatch.setattr(service_runner.gateway_consumer, "run_once", fake_gateway_run_once)
+    monkeypatch.setattr(service_runner.sender_worker, "run_once", fake_sender_run_once)
+    monkeypatch.setattr(service_runner.external_command_worker, "run_once", fake_external_command_run_once)
+    monkeypatch.setattr(service_runner.external_result_consumer, "run_once", fake_external_result_run_once)
+    monkeypatch.setattr(service_runner.telegram_reply_consumer, "run_once", fake_telegram_reply_run_once)
+
+    result = service_runner.run([
+        "--all",
+        "--once",
+        "--poll-limit",
+        "3",
+        "--gateway-limit",
+        "4",
+        "--sender-limit",
+        "5",
+        "--external-command-limit",
+        "6",
+        "--external-result-limit",
+        "7",
+        "--telegram-reply-limit",
+        "8",
+    ])
+
+    assert result["status"] == "OK"
+    assert result["iterations"] == 1
+    assert result["worker_runs"] == 6
+    assert [call[0] for call in calls] == [
+        "polling_receiver",
+        "gateway_consumer",
+        "sender_worker",
+        "external_command_worker",
+        "external_result_consumer",
+        "telegram_reply_consumer",
+    ]
+    assert calls[0] == ("polling_receiver", 3, {23})
+    assert calls[1] == ("gateway_consumer", 4)
+    assert calls[2] == ("sender_worker", 5)
+    assert calls[3] == (
+        "external_command_worker",
+        {
+            "limit": 6,
+            "dry_run": False,
+            "emit_result": True,
+            "execute_human_handoff": True,
+            "execute_telegram": True,
+            "execute_backend": True,
+        },
+    )
+    assert calls[4] == ("external_result_consumer", 7)
+    assert calls[5][0:3] == ("telegram_reply_consumer", 8, 0)
+
+
+def test_service_runner_requires_all_before_loading_settings(monkeypatch):
+    from app.workers import service_runner
+
+    class FailSettings:
+        def __init__(self):
+            raise AssertionError("settings should not be loaded for usage errors")
+
+    monkeypatch.setattr(service_runner, "Settings", FailSettings)
+
+    result = service_runner.run(["--once"])
+
+    assert result["status"] == "FAILED_USAGE"
+    assert "--all is required" in result["error"]
+
+
 def test_faq_smoke_admin_parser_accepts_filters():
     from app.workers.faq_smoke_admin import build_arg_parser
 
