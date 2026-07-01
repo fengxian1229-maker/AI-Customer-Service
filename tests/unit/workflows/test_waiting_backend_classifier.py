@@ -151,3 +151,25 @@ def test_waiting_backend_text_supplement_and_human_with_telegram_case_appends_fi
     assert state["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE
     assert "TX123456" in state["commands"][0]["payload"]["supplement"]["text"]
     assert all(command["type"] != CommandType.HUMAN_HANDOFF_REQUESTED for command in state["commands"])
+
+
+def test_waiting_backend_llm_screenshot_supplement_appends_to_existing_case():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "intent_result": {"intent": "deposit_missing"},
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {"telegram_case_id": "tg:123", "telegram_message_id": 123},
+            "attachments": [{"url": "https://cdn.example/supplement.png"}],
+            "llm_sop_dialogue_plan": {
+                "status": "accepted",
+                "intent_relation": "current_sop_supplement",
+                "slot_updates": {"receipt_screenshot": "https://cdn.example/supplement.png"},
+                "slot_confidence": {"receipt_screenshot": 0.95},
+                "reason": "screenshot supplement",
+            },
+        }
+    )
+
+    assert state["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE
+    assert state["commands"][0]["payload"]["supplement"]["attachment_urls"] == ["https://cdn.example/supplement.png"]

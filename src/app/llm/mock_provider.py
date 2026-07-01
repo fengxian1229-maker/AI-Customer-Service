@@ -3,11 +3,16 @@ from app.llm.contracts import (
     LLMIntentShadowOutput,
     LLMIntentClassificationOutput,
     LLMIntentClassificationInput,
+    LLMFinalReplyInput,
+    LLMFinalReplyOutput,
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
+    LLMSopDialoguePlannerInput,
+    LLMSopDialoguePlannerOutput,
     LLMSopSlotExtractionInput,
     LLMSopSlotExtractionOutput,
 )
+from app.workflows.llm_sop_dialogue_planner import plan_sop_dialogue_from_state
 from app.workflows.sop_slot_extractor import extract_sop_slots
 from app.workflows.slot_extractors import extract_identity, extract_order_id, normalize_text
 
@@ -103,6 +108,41 @@ class MockLLMProvider:
             "reason": "Mock SOP slot extractor mirrors deterministic fallback for offline validation.",
             "provider": self.provider_name,
             "mode": "sop_slot",
+        }
+
+    async def plan_sop_dialogue(self, payload: LLMSopDialoguePlannerInput) -> LLMSopDialoguePlannerOutput:
+        state = {
+            "slot_memory": payload.get("current_slot_memory") or {},
+            "raw_user_input": payload.get("latest_user_text") or "",
+            "attachments": payload.get("attachments_summary") or [],
+        }
+        result = plan_sop_dialogue_from_state(state, str(payload.get("sop_name") or ""))
+        return {
+            "intent_relation": result["intent_relation"],
+            "extracted_slots": result["slot_updates"],
+            "slot_updates": result["slot_updates"],
+            "slot_confidence": result["slot_confidence"],
+            "missing_slots": result["missing_slots"],
+            "should_ask_confirmation": False,
+            "reply_draft": result.get("reply_draft") or "",
+            "reason": "Mock SOP dialogue planner mirrors deterministic fallback for offline validation.",
+            "provider": self.provider_name,
+            "mode": "sop_dialogue_planner",
+        }
+
+    async def compose_final_reply(self, payload: LLMFinalReplyInput) -> LLMFinalReplyOutput:
+        fallback_text = normalize_text(payload.get("response_text_fallback"))
+        language = payload.get("reply_language") or payload.get("conversation_language") or payload.get("detected_language") or "zh-Hans"
+        tone = ((payload.get("tenant_persona") or {}).get("tone")) or "polite"
+        return {
+            "text": fallback_text,
+            "language": language,
+            "tone": tone,
+            "confidence": 0.90,
+            "safety_flags": [],
+            "reason": "Mock final reply returns the deterministic fallback text for offline full-LLM validation.",
+            "provider": self.provider_name,
+            "mode": "final_reply",
         }
 
 

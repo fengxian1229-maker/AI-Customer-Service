@@ -112,6 +112,20 @@ class LLMSopSlotExtractionInput(TypedDict, total=False):
     language: str
 
 
+class LLMSopDialoguePlannerInput(TypedDict, total=False):
+    tenant_id: str
+    conversation_id: str
+    sop_name: str
+    active_workflow: str | None
+    workflow_stage: str | None
+    current_slot_memory: dict[str, Any]
+    sop_definition: dict[str, Any]
+    latest_user_text: str
+    attachments_summary: list[dict[str, Any]]
+    recent_messages: list[dict[str, Any]]
+    reply_language: str
+
+
 class LLMFinalReplyInput(TypedDict, total=False):
     tenant_id: str
     channel_type: str
@@ -146,6 +160,19 @@ class LLMSopSlotExtractionOutput(TypedDict, total=False):
     attachment_classification: dict[str, Any]
     missing_slots: list[str]
     confidence: dict[str, float]
+    reason: str
+    provider: str
+    mode: str
+
+
+class LLMSopDialoguePlannerOutput(TypedDict, total=False):
+    intent_relation: str
+    extracted_slots: dict[str, Any]
+    slot_updates: dict[str, Any]
+    slot_confidence: dict[str, float]
+    missing_slots: list[str]
+    should_ask_confirmation: bool
+    reply_draft: str
     reason: str
     provider: str
     mode: str
@@ -232,6 +259,19 @@ class LLMSopSlotExtractionSchema(BaseModel):
     attachment_classification: dict[str, Any] = Field(default_factory=dict)
     missing_slots: list[str] = Field(default_factory=list)
     confidence: dict[str, float] = Field(default_factory=dict)
+    reason: str
+
+
+class LLMSopDialoguePlannerSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent_relation: str
+    extracted_slots: dict[str, Any] = Field(default_factory=dict)
+    slot_updates: dict[str, Any] = Field(default_factory=dict)
+    slot_confidence: dict[str, float] = Field(default_factory=dict)
+    missing_slots: list[str] = Field(default_factory=list)
+    should_ask_confirmation: bool = False
+    reply_draft: str = ""
     reason: str
 
 

@@ -9,6 +9,9 @@ from app.llm.contracts import (
     LLMIntentClassificationOutput,
     LLMIntentClassificationInput,
     LLMIntentClassificationSchema,
+    LLMSopDialoguePlannerInput,
+    LLMSopDialoguePlannerOutput,
+    LLMSopDialoguePlannerSchema,
     LLMRewriteAuthoritativeSchema,
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
@@ -16,7 +19,13 @@ from app.llm.contracts import (
     LLMSopSlotExtractionOutput,
     LLMSopSlotExtractionSchema,
 )
-from app.llm.guardrails import validate_intent_output, validate_rewrite_output, validate_router_decision_output, validate_sop_slot_extraction_output
+from app.llm.guardrails import (
+    validate_intent_output,
+    validate_rewrite_output,
+    validate_router_decision_output,
+    validate_sop_dialogue_planner_output,
+    validate_sop_slot_extraction_output,
+)
 from app.llm.gemini_model import build_gemini_chat_model
 
 REWRITE_SYSTEM_PROMPT = """You are an authoritative rewrite model for an AI customer service routing system.
@@ -173,6 +182,18 @@ Screenshot URLs must be selected only from attachments_summary or current_slot_m
 If uncertain, return null for that slot and low confidence.
 Return only structured JSON matching the schema."""
 
+SOP_DIALOGUE_PLANNER_SYSTEM_PROMPT = """You are the LLM-first SOP dialogue understanding node for a customer service system.
+
+Your job is to understand the latest customer message in the active SOP context.
+You may extract slots, classify how the message relates to the current SOP, and draft a short follow-up reply.
+You must not generate external commands, decide Telegram sends, decide backend facts, or bypass the SOP schema.
+Only use slot keys declared in sop_definition. If a value is uncertain, omit it or use low confidence.
+Attachment slots must use URLs from attachments_summary or current_slot_memory only.
+Classify intent_relation as one of current_sop_supplement, faq_interrupt, new_issue, human_request, unclear.
+The program owns slot merging, missing slot calculation, Telegram commands, safety validation, and idempotency.
+Do not promise credited, completed, successful, failed, guaranteed, processed, or handled outcomes.
+Return only structured JSON matching the schema."""
+
 
 class GeminiLLMProvider:
     provider_name = "gemini"
@@ -253,6 +274,19 @@ class GeminiLLMProvider:
             **result,
             "provider": self.provider_name,
             "mode": "sop_slot",
+        }
+
+    async def plan_sop_dialogue(self, payload: LLMSopDialoguePlannerInput) -> LLMSopDialoguePlannerOutput:
+        structured_model = self.model.with_structured_output(
+            schema=LLMSopDialoguePlannerSchema,
+            method="json_schema",
+        )
+        response = await structured_model.ainvoke(_build_chat_messages(SOP_DIALOGUE_PLANNER_SYSTEM_PROMPT, payload))
+        result = validate_sop_dialogue_planner_output(payload, _model_dump(response))
+        return {
+            **result,
+            "provider": self.provider_name,
+            "mode": "sop_dialogue_planner",
         }
 
 

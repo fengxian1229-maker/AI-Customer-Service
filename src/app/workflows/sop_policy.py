@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.workflows.sop_definitions import get_sop_definition
+from app.workflows.llm_sop_dialogue_planner import compute_missing_slots
 from app.workflows.slot_extractors import (
     attachment_urls,
     extract_identity,
@@ -25,7 +26,7 @@ def evaluate_sop_policy(
     if conversation_status == "HUMAN_ACTIVE":
         return {"action": "blocked", "missing_slots": [], "reason": "conversation_is_human_active", "allowed": False}
 
-    missing_slots = [slot for slot in definition.required_slots if not slot_memory.get(slot)]
+    missing_slots = compute_missing_slots(str(intent or ""), slot_memory)
     stage = workflow_stage or "collecting_slots"
     if stage == "waiting_backend":
         text = str(latest_text or "")

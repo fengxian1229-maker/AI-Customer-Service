@@ -4,7 +4,7 @@ from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepo
 from app.graph.builder import build_workflow_graph
 from app.graph.nodes import build_graph_state_from_event, prepare_route_state
 from app.llm.contracts import LLMIntentClassificationInput, LLMIntentShadowInput, LLMRewriteShadowInput, LLMSopSlotExtractionInput
-from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output, validate_sop_slot_extraction_output
+from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output, validate_sop_dialogue_planner_output, validate_sop_slot_extraction_output
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.faq_outbound_plan import build_faq_outbound_plan_from_rag_context, faq_plan_to_outbound_rows
@@ -12,7 +12,9 @@ from app.services.language_policy import normalize_language_code, parse_supporte
 from app.services.message_history import build_customer_message_from_inbound
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
 from app.workflows.command_contracts import CommandType
+from app.workflows.llm_sop_dialogue_planner import build_llm_sop_dialogue_input
 from app.workflows.slot_extractors import is_explicit_human_request, normalize_text
+from app.workflows.sop_definitions import get_sop_definition
 
 
 EXTERNAL_COMMAND_TYPES = {
@@ -389,16 +391,20 @@ class GatewayService:
 
     def _should_run_sop_slot_extraction(self, graph_state: dict) -> bool:
         intent = (graph_state.get("intent_result") or {}).get("intent")
+        has_planner = hasattr(self.llm_sop_slot_service, "plan_sop_dialogue")
+        has_legacy_extractor = hasattr(self.llm_sop_slot_service, "extract_sop_slots")
         return bool(
             self.llm_sop_slot_enabled
             and self.llm_sop_slot_service
-            and hasattr(self.llm_sop_slot_service, "extract_sop_slots")
+            and (has_planner or has_legacy_extractor)
             and graph_state.get("route") == "sop"
             and intent in {"deposit_missing", "withdrawal_missing"}
-            and graph_state.get("workflow_stage") not in {"waiting_backend", "backend_querying"}
+            and graph_state.get("workflow_stage") not in {"backend_querying"}
         )
 
     async def _run_sop_slot_extraction(self, graph_state: dict) -> dict:
+        if hasattr(self.llm_sop_slot_service, "plan_sop_dialogue"):
+            return await self._run_sop_dialogue_planning(graph_state)
         payload = self._build_llm_sop_slot_input(graph_state)
         try:
             raw_result = await self.llm_sop_slot_service.extract_sop_slots(payload)
@@ -421,10 +427,49 @@ class GatewayService:
         except Exception as exc:
             return self._sop_slot_fallback_state(graph_state, "exception" if not isinstance(exc, ValueError) else "validation_error", exc=exc)
 
+    async def _run_sop_dialogue_planning(self, graph_state: dict) -> dict:
+        intent = (graph_state.get("intent_result") or {}).get("intent")
+        definition = get_sop_definition(intent)
+        if definition is None:
+            return self._sop_slot_fallback_state(graph_state, "unsupported_sop")
+        payload = build_llm_sop_dialogue_input(graph_state, str(intent), definition)
+        try:
+            raw_result = await self.llm_sop_slot_service.plan_sop_dialogue(payload)
+            sanitized_raw = self._sanitize_value(raw_result or {})
+            result = validate_sop_dialogue_planner_output(payload, sanitized_raw)
+            if self._sop_dialogue_low_confidence(result):
+                return self._sop_slot_fallback_state(graph_state, "low_confidence", result=result)
+            slot_memory = dict(graph_state.get("slot_memory") or {})
+            for key, value in (result.get("slot_updates") or {}).items():
+                if value:
+                    slot_memory[key] = value
+            return {
+                **graph_state,
+                "slot_memory": slot_memory,
+                "llm_sop_dialogue_plan": {
+                    "status": "accepted",
+                    "provider": sanitized_raw.get("provider"),
+                    "mode": sanitized_raw.get("mode") or "sop_dialogue_planner",
+                    **result,
+                },
+                "llm_sop_slot_result": self._sop_slot_result_summary("accepted", result={**result, "confidence": result.get("slot_confidence")}, provider=sanitized_raw.get("provider"), mode=sanitized_raw.get("mode")),
+                "sop_slot_source": "llm_dialogue_planner",
+            }
+        except Exception as exc:
+            return self._sop_slot_fallback_state(graph_state, "exception" if not isinstance(exc, ValueError) else "validation_error", exc=exc)
+
     def _sop_slot_low_confidence(self, result: dict) -> bool:
         extracted = result.get("extracted_slots") or {}
         confidence = result.get("confidence") or {}
         for key, value in extracted.items():
+            if value and float(confidence.get(key) or 0.0) < self.llm_sop_slot_min_confidence:
+                return True
+        return False
+
+    def _sop_dialogue_low_confidence(self, result: dict) -> bool:
+        updates = result.get("slot_updates") or {}
+        confidence = result.get("slot_confidence") or {}
+        for key, value in updates.items():
             if value and float(confidence.get(key) or 0.0) < self.llm_sop_slot_min_confidence:
                 return True
         return False

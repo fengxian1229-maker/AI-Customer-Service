@@ -6,15 +6,17 @@ def plan_sop_reply(intent: str, policy_result: dict[str, Any], language: str | N
     action = policy_result.get("action")
     missing = set(policy_result.get("missing_slots") or [])
     if action == "ask_missing_slots":
-        if "account_or_phone" in missing and ("deposit_screenshot" in missing or "withdrawal_screenshot" in missing):
+        needs_phone = bool({"account_or_phone", "phone"} & missing)
+        needs_screenshot = bool({"deposit_screenshot", "withdrawal_screenshot", "receipt_screenshot"} & missing)
+        if needs_phone and needs_screenshot:
             screenshot = "存款付款截图" if intent == "deposit_missing" else "提款截图"
             return {"reply_text": f"请提供用户名或注册手机号，并上传{screenshot}。", "next_step": "wait_customer_slot"}
-        if "account_or_phone" in missing:
+        if needs_phone:
             prefix = "已收到提款截图" if intent == "withdrawal_missing" else "已收到截图"
             return {"reply_text": f"{prefix}，请再提供用户名或注册手机号。", "next_step": "wait_customer_slot"}
-        if "deposit_screenshot" in missing:
+        if "deposit_screenshot" in missing or ("receipt_screenshot" in missing and intent == "deposit_missing"):
             return {"reply_text": "收到，请上传存款付款截图。", "next_step": "wait_customer_slot"}
-        if "withdrawal_screenshot" in missing:
+        if "withdrawal_screenshot" in missing or ("receipt_screenshot" in missing and intent == "withdrawal_missing"):
             return {"reply_text": "收到，请上传提款申请截图。", "next_step": "wait_customer_slot"}
         return {"reply_text": "请补充必要资料，我们会继续协助。", "next_step": "wait_customer_slot"}
     if action == "send_telegram_case":

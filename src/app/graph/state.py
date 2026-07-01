@@ -21,6 +21,7 @@ class GraphState(TypedDict, total=False):
     llm_rewrite_result: dict[str, Any] | None
     llm_router_result: dict[str, Any] | None
     llm_sop_slot_result: dict[str, Any] | None
+    llm_sop_dialogue_plan: dict[str, Any] | None
     sop_slot_source: str | None
     event_type: str
     attachments: list[dict[str, Any]]

@@ -2,11 +2,11 @@ from typing import Any
 
 from app.workflows.command_contracts import CommandType
 from app.workflows.final_reply_policy import build_reply_plan
+from app.workflows.llm_sop_dialogue_planner import plan_sop_dialogue_from_state
 from app.workflows.slot_extractors import extract_identity
 from app.workflows.sop_command_builder import build_sop_command
 from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
-from app.workflows.sop_slot_extractor import extract_sop_slots
 
 
 def run_sop(state: dict[str, Any]) -> dict[str, Any]:
@@ -36,18 +36,8 @@ def run_sop(state: dict[str, Any]) -> dict[str, Any]:
 
 def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) -> dict[str, Any]:
     text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")
-    initial_slot_memory = dict(state.get("slot_memory") or {})
-    extraction = extract_sop_slots(intent, initial_slot_memory, text, state.get("attachments", []))
-    slot_memory = extraction["slot_memory"]
-    if (state.get("llm_sop_slot_result") or {}).get("status") == "accepted":
-        for key, value in initial_slot_memory.items():
-            if value and key in {"account_or_phone", "amount", "payment_channel", "order_id", "deposit_screenshot", "withdrawal_screenshot"}:
-                slot_memory[key] = value
-    if slot_memory.get("order_id"):
-        legacy_order_key = "deposit_order_id" if intent == "deposit_missing" else "withdrawal_order_id"
-        slot_memory.setdefault(legacy_order_key, slot_memory["order_id"])
-    if slot_memory.get("payment_channel"):
-        slot_memory.setdefault("channel", slot_memory["payment_channel"])
+    dialogue_plan = plan_sop_dialogue_from_state(state, intent)
+    slot_memory = dialogue_plan["slot_memory"]
     policy = evaluate_sop_policy(
         intent,
         slot_memory,
@@ -58,6 +48,8 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
         attachments=state.get("attachments", []),
     )
     reply = plan_sop_reply(intent, policy)
+    if policy["action"] == "ask_missing_slots" and _safe_reply_draft(dialogue_plan.get("reply_draft")):
+        reply = {"reply_text": dialogue_plan["reply_draft"], "next_step": "wait_customer_slot"}
     commands: list[dict[str, Any]] = []
     if policy["action"] == "send_telegram_case":
         commands.append(build_sop_command(CommandType.TELEGRAM_SEND_CASE_CARD, state, intent, slot_memory))
@@ -67,6 +59,18 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
         "slot_memory": slot_memory,
         "missing_slots": policy.get("missing_slots", []),
         "sop_action": policy["action"],
+        "llm_sop_dialogue_plan": {
+            "status": dialogue_plan.get("status"),
+            "source": dialogue_plan.get("source"),
+            "intent_relation": dialogue_plan.get("intent_relation"),
+            "slot_updates": dialogue_plan.get("slot_updates"),
+            "slot_confidence": dialogue_plan.get("slot_confidence"),
+            "missing_slots": dialogue_plan.get("missing_slots"),
+            "should_ask_confirmation": dialogue_plan.get("should_ask_confirmation"),
+            "reply_draft": dialogue_plan.get("reply_draft"),
+            "reason": dialogue_plan.get("reason"),
+            "dropped_slots": dialogue_plan.get("dropped_slots"),
+        },
         "response_text": reply["reply_text"],
         "response_text_fallback": reply["reply_text"],
         "reply_plan": _build_sop_reply_plan(intent, policy, reply["reply_text"]),
@@ -193,11 +197,11 @@ def _build_sop_reply_plan(intent: str, policy: dict[str, Any], fallback_text: st
     missing_slots = list(policy.get("missing_slots") or [])
     if action == "ask_missing_slots":
         must_say = []
-        if "account_or_phone" in missing_slots:
+        if "account_or_phone" in missing_slots or "phone" in missing_slots:
             must_say.append("用户名或注册手机号")
-        if "deposit_screenshot" in missing_slots:
+        if "deposit_screenshot" in missing_slots or ("receipt_screenshot" in missing_slots and intent == "deposit_missing"):
             must_say.append("存款付款截图")
-        if "withdrawal_screenshot" in missing_slots:
+        if "withdrawal_screenshot" in missing_slots or ("receipt_screenshot" in missing_slots and intent == "withdrawal_missing"):
             must_say.append("提款")
         return build_reply_plan(
             kind="ask_missing_slots",
@@ -238,3 +242,9 @@ def _build_sop_reply_plan(intent: str, policy: dict[str, Any], fallback_text: st
         allowed_facts=[fallback_text],
         metadata={"intent": intent, "sop_action": action},
     )
+
+
+def _safe_reply_draft(reply_draft: Any) -> bool:
+    text = str(reply_draft or "")
+    forbidden = ("已到账", "到账成功", "已完成", "保证", "已处理", "credited", "completed", "guarantee")
+    return bool(text.strip()) and not any(phrase.lower() in text.lower() for phrase in forbidden)

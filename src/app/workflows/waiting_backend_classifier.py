@@ -2,22 +2,25 @@ from typing import Any
 
 from app.workflows.command_contracts import CommandType
 from app.workflows.final_reply_policy import build_reply_plan
+from app.workflows.llm_sop_dialogue_planner import plan_sop_dialogue_from_state
 from app.workflows.sop_command_builder import build_sop_command
 from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
-from app.workflows.slot_extractors import attachment_urls, extract_identity, extract_order_id, extract_transaction_signal, is_explicit_human_request
+from app.workflows.slot_extractors import is_explicit_human_request
 
 CASE_PENDING_REPLY = "案件仍在建立或确认中，我们会继续跟进，请稍候。"
 
 
 def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
-    slot_memory = dict(state.get("slot_memory") or {})
-    urls = attachment_urls(state.get("attachments", []))
     text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")
-    identity = extract_identity(text)
-    transaction = extract_transaction_signal(text)
-    order_id = extract_order_id(text)
-    active_workflow = state.get("active_workflow")
+    active_workflow = str(state.get("active_workflow") or "")
+    dialogue_plan = plan_sop_dialogue_from_state(state, active_workflow)
+    slot_memory = dialogue_plan["slot_memory"]
+    urls = [
+        url
+        for url in (slot_memory.get("forwarded_attachment_urls") or [])
+        if url not in ((state.get("slot_memory") or {}).get("forwarded_attachment_urls") or [])
+    ]
     policy = evaluate_sop_policy(
         active_workflow,
         slot_memory,
@@ -27,49 +30,20 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
         latest_text=text,
         attachments=state.get("attachments", []),
     )
+    relation = dialogue_plan.get("intent_relation")
+    explicit_human = relation == "human_request" or is_explicit_human_request(text)
+    has_supplement = bool(
+        urls
+        or any(value for value in (dialogue_plan.get("slot_updates") or {}).values())
+        or (dialogue_plan.get("status") == "accepted" and relation == "current_sop_supplement")
+    )
 
-    if urls:
-        forwarded = list(slot_memory.get("forwarded_attachment_urls", []))
-        new_urls = [url for url in urls if url not in forwarded]
-        if new_urls:
-            forwarded.extend(new_urls)
-            slot_memory["forwarded_attachment_urls"] = forwarded
-            screenshot_key = "deposit_screenshot" if active_workflow == "deposit_missing" else "withdrawal_screenshot"
-            slot_memory.setdefault(screenshot_key, new_urls[0])
-            if policy["action"] == "human_handoff":
+    if has_supplement:
+        if not (slot_memory.get("telegram_case_id") and slot_memory.get("telegram_message_id")):
+            if explicit_human:
                 return _build_handoff_state(state, slot_memory)
-            if policy["action"] != "append_to_case":
-                return _waiting_followup_state(state, slot_memory)
-            reply = plan_sop_reply(str(active_workflow), policy)
-            return {
-                **state,
-                "slot_memory": slot_memory,
-                "workflow_stage": "waiting_backend",
-                "sop_action": "append_to_case",
-                "response_text": reply["reply_text"],
-                "response_text_fallback": reply["reply_text"],
-                "reply_plan": _waiting_reply_plan("append_backend_case", reply["reply_text"]),
-                "commands": [
-                    build_sop_command(
-                        CommandType.TELEGRAM_APPEND_TO_CASE,
-                        state,
-                        str(active_workflow),
-                        slot_memory,
-                        supplement={"text": text, "attachment_urls": new_urls, "reason": policy.get("reason")},
-                    )
-                ],
-            }
-
-    if transaction or identity or order_id:
-        if identity:
-            slot_memory["account_or_phone"] = identity["value"]
-        if order_id:
-            slot_memory["order_id"] = order_id
-        if policy["action"] == "human_handoff":
-            return _build_handoff_state(state, slot_memory)
-        if policy["action"] != "append_to_case":
             return _waiting_followup_state(state, slot_memory)
-        reply = plan_sop_reply(str(active_workflow), policy)
+        reply = plan_sop_reply(str(active_workflow), {"action": "append_to_case"})
         return {
             **state,
             "slot_memory": slot_memory,
@@ -86,16 +60,15 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
                     slot_memory,
                     supplement={
                         "text": text,
-                        "attachment_urls": [],
-                        "has_contact_hint": bool(identity),
-                        "has_transaction_signal": bool(transaction or order_id),
+                        "attachment_urls": urls,
+                        "slot_updates": dialogue_plan.get("slot_updates") or {},
                         "reason": policy.get("reason"),
                     },
                 )
             ],
         }
 
-    if is_explicit_human_request(text):
+    if explicit_human or policy["action"] == "human_handoff":
         return _build_handoff_state(state, slot_memory)
 
     return {

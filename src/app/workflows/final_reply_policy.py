@@ -33,6 +33,16 @@ SEMANTIC_ALIASES = {
         "my": ("username", "registered phone", "account"),
         "ms": ("nama pengguna", "nombor telefon berdaftar", "akaun"),
     },
+    "phone": {
+        "zh-Hans": ("电话", "手机号", "注册手机号", "联系电话"),
+        "zh-Hant": ("電話", "手機號", "註冊手機號", "聯絡電話"),
+        "en": ("phone", "registered phone number", "contact number"),
+        "es": ("teléfono", "telefono", "número registrado", "numero registrado"),
+        "tl": ("phone", "registered number"),
+        "th": ("เบอร์โทร", "เบอร์โทรที่ลงทะเบียน"),
+        "my": ("phone", "registered phone"),
+        "ms": ("telefon", "nombor telefon berdaftar"),
+    },
     "deposit_screenshot": {
         "zh-Hans": ("存款付款截图", "付款截图", "充值截图"),
         "zh-Hant": ("存款付款截圖", "付款截圖", "儲值截圖"),
@@ -52,6 +62,16 @@ SEMANTIC_ALIASES = {
         "th": ("ภาพหน้าจอการถอนเงิน", "คำขอถอนเงิน"),
         "my": ("withdrawal screenshot",),
         "ms": ("tangkapan skrin pengeluaran",),
+    },
+    "receipt_screenshot": {
+        "zh-Hans": ("截图", "凭证截图", "付款截图", "存款付款截图", "提款截图"),
+        "zh-Hant": ("截圖", "憑證截圖", "付款截圖"),
+        "en": ("screenshot", "receipt screenshot", "payment proof", "proof"),
+        "es": ("captura", "comprobante", "prueba de pago"),
+        "tl": ("screenshot", "proof of payment"),
+        "th": ("ภาพหน้าจอ", "หลักฐาน"),
+        "my": ("screenshot", "proof"),
+        "ms": ("tangkapan skrin", "bukti"),
     },
     "backend_waiting_notice": {
         "zh-Hans": ("请稍等", "后台", "查询", "确认"),

@@ -408,8 +408,9 @@ def validate_sop_slot_extraction_output(payload: dict[str, Any], output: dict[st
         confidence[key] = normalize_confidence((output.get("confidence") or {}).get(key))
 
     slot_memory = {**(payload.get("current_slot_memory") or {}), **{k: v for k, v in extracted.items() if v}}
-    definition = get_sop_definition(expected_intent)
-    missing_slots = [slot for slot in (definition.required_slots if definition else ()) if not slot_memory.get(slot)]
+    from app.workflows.llm_sop_dialogue_planner import compute_missing_slots
+
+    missing_slots = _legacy_sop_missing_slots(expected_intent, compute_missing_slots(expected_intent, slot_memory))
     attachment_classification = {
         key: value
         for key, value in dict(output.get("attachment_classification") or {}).items()
@@ -429,6 +430,40 @@ def validate_sop_slot_extraction_output(payload: dict[str, Any], output: dict[st
     }
 
 
+def validate_sop_dialogue_planner_output(payload: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
+    from app.workflows.llm_sop_dialogue_planner import apply_llm_sop_plan
+
+    intent = str(payload.get("sop_name") or payload.get("intent") or "")
+    normalized = {
+        "status": "accepted",
+        "intent_relation": _optional_str(output.get("intent_relation")) or "unclear",
+        "extracted_slots": dict(output.get("extracted_slots") or {}),
+        "slot_updates": dict(output.get("slot_updates") or output.get("extracted_slots") or {}),
+        "slot_confidence": dict(output.get("slot_confidence") or output.get("confidence") or {}),
+        "missing_slots": _string_list(output.get("missing_slots")),
+        "should_ask_confirmation": bool(output.get("should_ask_confirmation")),
+        "reply_draft": str(output.get("reply_draft") or ""),
+        "reason": _require_str(output, "reason", "sop dialogue planner"),
+    }
+    state = {
+        "slot_memory": dict(payload.get("current_slot_memory") or {}),
+        "attachments": list(payload.get("attachments_summary") or []),
+        "attachments_summary": list(payload.get("attachments_summary") or []),
+    }
+    planned = apply_llm_sop_plan(state, intent, normalized)
+    return {
+        "intent_relation": planned["intent_relation"],
+        "extracted_slots": normalized["extracted_slots"],
+        "slot_updates": planned["slot_updates"],
+        "slot_confidence": planned["slot_confidence"],
+        "missing_slots": planned["missing_slots"],
+        "should_ask_confirmation": planned["should_ask_confirmation"],
+        "reply_draft": planned["reply_draft"],
+        "reason": planned["reason"],
+        "dropped_slots": planned["dropped_slots"],
+    }
+
+
 def _require_str(output: dict[str, Any], field: str, output_name: str) -> str:
     value = output.get(field)
     if value is None:
@@ -437,6 +472,12 @@ def _require_str(output: dict[str, Any], field: str, output_name: str) -> str:
     if not text:
         raise ValueError(f"Missing required {output_name} field: {field}")
     return text
+
+
+def _legacy_sop_missing_slots(intent: str, missing_slots: list[str]) -> list[str]:
+    screenshot_key = "deposit_screenshot" if intent == "deposit_missing" else "withdrawal_screenshot"
+    aliases = {"phone": "account_or_phone", "receipt_screenshot": screenshot_key}
+    return [aliases.get(slot, slot) for slot in missing_slots]
 
 
 def _optional_str(value) -> str | None:
