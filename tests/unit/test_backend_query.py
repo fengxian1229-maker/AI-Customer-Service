@@ -424,7 +424,7 @@ def test_backend_provider_factory_only_supports_explicit_tac():
         raise AssertionError("expected unsupported provider")
 
 
-def test_backend_query_service_generates_deterministic_answers():
+def test_backend_query_service_generates_structured_reply_intent():
     from app.backends.config import BackendConfig
     from app.services.backend_query_service import BackendQueryService
 
@@ -460,7 +460,9 @@ def test_backend_query_service_generates_deterministic_answers():
     )
 
     assert result["status"] == "success"
-    assert "剩余流水约为 88.5" in result["answer"]
+    assert "answer" not in result
+    assert result["reply_intent"] == "backend_turnover_remaining"
+    assert result["reply_facts"] == {"remaining_turnover": "88.5"}
     assert result["config_source"] == "env_default"
     assert "authorization" not in str(result).lower()
 
@@ -468,7 +470,8 @@ def test_backend_query_service_generates_deterministic_answers():
         {"intent": "withdrawal_blocked_or_rollover", "account_or_phone": "andy"},
         tenant_id=None,
     )
-    assert "未查询到" in not_found["answer"]
+    assert "answer" not in not_found
+    assert not_found["reply_intent"] == "backend_player_not_found"
 
 
 def test_external_command_worker_execute_backend_success_emits_result(monkeypatch):

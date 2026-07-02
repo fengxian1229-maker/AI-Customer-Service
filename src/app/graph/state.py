@@ -45,6 +45,7 @@ class GraphState(TypedDict, total=False):
     recent_messages: list[dict[str, Any]]
 
     reply_plan: dict[str, Any] | None
+    customer_reply: dict[str, Any] | None
     response_text_fallback: str | None
     final_response_text: str | None
     final_reply_result: dict[str, Any] | None

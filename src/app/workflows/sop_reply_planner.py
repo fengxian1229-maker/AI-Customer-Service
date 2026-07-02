@@ -20,9 +20,9 @@ def plan_sop_reply(intent: str, policy_result: dict[str, Any], language: str | N
             return {"reply_text": "收到，请上传提款申请截图。", "next_step": "wait_customer_slot"}
         return {"reply_text": "请补充必要资料，我们会继续协助。", "next_step": "wait_customer_slot"}
     if action == "send_telegram_case":
-        return {"reply_text": "已为您转交后台确认，请稍等。", "next_step": "wait_backend"}
+        return {"reply_text": "感谢您提供的截图，我们现在为您查询，请稍等。", "next_step": "wait_backend"}
     if action == "append_to_case":
-        return {"reply_text": "已补充给后台继续确认，请稍等。", "next_step": "wait_backend"}
+        return {"reply_text": "已收到您的补充信息，我们继续为您查询，请稍等。", "next_step": "wait_backend"}
     if action == "waiting_followup":
         return {"reply_text": "案件仍在确认中，有更新会在这里通知你。", "next_step": "wait_backend"}
     if action == "human_handoff":

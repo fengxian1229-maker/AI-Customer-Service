@@ -1,0 +1,35 @@
+{
+  "zh-Hans": {
+    "ask_account_or_phone": "一般无法提款通常与流水要求或风控限制有关。为了帮你继续查询，请提供用户名或注册手机号。",
+    "backend_query_waiting": "已收到你的账号资料，我们会为你查询提款限制或流水要求，请稍等。",
+    "backend_player_not_found": "未查询到该用户名/手机号对应的玩家资料，请再次确认用户名或注册手机号是否正确。",
+    "backend_turnover_remaining": "查询显示当前可能仍有未完成流水要求，剩余流水约为 {remaining_turnover}。请先完成对应流水后再尝试提款。如你认为数据不正确，我们会继续人工复核。",
+    "backend_turnover_met": "当前未查询到未完成流水要求。如仍无法提款，可能涉及其他风控或账户限制，我们会继续为你转人工复核。",
+    "backend_turnover_unknown": "查询未返回明确流水结论，我们会继续人工复核。",
+    "backend_query_failed": "查询暂时无法完成，我们会继续为你人工复核，请稍候。",
+    "wallet_change_needs_human_or_clarification": "你提到的 {payment_channel} 看起来是钱包或收款方式。为了继续协助，请提供用户名或注册手机号，或说明你是否需要更换/新增收款账户。",
+    "clarification": "请补充你要咨询的问题，我们会继续协助。"
+  },
+  "en": {
+    "ask_account_or_phone": "Withdrawal issues are often related to rollover requirements or account restrictions. To help check this, please provide your username or registered phone number.",
+    "backend_query_waiting": "We have received your account details and will check the withdrawal restriction or rollover requirement. Please wait a moment.",
+    "backend_player_not_found": "We could not find player details for that username or registered phone number. Please check it and send it again.",
+    "backend_turnover_remaining": "The check shows there may still be an unfinished rollover requirement. The remaining rollover is about {remaining_turnover}. Please complete the required rollover before trying to withdraw again. If you think this is incorrect, we can continue with a manual review.",
+    "backend_turnover_met": "No unfinished rollover requirement was found. If you still cannot withdraw, it may involve another account restriction and we can continue with a manual review.",
+    "backend_turnover_unknown": "The check did not return a clear rollover result, so we will continue with a manual review.",
+    "backend_query_failed": "The check cannot be completed right now. We will continue with a manual review. Please wait a moment.",
+    "wallet_change_needs_human_or_clarification": "{payment_channel} looks like a wallet or receiving method. To continue helping, please provide your username or registered phone number, or confirm whether you need to change/add a receiving account.",
+    "clarification": "Please add more detail about what you need help with, and we will continue assisting."
+  },
+  "es": {
+    "ask_account_or_phone": "Los problemas para retirar suelen estar relacionados con requisitos de rollover o restricciones de la cuenta. Para revisarlo, indícanos tu usuario o teléfono registrado.",
+    "backend_query_waiting": "Recibimos los datos de tu cuenta y revisaremos la restricción de retiro o el requisito de rollover. Espera un momento, por favor.",
+    "backend_player_not_found": "No encontramos datos de jugador con ese usuario o teléfono registrado. Verifícalo y envíanoslo nuevamente, por favor.",
+    "backend_turnover_remaining": "La revisión muestra que aún puede haber un requisito de rollover pendiente. El rollover restante es aproximadamente {remaining_turnover}. Completa ese requisito antes de intentar retirar nuevamente. Si crees que el dato no es correcto, podemos continuar con una revisión manual.",
+    "backend_turnover_met": "No encontramos requisitos de rollover pendientes. Si aún no puedes retirar, puede tratarse de otra restricción de la cuenta y podemos continuar con una revisión manual.",
+    "backend_turnover_unknown": "La revisión no devolvió una conclusión clara sobre el rollover, así que continuaremos con una revisión manual.",
+    "backend_query_failed": "La revisión no se puede completar en este momento. Continuaremos con una revisión manual. Espera un momento, por favor.",
+    "wallet_change_needs_human_or_clarification": "{payment_channel} parece ser una billetera o método de recepción. Para seguir ayudándote, indícanos tu usuario o teléfono registrado, o confirma si necesitas cambiar/agregar una cuenta de recepción.",
+    "clarification": "Agrega más detalles sobre lo que necesitas consultar y seguiremos ayudándote."
+  }
+}

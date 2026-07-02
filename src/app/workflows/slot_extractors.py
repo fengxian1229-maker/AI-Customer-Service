@@ -19,6 +19,17 @@ COMMON_WORDS = {
     "thanks",
 }
 
+PAYMENT_CHANNELS = {
+    "gcash",
+    "maya",
+    "pix",
+    "spei",
+    "oxxo",
+    "pse",
+    "nequi",
+    "daviplata",
+}
+
 
 def normalize_text(text: str | None) -> str:
     return str(text or "").strip()
@@ -39,7 +50,7 @@ def extract_identity(text: str | None) -> dict[str, str] | None:
         raw,
         re.I,
     )
-    if username and username.group(1).lower() not in COMMON_WORDS:
+    if username and username.group(1).lower() not in COMMON_WORDS | PAYMENT_CHANNELS:
         return {"type": "username", "value": username.group(1)}
     return None
 
@@ -95,6 +106,22 @@ def extract_channel(text: str | None) -> str | None:
         return labelled.group(1).strip()
     known = re.search(r"\b(GCASH|MAYA|PIX|SPEI|OXXO|PSE|NEQUI|DAVIPLATA)\b", raw, re.I)
     return known.group(1).upper() if known else None
+
+
+def is_wallet_or_receiving_account_change(text: str | None) -> bool:
+    raw = normalize_text(text).lower()
+    if not raw:
+        return False
+    if not extract_channel(raw):
+        return False
+    return bool(
+        re.search(
+            r"(agreg(?:ar|ué|ue|ado)|añadir|add(?:ed)?|change|cambiar|otra\s+cuenta|another\s+account|"
+            r"billetera|wallet|receiving\s+account|收款账户|收款帳戶|钱包|錢包)",
+            raw,
+            re.I,
+        )
+    )
 
 
 def is_explicit_human_request(text: str | None) -> bool:

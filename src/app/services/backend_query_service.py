@@ -3,6 +3,7 @@ from typing import Any
 
 from app.backends.factory import BackendProviderFactory, UnsupportedBackendProviderError
 from app.backends.resolver import BackendConfigError, TenantBackendConfigResolver
+from app.services.reply_intents import CustomerReplyIntent
 
 
 class BackendQueryService:
@@ -39,10 +40,11 @@ class BackendQueryService:
         except Exception as exc:
             return _failed("FAILED_BACKEND_QUERY", _safe_error_message(exc))
 
-        answer = build_withdrawal_blocked_answer(query_result)
+        reply_intent, reply_facts = build_withdrawal_blocked_reply(query_result)
         return {
             "status": "success",
-            "answer": answer,
+            "reply_intent": str(reply_intent),
+            "reply_facts": reply_facts,
             "intent": intent,
             "account_or_phone": str(account_or_phone),
             "config_source": config.source,
@@ -50,20 +52,16 @@ class BackendQueryService:
         }
 
 
-def build_withdrawal_blocked_answer(query_result: dict[str, Any]) -> str:
+def build_withdrawal_blocked_reply(query_result: dict[str, Any]) -> tuple[CustomerReplyIntent, dict[str, Any]]:
     if not query_result.get("player_found"):
-        return "未查询到该用户名/手机号对应的玩家资料，请再次确认用户名或注册手机号是否正确。"
+        return CustomerReplyIntent.BACKEND_PLAYER_NOT_FOUND, {}
     active_count = int(query_result.get("active_requirements_count") or 0)
     remaining = query_result.get("remaining_turnover")
     if active_count > 0 or _positive_number(remaining):
-        remaining_text = _format_number(remaining)
-        return (
-            f"后台查询显示当前可能仍有未完成流水要求，剩余流水约为 {remaining_text}。"
-            "请先完成对应流水后再尝试提款。如你认为数据不正确，我们会继续人工复核。"
-        )
+        return CustomerReplyIntent.BACKEND_TURNOVER_REMAINING, {"remaining_turnover": _format_number(remaining)}
     if query_result.get("is_met") is True:
-        return "当前未查询到未完成流水要求。如仍无法提款，可能涉及其他风控或账户限制，我们会继续为你转人工/后台复核。"
-    return "后台查询未返回明确流水结论，我们会继续人工复核。"
+        return CustomerReplyIntent.BACKEND_TURNOVER_MET, {}
+    return CustomerReplyIntent.BACKEND_TURNOVER_UNKNOWN, {}
 
 
 def sanitize_turnover_query_result(query_result: dict[str, Any]) -> dict[str, Any]:

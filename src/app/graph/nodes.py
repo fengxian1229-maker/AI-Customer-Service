@@ -78,6 +78,7 @@ def build_graph_state_from_event(
         "node_facts": None,
         "recent_messages": recent_messages or [],
         "reply_plan": None,
+        "customer_reply": None,
         "response_text_fallback": None,
         "final_response_text": None,
         "final_reply_result": None,

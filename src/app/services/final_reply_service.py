@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.language_policy import normalize_language_code, parse_supported_languages
+from app.services.reply_renderer import render_customer_reply
 from app.workflows.final_reply_policy import accepted_result, fallback_result, validate_final_reply_output
 from app.workflows.final_reply_templates import (
     build_node_facts,
@@ -37,7 +38,11 @@ class FinalReplyService:
         self.supported_languages = parse_supported_languages(self.tenant_persona.get("supported_languages"))
 
     async def compose(self, state: dict[str, Any]) -> dict[str, Any]:
-        fallback_text = normalize_text(state.get("response_text_fallback") or state.get("response_text"))
+        fallback_text = normalize_text(
+            state.get("response_text_fallback")
+            or state.get("response_text")
+            or self._render_structured_fallback(state)
+        )
         if not fallback_text:
             return {
                 **state,
@@ -70,6 +75,19 @@ class FinalReplyService:
             "final_response_text": text,
             "final_reply_result": accepted_result(output or {}),
         }
+
+    def _render_structured_fallback(self, state: dict[str, Any]) -> str | None:
+        customer_reply = state.get("customer_reply") if isinstance(state.get("customer_reply"), dict) else {}
+        reply_intent = customer_reply.get("intent")
+        if not reply_intent:
+            return None
+        facts = customer_reply.get("facts") if isinstance(customer_reply.get("facts"), dict) else {}
+        return render_customer_reply(
+            reply_intent,
+            facts=facts,
+            reply_language=state.get("reply_language") or customer_reply.get("language"),
+            tenant_persona=self.tenant_persona,
+        )
 
     def _fallback_state(
         self,

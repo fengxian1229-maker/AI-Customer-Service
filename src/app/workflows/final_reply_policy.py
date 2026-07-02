@@ -133,6 +133,16 @@ HUMAN_HANDOFF_FORBIDDEN_PROMISES = (
 )
 
 INTERNAL_TELEGRAM_IDENTIFIER_PATTERN = re.compile(r"\b(?:tg|mock_tg):\d+\b|telegram_message_id|telegram_case_id", re.I)
+INTERNAL_ORGANIZATION_LABEL_PATTERN = re.compile(
+    r"(后台工作人员|后台人员|工作人员|人工后台|backend\s+staff|staff\s+reply|third[-\s]?party\s+platform|第三方平台|第三方\s*api|\bapi\b|接口)",
+    re.I,
+)
+INTERNAL_BACKEND_TRANSFER_PATTERN = re.compile(
+    r"(转交后台|轉交後台|转给后台|轉給後台|交给后台|交給後台|提交后台|提交給後台|同步给后台|同步至后台|补充给后台|補充給後台|"
+    r"transferred?\s+to\s+backend|submitted?\s+to\s+backend|synced?\s+to\s+backend|hand(?:ed)?\s+off\s+to\s+backend|"
+    r"call(?:ing)?\s+(?:a\s+)?third[-\s]?party\s+api|调用.{0,12}(?:api|接口|第三方平台))",
+    re.I,
+)
 BACKEND_SYNC_CLAIM_PATTERN = re.compile(
     r"(已同步|同步至|同步给后台|已提交后台|提交给后台|已补充给后台|補充給後台|已補充給後台|sent to backend|synced to backend)",
     re.I,
@@ -230,6 +240,12 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
 
     if INTERNAL_TELEGRAM_IDENTIFIER_PATTERN.search(text):
         violations.append("internal_telegram_identifier")
+
+    if INTERNAL_ORGANIZATION_LABEL_PATTERN.search(text):
+        violations.append("internal_organization_label")
+
+    if INTERNAL_BACKEND_TRANSFER_PATTERN.search(text):
+        violations.append("internal_backend_transfer_phrase")
 
     if UNVERIFIED_TIME_COMMITMENT_PATTERN.search(text):
         violations.append("unverified_time_commitment")

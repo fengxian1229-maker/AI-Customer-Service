@@ -416,7 +416,7 @@ def test_gateway_splits_livechat_outbox_and_external_commands():
     result = asyncio.run(service.process_event(11, event))
 
     assert [message["action_type"] for message in outbound_repository.inserted] == ["send_event"]
-    assert outbound_repository.inserted[0]["payload_json"]["text"] == "已为您转交后台确认，请稍等。"
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "感谢您提供的截图，我们现在为您查询，请稍等。"
     assert [command["command_type"] for command in external_repository.inserted] == ["telegram.send_case_card"]
     assert result["external_commands"][0]["command_type"] == "telegram.send_case_card"
 
@@ -492,10 +492,11 @@ def test_gateway_service_withdrawal_blocked_generates_backend_query_without_rag_
     assert rag_service.calls == []
     assert result["graph_state"]["intent_result"]["intent"] == "withdrawal_blocked_or_rollover"
     assert result["graph_state"]["workflow_stage"] == "backend_querying"
-    assert result["outbound_messages"][0]["payload_json"]["text"] == "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
-    assert outbound_repository.inserted[0]["payload_json"]["text"] == "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
-    assert result["graph_state"].get("response_text") == "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
-    assert result["graph_state"].get("response_text_fallback") == "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
+    assert result["outbound_messages"] == []
+    assert outbound_repository.inserted == []
+    assert result["graph_state"].get("response_text") is None
+    assert result["graph_state"].get("response_text_fallback") is None
+    assert result["graph_state"]["customer_reply"]["intent"] == "backend_query_waiting"
     assert [command["command_type"] for command in external_repository.inserted] == ["backend.query"]
     assert external_repository.inserted[0]["payload_json"]["intent"] == "withdrawal_blocked_or_rollover"
     assert external_repository.inserted[0]["payload_json"]["account_or_phone"] == "andy123"

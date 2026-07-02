@@ -28,6 +28,10 @@ def test_deposit_missing_generates_case_card_when_identity_and_screenshot_comple
     assert state["status"] == "WAITING_EXTERNAL"
     assert state["active_workflow"] == "deposit_missing"
     assert state["workflow_stage"] == "waiting_backend"
+    assert state["response_text"] == "感谢您提供的截图，我们现在为您查询，请稍等。"
+    assert "转交后台" not in state["response_text"]
+    assert "提交后台" not in state["response_text"]
+    assert "同步给后台" not in state["response_text"]
     assert state["commands"][0]["type"] == CommandType.TELEGRAM_SEND_CASE_CARD
 
 
@@ -121,15 +125,32 @@ def test_withdrawal_blocked_or_rollover_generates_waiting_reply_and_backend_quer
     )
 
     command_types = [command["type"] for command in state["commands"]]
-    assert command_types == [CommandType.LIVECHAT_SEND_TEXT, CommandType.BACKEND_QUERY]
+    assert command_types == [CommandType.BACKEND_QUERY]
     assert CommandType.TELEGRAM_SEND_CASE_CARD not in command_types
-    assert state["response_text"] == "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
-    assert state["response_text_fallback"] == "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
+    assert state["response_text"] is None
+    assert state["response_text_fallback"] is None
+    assert state["customer_reply"]["intent"] == "backend_query_waiting"
     assert state["node_reply_template"] == "backend_waiting"
     assert state["node_facts"]["sop_name"] == "withdrawal_blocked_or_rollover"
     assert state["reply_plan"]["kind"] == "backend_waiting"
-    unsafe = "已完成 / 已处理 / 保证 / 马上到账 / 一定"
-    assert all(token not in state["response_text"] for token in unsafe.split(" / "))
+
+
+def test_withdrawal_blocked_or_rollover_nequi_is_payment_channel_not_account_and_replies_spanish():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "withdrawal_blocked_or_rollover"},
+            "rewritten_question": "Es q no me deja retirar ya agregué mi nequi y dice q tengo q agregar otra cuenta",
+            "reply_language": "es",
+            "slot_memory": {},
+            "attachments": [],
+        }
+    )
+
+    assert state["commands"] == []
+    assert state["slot_memory"]["payment_channel"] == "NEQUI"
+    assert "account_or_phone" not in state["slot_memory"]
+    assert state["customer_reply"]["intent"] == "wallet_change_needs_human_or_clarification"
+    assert "usuario o teléfono registrado" in state["response_text"]
 
 
 def test_withdrawal_blocked_or_rollover_missing_account_sets_sop_template_facts():

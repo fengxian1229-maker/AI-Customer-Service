@@ -341,6 +341,42 @@ def test_backend_query_result_outbound_uses_backend_answer_dedup_after_instant_r
     assert outbound["payload_json"]["text"] == "您好，后台显示还需要完成 1375.09 流水后再提款。"
 
 
+def test_backend_query_result_renders_structured_spanish_player_not_found_without_answer():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "success",
+                    "reply_intent": "backend_player_not_found",
+                    "reply_facts": {},
+                    "reply_language": "es",
+                    "query": {"player_found": False},
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    assert processed[0]["status"] == "PROCESSED"
+    assert "No encontramos datos de jugador" in outbound_repository.inserted[0]["payload_json"]["text"]
+    assert outbound_repository.inserted[0]["command_type"] == "backend.query.result"
+
+
 def test_external_result_consumer_process_result_by_id_reports_locked():
     from app.workers.external_result_consumer import process_result_by_id
 

@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import time
+from typing import Any
 
 from app.core.settings import Settings
 from app.db.mysql import create_pool
@@ -18,6 +19,8 @@ from app.db.repositories import (
 from app.services.final_reply_factory import build_final_reply_service_from_settings
 from app.services.message_history import build_external_result_summary_message
 from app.services.outbox import build_text_outbox
+from app.services.reply_intents import CustomerReplyIntent, build_customer_reply
+from app.services.reply_renderer import render_customer_reply
 from app.workflows.final_reply_policy import build_reply_plan
 
 
@@ -260,9 +263,18 @@ def build_result_handler(row: dict) -> dict:
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)
         return resolved
     if result_type == "backend.query.result":
+        reply_language = (
+            result_json.get("reply_language")
+            or result_json.get("conversation_language")
+            or result_json.get("detected_language")
+            or "zh-Hans"
+        )
         if result_json.get("status") == "failed":
+            reply_intent = CustomerReplyIntent.BACKEND_QUERY_FAILED
+            reply_facts = {"error_code": result_json.get("error_code") or "UNKNOWN"}
+            text = render_customer_reply(reply_intent, facts=reply_facts, reply_language=reply_language)
             resolved = {
-                "text": "后台查询暂时无法完成，我们会继续为你人工复核，请稍候。",
+                "text": text,
                 "summary_sender_role": "backend",
                 "summary_text": "后台查询失败，已生成安全兜底回复。",
                 "graph_state": {
@@ -273,6 +285,7 @@ def build_result_handler(row: dict) -> dict:
                         "backend_query_status": "failed",
                         "backend_query_error_code": result_json.get("error_code") or "UNKNOWN",
                     },
+                    "customer_reply": build_customer_reply(reply_intent, facts=reply_facts, language=reply_language, text=text),
                 },
             }
             resolved["summary_message"] = build_external_result_summary_message(row, resolved)
@@ -281,11 +294,15 @@ def build_result_handler(row: dict) -> dict:
             error_code = result_json.get("error_code") or "UNKNOWN"
             error_message = result_json.get("error_message") or ""
             raise ValueError(f"backend.query.result failed: {error_code} {error_message}".strip())
+        reply_intent, reply_facts = _resolve_backend_reply(result_json)
         answer = result_json.get("answer")
-        if not answer:
-            raise ValueError("backend.query.result missing answer")
+        text = str(answer or "").strip() or render_customer_reply(
+            reply_intent,
+            facts=reply_facts,
+            reply_language=reply_language,
+        )
         resolved = {
-            "text": answer,
+            "text": text,
             "summary_sender_role": "backend",
             "summary_text": "后台查询成功，已生成可回复摘要。",
             "graph_state": {
@@ -293,6 +310,7 @@ def build_result_handler(row: dict) -> dict:
                 "active_workflow": None,
                 "workflow_stage": "completed",
                 "slot_memory": {"backend_query_status": "success"},
+                "customer_reply": build_customer_reply(reply_intent, facts=reply_facts, language=reply_language, text=text),
             },
         }
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)
@@ -410,6 +428,7 @@ def _build_backend_final_reply_state(
         "reply_language": reply_language,
         "response_text": fallback_text,
         "response_text_fallback": fallback_text,
+        "customer_reply": (handler.get("graph_state") or {}).get("customer_reply"),
         "reply_plan": build_reply_plan(
             kind="backend_query_result",
             fallback_text=fallback_text,
@@ -435,6 +454,8 @@ def _build_backend_result_context(result_json: dict) -> dict:
     return {
         "status": result_json.get("status"),
         "answer": result_json.get("answer"),
+        "reply_intent": result_json.get("reply_intent"),
+        "reply_facts": result_json.get("reply_facts") if isinstance(result_json.get("reply_facts"), dict) else {},
         "intent": result_json.get("intent"),
         "raw_user_input": result_json.get("raw_user_input"),
         "rewritten_question": result_json.get("rewritten_question"),
@@ -452,6 +473,33 @@ def _build_backend_result_context(result_json: dict) -> dict:
     }
 
 
+def _resolve_backend_reply(result_json: dict) -> tuple[CustomerReplyIntent | str, dict[str, Any]]:
+    reply_intent = result_json.get("reply_intent")
+    reply_facts = result_json.get("reply_facts") if isinstance(result_json.get("reply_facts"), dict) else {}
+    if reply_intent:
+        return str(reply_intent), dict(reply_facts)
+
+    query = result_json.get("query") if isinstance(result_json.get("query"), dict) else {}
+    if query.get("player_found") is False:
+        return CustomerReplyIntent.BACKEND_PLAYER_NOT_FOUND, {}
+    remaining = query.get("remaining_turnover")
+    active_count = int(query.get("active_requirements_count") or 0)
+    if active_count > 0 or _positive_number(remaining):
+        return CustomerReplyIntent.BACKEND_TURNOVER_REMAINING, {"remaining_turnover": _format_number_for_reply_plan(remaining)}
+    if query.get("is_met") is True:
+        return CustomerReplyIntent.BACKEND_TURNOVER_MET, {}
+    if result_json.get("answer"):
+        return CustomerReplyIntent.BACKEND_TURNOVER_UNKNOWN, {}
+    return CustomerReplyIntent.BACKEND_TURNOVER_UNKNOWN, {}
+
+
+def _positive_number(value: Any) -> bool:
+    try:
+        return float(value or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _backend_result_must_say_exact(query: dict) -> list[str]:
     values = []
     remaining = query.get("remaining_turnover")
@@ -465,6 +513,12 @@ def _backend_result_allowed_facts(result_json: dict) -> list[str]:
     answer = str(result_json.get("answer") or "").strip()
     if answer:
         facts.append(answer)
+    reply_intent = str(result_json.get("reply_intent") or "").strip()
+    if reply_intent:
+        facts.append(f"reply_intent={reply_intent}")
+    reply_facts = result_json.get("reply_facts") if isinstance(result_json.get("reply_facts"), dict) else {}
+    for key, value in reply_facts.items():
+        facts.append(f"{key}={_format_number_for_reply_plan(value)}")
     query = result_json.get("query") if isinstance(result_json.get("query"), dict) else {}
     for key in (
         "player_found",

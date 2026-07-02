@@ -3,7 +3,9 @@ from typing import Any
 from app.workflows.command_contracts import CommandType
 from app.workflows.final_reply_policy import build_reply_plan
 from app.workflows.llm_sop_dialogue_planner import plan_sop_dialogue_from_state
-from app.workflows.slot_extractors import extract_identity
+from app.services.reply_intents import CustomerReplyIntent, build_customer_reply
+from app.services.reply_renderer import render_customer_reply
+from app.workflows.slot_extractors import extract_channel, extract_identity, is_wallet_or_receiving_account_change
 from app.workflows.sop_command_builder import build_sop_command
 from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
@@ -101,29 +103,70 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
 def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
     slot_memory = dict(state.get("slot_memory") or {})
     text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")
+    reply_language = state.get("reply_language") or state.get("conversation_language") or state.get("detected_language")
     identity = extract_identity(text)
     if identity:
         slot_memory["account_or_phone"] = identity["value"]
+    payment_channel = extract_channel(text)
+    if payment_channel:
+        slot_memory["payment_channel"] = payment_channel
 
-    if not slot_memory.get("account_or_phone"):
+    if is_wallet_or_receiving_account_change(text) and not identity:
+        reply_intent = CustomerReplyIntent.WALLET_CHANGE_NEEDS_HUMAN_OR_CLARIFICATION
+        reply_facts = {"payment_channel": payment_channel or slot_memory.get("payment_channel") or "wallet"}
+        fallback_text = render_customer_reply(reply_intent, facts=reply_facts, reply_language=reply_language)
         return {
             **state,
             "slot_memory": slot_memory,
             "active_workflow": "withdrawal_blocked_or_rollover",
             "workflow_stage": "collecting_slots",
-            "response_text": "一般无法提款通常与流水要求或风控限制有关。为了帮你继续查询，请提供用户名或注册手机号。",
-            "response_text_fallback": "一般无法提款通常与流水要求或风控限制有关。为了帮你继续查询，请提供用户名或注册手机号。",
+            "response_text": fallback_text,
+            "response_text_fallback": fallback_text,
+            "customer_reply": build_customer_reply(reply_intent, facts=reply_facts, language=reply_language, text=fallback_text),
             "node_reply_template": "sop_missing_slots",
             "node_facts": {
                 "sop_name": "withdrawal_blocked_or_rollover",
                 "missing_slots": ["account_or_phone"],
                 "slot_memory": slot_memory,
-                "fallback_text": "一般无法提款通常与流水要求或风控限制有关。为了帮你继续查询，请提供用户名或注册手机号。",
+                "reply_intent": str(reply_intent),
+                "reply_facts": reply_facts,
+                "fallback_text": fallback_text,
             },
             "reply_plan": build_reply_plan(
                 kind="ask_missing_slots",
-                fallback_text="一般无法提款通常与流水要求或风控限制有关。为了帮你继续查询，请提供用户名或注册手机号。",
-                must_say=["流水要求", "用户名或注册手机号"],
+                fallback_text=fallback_text,
+                semantic_required_items=["account_or_phone"],
+                must_not_say=["已到账", "已完成", "保证", "已处理"],
+                missing_slots=["account_or_phone"],
+                allowed_facts=["客户提到钱包或收款方式", "需要客户提供识别资料或确认是否更换收款账户"],
+            ),
+            "commands": [],
+        }
+
+    if not slot_memory.get("account_or_phone"):
+        reply_intent = CustomerReplyIntent.ASK_ACCOUNT_OR_PHONE
+        reply_facts = {}
+        fallback_text = render_customer_reply(reply_intent, facts=reply_facts, reply_language=reply_language)
+        return {
+            **state,
+            "slot_memory": slot_memory,
+            "active_workflow": "withdrawal_blocked_or_rollover",
+            "workflow_stage": "collecting_slots",
+            "response_text": fallback_text,
+            "response_text_fallback": fallback_text,
+            "customer_reply": build_customer_reply(reply_intent, facts=reply_facts, language=reply_language, text=fallback_text),
+            "node_reply_template": "sop_missing_slots",
+            "node_facts": {
+                "sop_name": "withdrawal_blocked_or_rollover",
+                "missing_slots": ["account_or_phone"],
+                "slot_memory": slot_memory,
+                "reply_intent": str(reply_intent),
+                "reply_facts": reply_facts,
+                "fallback_text": fallback_text,
+            },
+            "reply_plan": build_reply_plan(
+                kind="ask_missing_slots",
+                fallback_text=fallback_text,
                 semantic_required_items=["account_or_phone"],
                 must_not_say=["已到账", "已完成", "保证", "已处理"],
                 missing_slots=["account_or_phone"],
@@ -132,35 +175,35 @@ def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
             "commands": [],
         }
 
-    fallback_text = "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
+    reply_intent = CustomerReplyIntent.BACKEND_QUERY_WAITING
+    reply_facts = {"account_or_phone": slot_memory["account_or_phone"]}
     return {
         **state,
         "slot_memory": slot_memory,
         "status": "WAITING_EXTERNAL",
         "active_workflow": "withdrawal_blocked_or_rollover",
         "workflow_stage": "backend_querying",
-        "response_text": fallback_text,
-        "response_text_fallback": fallback_text,
+        "response_text": None,
+        "response_text_fallback": None,
+        "customer_reply": build_customer_reply(reply_intent, facts=reply_facts, language=reply_language),
         "node_reply_template": "backend_waiting",
         "node_facts": {
             "sop_name": "withdrawal_blocked_or_rollover",
             "sop_action": "backend_query",
             "slot_memory": slot_memory,
-            "fallback_text": fallback_text,
+            "reply_intent": str(reply_intent),
+            "reply_facts": reply_facts,
+            "fallback_text": None,
         },
         "reply_plan": build_reply_plan(
             kind="backend_waiting",
-            fallback_text=fallback_text,
+            fallback_text="",
             semantic_required_items=["backend_waiting_notice"],
             must_not_say=["已完成", "已处理", "已到账", "马上到账", "保证", "一定"],
             allowed_facts=["已收到账号资料", "将查询提款限制或流水要求"],
             metadata={"intent": "withdrawal_blocked_or_rollover", "sop_action": "backend_query"},
         ),
         "commands": [
-            {
-                "type": CommandType.LIVECHAT_SEND_TEXT,
-                "payload": {"text": fallback_text},
-            },
             {
                 "type": CommandType.BACKEND_QUERY,
                 "payload": {
@@ -268,20 +311,20 @@ def _build_sop_reply_plan(intent: str, policy: dict[str, Any], fallback_text: st
         return build_reply_plan(
             kind="send_backend_case",
             fallback_text=fallback_text,
-            must_say=["后台确认", "请稍等"],
+            must_say=["查询", "请稍等"],
             semantic_required_items=["backend_waiting_notice"],
-            must_not_say=["已到账", "已完成", "已处理", "保证", "马上到账"],
-            allowed_facts=["已转交后台确认"],
+            must_not_say=["已到账", "已完成", "已处理", "保证", "马上到账", "转交后台", "提交后台", "同步给后台"],
+            allowed_facts=["现在为客户查询"],
             metadata={"intent": intent, "sop_action": action},
         )
     if action == "append_to_case":
         return build_reply_plan(
             kind="append_backend_case",
             fallback_text=fallback_text,
-            must_say=["后台", "请稍等"],
+            must_say=["查询", "请稍等"],
             semantic_required_items=["backend_waiting_notice"],
-            must_not_say=["已到账", "已完成", "已处理", "保证", "马上到账"],
-            allowed_facts=["已补充给后台继续确认"],
+            must_not_say=["已到账", "已完成", "已处理", "保证", "马上到账", "转交后台", "提交后台", "同步给后台"],
+            allowed_facts=["已收到客户补充信息并继续查询"],
             metadata={"intent": intent, "sop_action": action},
         )
     return build_reply_plan(

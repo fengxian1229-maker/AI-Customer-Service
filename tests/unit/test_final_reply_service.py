@@ -65,6 +65,7 @@ def test_final_reply_prompt_requires_contextual_answer_planning():
     assert "answer that value directly" in FINAL_REPLY_SYSTEM_PROMPT
     assert "node_facts" in FINAL_REPLY_SYSTEM_PROMPT
     assert "reply_plan.allowed_facts" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "Do not use internal organization labels" in FINAL_REPLY_SYSTEM_PROMPT
 
 
 def test_final_reply_service_payload_includes_node_template_and_facts():
@@ -142,6 +143,45 @@ def test_final_reply_service_uses_llm_text_when_guardrails_pass():
     assert result["final_response_text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
     assert result["final_reply_result"]["status"] == "accepted"
     assert provider.calls[0]["tenant_persona"]["default_language"] == "zh-Hans"
+
+
+def test_final_reply_service_rejects_internal_staff_label_for_customer_reply():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "关于您的充值问题，后台工作人员回复显示目前查询未到账。我们会持续跟进处理。",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.91,
+            "safety_flags": [],
+            "used_facts": ["目前查询未到账"],
+            "reason": "staff update",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                raw_user_input="目前查询未到账",
+                rewritten_question="目前查询未到账",
+                workflow_stage="backend_replied",
+                response_text="后台回复显示目前查询未到账。我们会持续跟进处理。",
+                response_text_fallback="后台回复显示目前查询未到账。我们会持续跟进处理。",
+                node_reply_template="telegram_staff_reply",
+                reply_language="zh-Hans",
+                reply_plan={
+                    "kind": "telegram_staff_reply",
+                    "fallback_text": "后台回复显示目前查询未到账。我们会持续跟进处理。",
+                    "allowed_facts": ["目前查询未到账"],
+                    "must_not_say": ["后台工作人员", "工作人员", "转交后台"],
+                },
+            )
+        )
+    )
+
+    assert result["final_response_text"] == "后台回复显示目前查询未到账。我们会持续跟进处理。"
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert "internal_organization_label" in result["final_reply_result"]["violations"]
 
 
 def test_final_reply_service_payload_preserves_backend_context():
@@ -629,6 +669,25 @@ def test_final_reply_service_rejects_backend_sync_claim_without_append_command()
 
     assert result["final_response_text"] == "收到，案件仍在确认中，有更新会在这里通知你。"
     assert "unverified_backend_sync_claim" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_fallback_renders_structured_customer_reply_when_text_missing():
+    service = FinalReplyService(provider=None, enabled=False)
+    state = base_state(
+        response_text=None,
+        response_text_fallback=None,
+        reply_language="es",
+        customer_reply={
+            "intent": "backend_player_not_found",
+            "facts": {},
+            "language": "es",
+        },
+    )
+
+    result = asyncio.run(service.compose(state))
+
+    assert "No encontramos datos de jugador" in result["final_response_text"]
+    assert result["final_reply_result"]["fallback_reason"] == "disabled"
 
 
 def test_final_reply_provider_sends_global_and_node_system_prompts(monkeypatch):
