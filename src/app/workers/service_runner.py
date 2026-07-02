@@ -332,6 +332,7 @@ async def external_command_tick(context: ServiceRunnerContext) -> dict:
         ExternalCommandRepository(context.pool),
         result_repository=ExternalCommandResultRepository(context.pool),
         conversation_repository=ConversationRepository(context.pool),
+        outbound_repository=OutboundMessageRepository(context.pool),
         limit=context.config.external_command_limit,
         dry_run=False,
         emit_result=True,

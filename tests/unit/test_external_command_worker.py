@@ -716,6 +716,201 @@ def test_external_command_worker_real_handoff_requires_explicit_execute_flag():
     assert repository.leased is False
 
 
+def test_external_command_worker_real_handoff_waits_for_pending_ack_before_transfer():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.released = []
+            self.statuses = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 10,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 20,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {},
+                }
+            ]
+
+        async def release_lease(self, command_id: int) -> None:
+            self.released.append(command_id)
+
+        async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+            self.statuses.append((command_id, status, error))
+
+    class FakeOutboundRepository:
+        async def fetch_handoff_ack_by_event(self, conversation_id: str, inbound_event_id: int):
+            assert (conversation_id, inbound_event_id) == ("livechat:chat-1", 20)
+            return {"id": 31, "status": "PENDING"}
+
+    class SenderClient:
+        async def transfer_chat_to_group(self, *args, **kwargs):
+            raise AssertionError("transfer must wait until handoff ack is sent")
+
+    repository = FakeCommandRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_enabled=True,
+        livechat_handoff_target_group_id=23,
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            outbound_repository=FakeOutboundRepository(),
+            dry_run=False,
+            execute_human_handoff=True,
+            settings=settings,
+            sender_client_factory=lambda settings: SenderClient(),
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.released == [10]
+    assert repository.statuses == []
+    assert result[0]["status"] == "WAITING_DEPENDENCY"
+    assert result[0]["handoff_ack_outbound_message_id"] == 31
+
+
+def test_external_command_worker_real_handoff_sent_ack_allows_transfer():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.done = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 14,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 24,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {},
+                }
+            ]
+
+        async def mark_sent(self, command_id: int) -> None:
+            self.done.append(command_id)
+
+    class FakeOutboundRepository:
+        async def fetch_handoff_ack_by_event(self, conversation_id: str, inbound_event_id: int):
+            assert (conversation_id, inbound_event_id) == ("livechat:chat-1", 24)
+            return {"id": 32, "status": "SENT"}
+
+    class FakeConversationRepository:
+        def __init__(self) -> None:
+            self.updated = []
+
+        async def update_workflow_state(self, conversation_id: str, graph_state: dict) -> None:
+            self.updated.append((conversation_id, graph_state))
+
+    class SenderClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def transfer_chat_to_group(self, chat_id, group_id, ignore_agents_availability=True, ignore_requester_presence=True):
+            self.calls.append((chat_id, group_id, ignore_agents_availability, ignore_requester_presence))
+            return {"ok": True}
+
+    repository = FakeCommandRepository()
+    conversation_repository = FakeConversationRepository()
+    sender_client = SenderClient()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_enabled=True,
+        livechat_handoff_target_group_id=23,
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=FakeOutboundRepository(),
+            dry_run=False,
+            execute_human_handoff=True,
+            settings=settings,
+            sender_client_factory=lambda settings: sender_client,
+            worker_id="worker-a",
+        )
+    )
+
+    assert sender_client.calls == [("chat-1", 23, True, True)]
+    assert repository.done == [14]
+    assert result[0]["status"] == "SENT"
+    assert conversation_repository.updated[0][1]["status"] == "HUMAN_ACTIVE"
+
+
+def test_external_command_worker_real_handoff_fails_when_ack_is_missing():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.statuses = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 15,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 25,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {},
+                }
+            ]
+
+        async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+            self.statuses.append((command_id, status, error))
+
+    class FakeOutboundRepository:
+        async def fetch_handoff_ack_by_event(self, conversation_id: str, inbound_event_id: int):
+            return None
+
+    class SenderClient:
+        async def transfer_chat_to_group(self, *args, **kwargs):
+            raise AssertionError("transfer must not run without a handoff ack outbound")
+
+    repository = FakeCommandRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_enabled=True,
+        livechat_handoff_target_group_id=23,
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            outbound_repository=FakeOutboundRepository(),
+            dry_run=False,
+            execute_human_handoff=True,
+            settings=settings,
+            sender_client_factory=lambda settings: SenderClient(),
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.statuses == [(15, "FAILED_DEPENDENCY", "handoff ack outbound message is missing")]
+    assert result[0]["status"] == "FAILED_DEPENDENCY"
+
+
 def test_external_command_worker_real_handoff_success_transfers_emits_result_and_marks_human_active():
     from app.core.settings import Settings
     from app.workers.external_command_worker import process_pending_commands

@@ -11,6 +11,7 @@ from app.channels.telegram.sender_client import TelegramApiError, TelegramSender
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import ConversationRepository, ExternalCommandRepository, ExternalCommandResultRepository
+from app.db.repositories import OutboundMessageRepository
 from app.services.backend_query_service import BackendQueryService
 from app.services.pending_reply_lookup import PendingReplyLookupService
 from app.services.telegram_case_card import build_telegram_case_append, build_telegram_case_card
@@ -39,6 +40,8 @@ NO_EXECUTION_MODE_ERROR = (
     "--execute-backend, or --execute-pending-reply-lookup"
 )
 FAILED_AFTER_EXTERNAL_SUCCESS = "FAILED_AFTER_EXTERNAL_SUCCESS"
+HANDOFF_ACK_WAITING_STATUS = "WAITING_DEPENDENCY"
+HANDOFF_ACK_FAILED_STATUS = "FAILED_DEPENDENCY"
 
 
 MOCK_RESULT_BY_COMMAND_TYPE = {
@@ -80,6 +83,7 @@ async def process_pending_commands(
     repository: ExternalCommandRepository,
     result_repository: ExternalCommandResultRepository | None = None,
     conversation_repository: ConversationRepository | None = None,
+    outbound_repository: OutboundMessageRepository | None = None,
     limit: int = 20,
     dry_run: bool = True,
     emit_result: bool = False,
@@ -126,6 +130,7 @@ async def process_pending_commands(
                     repository=repository,
                     result_repository=result_repository,
                     conversation_repository=conversation_repository,
+                    outbound_repository=outbound_repository,
                     emit_result=emit_result,
                     execute_human_handoff=execute_human_handoff,
                     execute_telegram=execute_telegram,
@@ -168,6 +173,7 @@ async def _process_real_command(
     repository: ExternalCommandRepository,
     result_repository: ExternalCommandResultRepository | None,
     conversation_repository: ConversationRepository | None,
+    outbound_repository: OutboundMessageRepository | None,
     emit_result: bool,
     execute_human_handoff: bool,
     execute_telegram: bool,
@@ -198,7 +204,6 @@ async def _process_real_command(
             result_repository=result_repository,
             emit_result=emit_result,
             execute_backend=execute_backend,
-            execute_pending_reply_lookup=execute_pending_reply_lookup,
             settings=settings,
             max_retries=max_retries,
         )
@@ -222,6 +227,10 @@ async def _process_real_command(
         status = "SKIPPED_DISABLED" if block_reason in {"livechat_handoff_enabled is false", "--execute-human-handoff is required"} else "FAILED_CONFIG"
         await _mark_command_status(repository, command["id"], status, block_reason, max_retries=max_retries)
         return {"id": command["id"], "command_type": command_type, "status": status, "error": block_reason}
+
+    ack_dependency = await _handoff_ack_dependency_status(command, repository, outbound_repository)
+    if ack_dependency:
+        return ack_dependency
 
     sender_client_factory = sender_client_factory or _build_sender_client
     sender_client = sender_client_factory(settings)
@@ -644,6 +653,48 @@ def classify_telegram_error(exc: Exception) -> str:
     return "FAILED_UNKNOWN"
 
 
+async def _handoff_ack_dependency_status(
+    command: dict,
+    repository: ExternalCommandRepository,
+    outbound_repository: OutboundMessageRepository | None,
+) -> dict | None:
+    if outbound_repository is None:
+        return None
+    ack = await outbound_repository.fetch_handoff_ack_by_event(
+        command["conversation_id"],
+        int(command["inbound_event_id"]),
+    )
+    if ack and str(ack.get("status") or "").upper() == "SENT":
+        return None
+
+    if ack and str(ack.get("status") or "").upper() in {"PENDING", "RETRYABLE"}:
+        reason = f"waiting for handoff ack outbound_message_id={ack.get('id')} status={ack.get('status')}"
+        if hasattr(repository, "release_lease"):
+            await repository.release_lease(command["id"])
+        return {
+            "id": command["id"],
+            "command_type": command["command_type"],
+            "status": HANDOFF_ACK_WAITING_STATUS,
+            "error": reason,
+            "handoff_ack_outbound_message_id": ack.get("id"),
+            "handoff_ack_status": ack.get("status"),
+        }
+
+    if ack:
+        reason = f"handoff ack outbound_message_id={ack.get('id')} is not sendable: status={ack.get('status')}"
+    else:
+        reason = "handoff ack outbound message is missing"
+    await _mark_command_status(repository, command["id"], HANDOFF_ACK_FAILED_STATUS, reason)
+    return {
+        "id": command["id"],
+        "command_type": command["command_type"],
+        "status": HANDOFF_ACK_FAILED_STATUS,
+        "error": reason,
+        "handoff_ack_outbound_message_id": ack.get("id") if ack else None,
+        "handoff_ack_status": ack.get("status") if ack else None,
+    }
+
+
 def _build_sender_client(settings: Settings) -> LiveChatSenderClient:
     return LiveChatSenderClient(
         settings.livechat_api_base,
@@ -800,10 +851,12 @@ async def run_once(
         repository = ExternalCommandRepository(pool)
         result_repository = ExternalCommandResultRepository(pool) if emit_result else None
         conversation_repository = ConversationRepository(pool)
+        outbound_repository = OutboundMessageRepository(pool)
         results = await process_pending_commands(
             repository,
             result_repository=result_repository,
             conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
             limit=limit,
             dry_run=dry_run,
             emit_result=emit_result,
@@ -885,10 +938,12 @@ async def run_forever(
         repository = ExternalCommandRepository(pool)
         result_repository = ExternalCommandResultRepository(pool) if emit_result else None
         conversation_repository = ConversationRepository(pool)
+        outbound_repository = OutboundMessageRepository(pool)
         await run_polling_loop(
             repository=repository,
             result_repository=result_repository,
             conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
             poll_seconds=settings.poll_seconds,
             limit=limit,
             dry_run=dry_run,
@@ -896,6 +951,7 @@ async def run_forever(
             execute_human_handoff=execute_human_handoff,
             execute_telegram=execute_telegram,
             execute_backend=execute_backend,
+            execute_pending_reply_lookup=execute_pending_reply_lookup,
             settings=settings,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
@@ -915,6 +971,7 @@ async def run_polling_loop(
     limit: int,
     dry_run: bool,
     conversation_repository: ConversationRepository | None = None,
+    outbound_repository: OutboundMessageRepository | None = None,
     emit_result: bool = False,
     execute_human_handoff: bool = False,
     execute_telegram: bool = False,
@@ -948,6 +1005,7 @@ async def run_polling_loop(
                 repository,
                 result_repository=result_repository,
                 conversation_repository=conversation_repository,
+                outbound_repository=outbound_repository,
                 limit=limit,
                 dry_run=dry_run,
                 emit_result=emit_result,
@@ -1022,7 +1080,7 @@ def summarize_results(results: list[dict]) -> dict:
         "terminal_failed": terminal_failed,
         "retryable": retryable,
         "skipped": skipped,
-        "blocked": sum(1 for status in statuses if status == "SKIPPED_DISABLED"),
+        "blocked": sum(1 for status in statuses if status in {"SKIPPED_DISABLED", HANDOFF_ACK_WAITING_STATUS}),
     }
 
 

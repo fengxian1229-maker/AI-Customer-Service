@@ -292,6 +292,24 @@ class OutboundMessageRepository:
             row["payload_json"] = json_loads(row["payload_json"])
         return rows
 
+    async def fetch_handoff_ack_by_event(self, conversation_id: str, inbound_event_id: int) -> dict | None:
+        sql = """
+        SELECT id, conversation_id, inbound_event_id, status, last_error, sent_at, payload_json
+        FROM outbound_messages
+        WHERE conversation_id = %s
+          AND inbound_event_id = %s
+          AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.handoff_ack')) = 'true'
+        ORDER BY id ASC
+        LIMIT 1
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (conversation_id, inbound_event_id))
+                row = await cur.fetchone()
+        if row:
+            row["payload_json"] = json_loads(row["payload_json"])
+        return row
+
     async def mark_sent(self, outbound_message_id: int) -> None:
         async with self.pool.acquire() as conn:
             await self.mark_sent_on_connection(conn, outbound_message_id)

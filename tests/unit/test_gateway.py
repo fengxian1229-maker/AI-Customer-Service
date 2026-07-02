@@ -473,6 +473,32 @@ def test_gateway_service_human_handoff_keeps_existing_external_command_semantics
     assert outbound_repository.inserted[0]["payload_json"] == result["outbound_messages"][0]["payload_json"]
 
 
+def test_gateway_service_human_handoff_outbound_uses_final_reply_and_preserves_ack_marker():
+    final_text = "非常抱歉给您带来困扰，我会为您记录您的意向并将您的需求转接真人客服。"
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_final_reply_service=FakeFinalReplyService(final_text),
+        llm_final_reply_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(14, make_event_with_text("转人工客服")))
+
+    assert result["graph_state"]["route"] == "human_handoff"
+    assert result["graph_state"]["final_response_text"] == final_text
+    assert result["outbound_messages"][0]["payload_json"] == {
+        "type": "message",
+        "text": final_text,
+        "handoff_ack": True,
+    }
+    assert outbound_repository.inserted[0]["payload_json"]["handoff_ack"] is True
+
+
 def test_gateway_service_withdrawal_blocked_generates_backend_query_without_rag_or_telegram():
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
