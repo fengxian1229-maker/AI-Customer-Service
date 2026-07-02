@@ -333,6 +333,18 @@ def test_gemini_provider_faq_targets_are_limited_to_canonical_howto_intents():
         assert banned not in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
 
+def test_guarded_intent_prompt_prioritizes_business_request_over_emotion_care():
+    from app.llm.gemini_provider import GUARDED_AUTHORITATIVE_INTENT_CLASSIFIER_SYSTEM_PROMPT
+
+    prompt = GUARDED_AUTHORITATIVE_INTENT_CLASSIFIER_SYSTEM_PROMPT
+
+    assert "emotion_care is only for emotion/frustration/abusive language as the primary issue" in prompt
+    assert (
+        "If emotional or abusive language appears together with a concrete business request, "
+        "choose the business route first"
+    ) in prompt
+
+
 def test_gemini_provider_guarded_prompt_allows_casual_chat_for_greetings():
     from app.llm.gemini_provider import GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 

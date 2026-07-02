@@ -134,6 +134,13 @@ Routing rules:
 - For account, order, payment, balance, deposit status, withdrawal status, or other backend fact-like requests, prefer SOP/human/backend-safe handling and set requires_backend: true when backend facts are needed.
 - For escalation, take-over requests, specialist review requests, or cases where automated replies are not helping, use route: human_handoff, intent: explicit_human_request, requires_human: true.
 - If the customer explicitly asks for a human, route must be human_handoff.
+- emotion_care is only for emotion/frustration/abusive language as the primary issue when there is no concrete FAQ, SOP, or human-handoff request.
+- If emotional or abusive language appears together with a concrete business request, choose the business route first:
+  - deposit not arrived -> route: sop, intent: deposit_missing.
+  - withdrawal not arrived -> route: sop, intent: withdrawal_missing.
+  - unable to withdraw / rollover requirement -> route: sop, intent: withdrawal_blocked_or_rollover.
+  - explicit human request -> route: human_handoff, intent: explicit_human_request.
+- In those cases, preserve the emotional signal via risk_level, but do not choose route: emotion_care.
 - For simple greetings or small talk without a service request, such as 你好, 您好, hi, or hello, use route: final_reply and intent: casual_chat.
 - If no route is safe because the message is too ambiguous, use route: final_reply and intent: clarification_needed.
 

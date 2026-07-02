@@ -246,13 +246,86 @@ def intent_router_node(state: GraphState) -> GraphState:
         return _with_route(state, "explicit_human_request", "human_handoff", "Customer explicitly requested a human agent.")
     if active and stage in ACTIVE_WORKFLOW_GUARD_STAGES:
         return _active_workflow_deterministic_route(state, str(active))
-    if _is_service_frustration(lower):
+    emotion_info = _emotion_context(lower)
+    if _is_pending_reply_lookup(lower):
         return _with_route(
             state,
-            "service_frustration",
-            "human_handoff",
-            "Repeated service frustration should be handed to a human.",
-            risk_level="elevated",
+            "pending_reply_lookup",
+            "sop",
+            "Previous case lookup requires SOP handling.",
+            sop_name="pending_reply_lookup",
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
+        )
+    if _is_deposit_missing(lower):
+        return _with_route(
+            state,
+            "deposit_missing",
+            "sop",
+            "Deposit-not-arrived issues require SOP handling.",
+            sop_name="deposit_missing",
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
+        )
+    if _is_withdrawal_missing(lower):
+        return _with_route(
+            state,
+            "withdrawal_missing",
+            "sop",
+            "Withdrawal-not-arrived issues require SOP handling.",
+            sop_name="withdrawal_missing",
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
+        )
+    if _is_withdrawal_blocked_or_rollover(lower):
+        return _with_route(
+            state,
+            "withdrawal_blocked_or_rollover",
+            "sop",
+            "Withdrawal restriction or rollover questions require SOP handling.",
+            sop_name="withdrawal_blocked_or_rollover",
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
+        )
+    if _is_deposit_howto(lower):
+        return _with_route(
+            state,
+            "deposit_howto",
+            "faq",
+            "Deposit how-to is a FAQ/manual question.",
+            faq_query=text,
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
+        )
+    if _is_withdrawal_howto(lower):
+        return _with_route(
+            state,
+            "withdrawal_howto",
+            "faq",
+            "Withdrawal how-to is a FAQ/manual question.",
+            faq_query=text,
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
+        )
+    if _is_forgot_password_howto(lower):
+        return _with_route(
+            state,
+            "forgot_password_howto",
+            "faq",
+            "Forgot-password instructions are FAQ/manual content.",
+            faq_query=text,
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
+        )
+    if _is_screenshot_upload_howto(lower, hints):
+        return _with_route(
+            state,
+            "screenshot_upload_howto",
+            "faq",
+            "Screenshot upload instructions are FAQ/manual content.",
+            faq_query=text,
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
         )
     if _is_unsupported_concrete_issue(lower):
         return _with_route(
@@ -260,6 +333,8 @@ def intent_router_node(state: GraphState) -> GraphState:
             "unsupported_concrete_issue",
             "human_handoff",
             "Technical/game-specific issues are out of FAQ/SOP scope.",
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
         )
     if _is_account_access_issue(lower):
         return _with_route(
@@ -267,6 +342,8 @@ def intent_router_node(state: GraphState) -> GraphState:
             "account_access_issue",
             "human_handoff",
             "Account access problems require manual support.",
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
         )
     if _is_account_profile_or_wallet_change(lower):
         return _with_route(
@@ -274,6 +351,17 @@ def intent_router_node(state: GraphState) -> GraphState:
             "account_profile_or_wallet_change",
             "human_handoff",
             "Profile or wallet changes require manual support.",
+            emotion=emotion_info["emotion"],
+            risk_level=emotion_info["risk_level"],
+        )
+    if _is_service_frustration(lower):
+        return _with_route(
+            state,
+            "service_frustration",
+            "emotion_care",
+            "Repeated service frustration is the primary issue.",
+            emotion="frustrated",
+            risk_level="elevated",
         )
     if _is_abusive_or_emotional(lower):
         return _with_route(
@@ -284,34 +372,6 @@ def intent_router_node(state: GraphState) -> GraphState:
             emotion="distressed",
             risk_level="high",
         )
-    if _is_pending_reply_lookup(lower):
-        return _with_route(state, "pending_reply_lookup", "sop", "Previous case lookup requires SOP handling.", sop_name="pending_reply_lookup")
-    if _is_deposit_missing(lower):
-        return _with_route(state, "deposit_missing", "sop", "Deposit-not-arrived issues require SOP handling.", sop_name="deposit_missing")
-    if _is_withdrawal_missing(lower):
-        return _with_route(
-            state,
-            "withdrawal_missing",
-            "sop",
-            "Withdrawal-not-arrived issues require SOP handling.",
-            sop_name="withdrawal_missing",
-        )
-    if _is_withdrawal_blocked_or_rollover(lower):
-        return _with_route(
-            state,
-            "withdrawal_blocked_or_rollover",
-            "sop",
-            "Withdrawal restriction or rollover questions require SOP handling.",
-            sop_name="withdrawal_blocked_or_rollover",
-        )
-    if _is_deposit_howto(lower):
-        return _with_route(state, "deposit_howto", "faq", "Deposit how-to is a FAQ/manual question.", faq_query=text)
-    if _is_withdrawal_howto(lower):
-        return _with_route(state, "withdrawal_howto", "faq", "Withdrawal how-to is a FAQ/manual question.", faq_query=text)
-    if _is_forgot_password_howto(lower):
-        return _with_route(state, "forgot_password_howto", "faq", "Forgot-password instructions are FAQ/manual content.", faq_query=text)
-    if _is_screenshot_upload_howto(lower, hints):
-        return _with_route(state, "screenshot_upload_howto", "faq", "Screenshot upload instructions are FAQ/manual content.", faq_query=text)
     if _is_menu_help(lower, hints):
         return _final_reply_route(state, "clarification_needed", "Menu recovery is outside canonical FAQ.", kind="clarification")
     if state.get("event_type") == "FILE_RECEIVED":
@@ -752,6 +812,17 @@ def _active_workflow_deterministic_route(state: GraphState, active_workflow: str
             preserve_active_workflow=True,
             kind="contextual_followup",
         )
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    if _is_rollover_explanation(text):
+        return _final_reply_route(
+            state,
+            "contextual_followup",
+            "Rollover explanation is outside canonical FAQ and should be handled as a contextual final reply.",
+            confidence=0.78,
+            workflow_relation="contextual_followup",
+            preserve_active_workflow=True,
+            kind="contextual_followup",
+        )
     faq = _is_independent_faq_during_workflow(state)
     if faq:
         return _with_route(
@@ -1098,8 +1169,6 @@ def _is_independent_faq_during_workflow(state: GraphState) -> dict[str, str] | N
         return {"intent": "forgot_password_howto", "faq_query": "忘记密码"}
     if _is_screenshot_upload_howto(text, extract_route_hints(state)) or _contains_any(text, ("怎么上传截图", "如何上传截图")):
         return {"intent": "screenshot_upload_howto", "faq_query": "上传截图"}
-    if _is_rollover_explanation(text) or _contains_any(text, ("流水是什么意思", "流水是什么", "rollover 是什么")):
-        return {"intent": "rollover_explanation", "faq_query": "流水说明"}
     return None
 
 
@@ -1385,7 +1454,7 @@ def _is_deposit_missing(text: str) -> bool:
 
 def _is_withdrawal_missing(text: str) -> bool:
     return _contains_any(text, ("retiro", "withdrawal", "提款", "提现")) and _contains_any(
-        text, ("no llegó", "no llego", "未到账", "没到账", "no acreditado", "nunca me pagaron")
+        text, ("no llegó", "no llego", "未到账", "没到账", "no acreditado", "nunca me pagaron", "did not arrive")
     )
 
 
@@ -1423,6 +1492,14 @@ def _is_menu_help(text: str, hints: dict[str, Any]) -> bool:
 
 def _is_service_frustration(text: str) -> bool:
     return _contains_any(text, ("todo el tiempo lo mismo", "siempre lo mismo", "otra vez lo mismo", "same thing every time"))
+
+
+def _emotion_context(lower: str) -> dict[str, str | None]:
+    if _is_abusive_or_emotional(lower):
+        return {"emotion": "distressed", "risk_level": "high"}
+    if _is_service_frustration(lower):
+        return {"emotion": "frustrated", "risk_level": "elevated"}
+    return {"emotion": None, "risk_level": None}
 
 
 def _is_unsupported_concrete_issue(text: str) -> bool:

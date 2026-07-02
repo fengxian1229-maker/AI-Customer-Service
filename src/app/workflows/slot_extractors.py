@@ -99,6 +99,8 @@ def extract_channel(text: str | None) -> str | None:
 
 def is_explicit_human_request(text: str | None) -> bool:
     raw = normalize_text(text)
+    if any(token in raw for token in ("真人客服", "人工客服")):
+        return True
     return bool(
         re.search(
             r"\b(humano|humana|persona real|agente|asesor|representante|atenci[oó]n humana|live support|human|agent|真人|人工|客服人员|客服人員)\b",

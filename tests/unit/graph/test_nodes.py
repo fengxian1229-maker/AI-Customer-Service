@@ -85,7 +85,7 @@ def test_intent_router_node_routes_bot66tornado_samples():
         ("No puedo retirar", "withdrawal_blocked_or_rollover", "sop"),
         ("Tengo un caso anterior", "pending_reply_lookup", "sop"),
         ("no veo ningun menu", "clarification_needed", "final_reply"),
-        ("Todo el tiempo lo mismo", "service_frustration", "human_handoff"),
+        ("Todo el tiempo lo mismo", "service_frustration", "emotion_care"),
         ("Problemas técnicos del juego", "unsupported_concrete_issue", "human_handoff"),
     ]
 
@@ -111,6 +111,48 @@ def test_transaction_issue_must_not_route_to_faq():
         result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
 
         assert result["route"] != "faq"
+
+
+def test_emotional_deposit_missing_routes_to_sop_with_risk_signal():
+    text = "你们真垃圾，我的存款没到账"
+    result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
+
+    assert result["route"] == "sop"
+    assert result["intent_result"]["route"] == "sop"
+    assert result["intent_result"]["intent"] == "deposit_missing"
+    assert result["intent_result"]["risk_level"] in {"high", "elevated"}
+
+
+def test_emotional_withdrawal_missing_routes_to_sop():
+    text = "scam, my withdrawal did not arrive"
+    result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
+
+    assert result["route"] == "sop"
+    assert result["intent_result"]["intent"] == "withdrawal_missing"
+
+
+def test_emotional_withdrawal_blocked_routes_to_sop():
+    text = "你们是骗子，我无法提款，说我流水不够"
+    result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
+
+    assert result["route"] == "sop"
+    assert result["intent_result"]["intent"] == "withdrawal_blocked_or_rollover"
+
+
+def test_pure_emotional_message_routes_to_emotion_care():
+    text = "你们真垃圾"
+    result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
+
+    assert result["route"] == "emotion_care"
+    assert result["intent_result"]["intent"] in {"abusive_or_emotional", "service_frustration"}
+
+
+def test_emotional_explicit_human_request_routes_to_handoff():
+    text = "你们垃圾，我要真人客服"
+    result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
+
+    assert result["route"] == "human_handoff"
+    assert result["intent_result"]["intent"] == "explicit_human_request"
 
 
 def test_canonical_howto_questions_route_to_faq():
@@ -203,6 +245,22 @@ def test_active_collecting_workflow_allows_independent_faq_without_clearing_work
     assert result["intent_result"]["workflow_relation"] == "independent_faq"
     assert result["active_workflow"] == "deposit_missing"
     assert result["slot_memory"] == {"account_or_phone": "abc123"}
+
+
+def test_active_workflow_rollover_explanation_uses_contextual_final_reply():
+    result = intent_router_node(
+        {
+            "raw_user_input": "流水是什么",
+            "rewritten_question": "流水是什么",
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "waiting_backend",
+        }
+    )
+
+    assert result["route"] == "final_reply"
+    assert result["intent_result"]["intent"] != "rollover_explanation"
+    assert result["node_reply_template"] in {"contextual_followup", "clarification"}
+    assert result["reply_plan"]["kind"] in {"contextual_followup", "clarification"}
 
 
 def test_active_collecting_workflow_new_sop_request_asks_before_switching():
