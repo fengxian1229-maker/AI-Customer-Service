@@ -129,6 +129,20 @@ def _money_missing_slots(screenshot_key: str, screenshot_label: str) -> tuple[So
     )
 
 
+def _withdrawal_blocked_slots() -> tuple[SopSlotDefinition, ...]:
+    return (
+        SopSlotDefinition(
+            key="account_or_phone",
+            label="用户名或注册手机号",
+            type="text",
+            required=True,
+            description="用于查询无法提款、流水或提款限制原因的用户名、会员账号或注册手机号。",
+            examples=("账号 andy123", "用户名是 abc", "13800138000"),
+            ask_instruction="请提供用户名或注册手机号，以便查询无法提款或流水要求。",
+        ),
+    )
+
+
 SOP_DEFINITIONS: dict[str, SopDefinition] = {
     "deposit_missing": SopDefinition(
         name="deposit_missing",
@@ -141,6 +155,12 @@ SOP_DEFINITIONS: dict[str, SopDefinition] = {
         slots=_money_missing_slots("withdrawal_screenshot", "提款申请截图"),
         complete_action="telegram.send_case_card",
         waiting_supplement_action="telegram.append_to_case",
+    ),
+    "withdrawal_blocked_or_rollover": SopDefinition(
+        name="withdrawal_blocked_or_rollover",
+        slots=_withdrawal_blocked_slots(),
+        complete_action="backend.query",
+        waiting_supplement_action="backend.query",
     ),
 }
 

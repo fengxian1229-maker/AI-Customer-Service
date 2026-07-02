@@ -23,6 +23,8 @@ def run_sop(state: dict[str, Any]) -> dict[str, Any]:
         **state,
         "response_text": "请补充你要咨询的问题，我们会继续协助。",
         "response_text_fallback": "请补充你要咨询的问题，我们会继续协助。",
+        "node_reply_template": "clarification",
+        "node_facts": {"fallback_text": "请补充你要咨询的问题，我们会继续协助。"},
         "reply_plan": build_reply_plan(
             kind="clarification",
             fallback_text="请补充你要咨询的问题，我们会继续协助。",
@@ -76,6 +78,14 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
         },
         "response_text": reply["reply_text"],
         "response_text_fallback": reply["reply_text"],
+        "node_reply_template": _sop_node_reply_template(policy["action"], has_external_command=bool(commands)),
+        "node_facts": {
+            "sop_name": intent,
+            "sop_action": policy["action"],
+            "missing_slots": list(policy.get("missing_slots") or []),
+            "slot_memory": slot_memory,
+            "fallback_text": reply["reply_text"],
+        },
         "reply_plan": _build_sop_reply_plan(intent, policy, reply["reply_text"]),
         "commands": commands,
     }
@@ -103,6 +113,13 @@ def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
             "workflow_stage": "collecting_slots",
             "response_text": "一般无法提款通常与流水要求或风控限制有关。为了帮你继续查询，请提供用户名或注册手机号。",
             "response_text_fallback": "一般无法提款通常与流水要求或风控限制有关。为了帮你继续查询，请提供用户名或注册手机号。",
+            "node_reply_template": "sop_missing_slots",
+            "node_facts": {
+                "sop_name": "withdrawal_blocked_or_rollover",
+                "missing_slots": ["account_or_phone"],
+                "slot_memory": slot_memory,
+                "fallback_text": "一般无法提款通常与流水要求或风控限制有关。为了帮你继续查询，请提供用户名或注册手机号。",
+            },
             "reply_plan": build_reply_plan(
                 kind="ask_missing_slots",
                 fallback_text="一般无法提款通常与流水要求或风控限制有关。为了帮你继续查询，请提供用户名或注册手机号。",
@@ -123,6 +140,12 @@ def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
         "workflow_stage": "backend_querying",
         "response_text": None,
         "response_text_fallback": None,
+        "node_reply_template": "backend_waiting",
+        "node_facts": {
+            "sop_name": "withdrawal_blocked_or_rollover",
+            "sop_action": "backend_query",
+            "slot_memory": slot_memory,
+        },
         "reply_plan": None,
         "commands": [
             {
@@ -156,6 +179,13 @@ def _pending_reply_lookup_sop(state: dict[str, Any]) -> dict[str, Any]:
             "workflow_stage": "collecting_slots",
             "response_text": "请提供可用于查询上一笔案件的识别资料，例如用户名、注册手机号或邮箱。",
             "response_text_fallback": "请提供可用于查询上一笔案件的识别资料，例如用户名、注册手机号或邮箱。",
+            "node_reply_template": "sop_missing_slots",
+            "node_facts": {
+                "sop_name": "pending_reply_lookup",
+                "missing_slots": ["pending_reply_identity"],
+                "slot_memory": slot_memory,
+                "fallback_text": "请提供可用于查询上一笔案件的识别资料，例如用户名、注册手机号或邮箱。",
+            },
             "reply_plan": build_reply_plan(
                 kind="ask_missing_slots",
                 fallback_text="请提供可用于查询上一笔案件的识别资料，例如用户名、注册手机号或邮箱。",
@@ -176,6 +206,13 @@ def _pending_reply_lookup_sop(state: dict[str, Any]) -> dict[str, Any]:
         "workflow_stage": "lookup_pending_reply",
         "response_text": "已收到识别资料，我们会查询上一笔案件记录，有更新会在这里通知你。",
         "response_text_fallback": "已收到识别资料，我们会查询上一笔案件记录，有更新会在这里通知你。",
+        "node_reply_template": "backend_waiting",
+        "node_facts": {
+            "sop_name": "pending_reply_lookup",
+            "sop_action": "pending_reply_lookup",
+            "slot_memory": slot_memory,
+            "fallback_text": "已收到识别资料，我们会查询上一笔案件记录，有更新会在这里通知你。",
+        },
         "reply_plan": build_reply_plan(
             kind="backend_waiting",
             fallback_text="已收到识别资料，我们会查询上一笔案件记录，有更新会在这里通知你。",
@@ -243,6 +280,14 @@ def _build_sop_reply_plan(intent: str, policy: dict[str, Any], fallback_text: st
         allowed_facts=[fallback_text],
         metadata={"intent": intent, "sop_action": action},
     )
+
+
+def _sop_node_reply_template(action: str, *, has_external_command: bool) -> str:
+    if has_external_command or action in {"send_telegram_case", "append_to_case", "waiting_followup"}:
+        return "backend_waiting"
+    if action == "ask_missing_slots":
+        return "sop_missing_slots"
+    return "acknowledgement"
 
 
 def _safe_reply_draft(reply_draft: Any) -> bool:

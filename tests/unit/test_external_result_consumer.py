@@ -106,6 +106,16 @@ class FakeFinalReplyService:
         }
 
 
+class FakeConversationMessageRepository:
+    def __init__(self, recent_messages: list[dict]) -> None:
+        self.recent_messages = recent_messages
+        self.calls = []
+
+    async def fetch_recent(self, conversation_id: str, limit: int = 10):
+        self.calls.append((conversation_id, limit))
+        return list(self.recent_messages)
+
+
 def make_result(result_type: str, command_type: str | None = None) -> dict:
     command_type = command_type or result_type.removesuffix(".mock_result")
     return {
@@ -503,6 +513,13 @@ def test_result_consumer_backend_query_result_success_uses_final_reply_text():
     conversation_repository = FakeConversationRepository()
     outbound_repository = FakeOutboundRepository()
     transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+    message_repository = FakeConversationMessageRepository(
+        [
+            {"sender_role": "customer", "text_content": "我无法提款"},
+            {"sender_role": "assistant", "text_content": "剩余流水约为 1375.09。"},
+            {"sender_role": "customer", "text_content": "刚刚是说我还有多少流水？"},
+        ]
+    )
 
     processed = asyncio.run(
         process_pending_results(
@@ -512,6 +529,7 @@ def test_result_consumer_backend_query_result_success_uses_final_reply_text():
             transaction_repository=transaction_repository,
             final_reply_service=final_reply_service,
             llm_final_reply_enabled=True,
+            conversation_message_repository=message_repository,
         )
     )
 
@@ -519,6 +537,11 @@ def test_result_consumer_backend_query_result_success_uses_final_reply_text():
     assert result_repository.processed == [7]
     assert final_reply_service.calls
     assert final_reply_service.calls[0]["reply_language"] == "zh-Hans"
+    assert final_reply_service.calls[0]["recent_messages"] == message_repository.recent_messages
+    assert final_reply_service.calls[0]["node_reply_template"] == "backend_result"
+    assert final_reply_service.calls[0]["node_facts"]["query"]["remaining_turnover"] == 1375.09
+    assert final_reply_service.calls[0]["backend_result"]["answer"] == "查询已完成，当前为 mock 后台结果。"
+    assert final_reply_service.calls[0]["backend_result"]["query"]["remaining_turnover"] == 1375.09
     assert "1375.09" in final_reply_service.calls[0]["reply_plan"]["must_say_exact"]
     assert conversation_repository.updated[0][1]["workflow_stage"] == "completed"
     assert outbound_repository.inserted[0]["payload_json"]["text"] == "润色后的后台回复。"

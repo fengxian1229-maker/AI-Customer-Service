@@ -129,6 +129,7 @@ HUMAN_HANDOFF_FORBIDDEN_PROMISES = (
 
 INTERNAL_TELEGRAM_IDENTIFIER_PATTERN = re.compile(r"\b(?:tg|mock_tg):\d+\b|telegram_message_id|telegram_case_id", re.I)
 BACKEND_SYNC_CLAIM_PATTERN = re.compile(r"(已同步|同步至|同步给后台|已补充给后台|補充給後台|已補充給後台|sent to backend|synced to backend)", re.I)
+STAFF_REPLY_CUSTOMER_FEEDBACK_PATTERN = re.compile(r"(收到|感谢|感謝).{0,8}(您|你|客户|客戶).{0,8}(反馈|反饋|回复|回覆)|your feedback|customer feedback", re.I)
 
 
 def build_reply_plan(
@@ -223,6 +224,9 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
 
     if BACKEND_SYNC_CLAIM_PATTERN.search(text) and not _has_append_to_case_command(state, plan):
         violations.append("unverified_backend_sync_claim")
+
+    if plan.get("kind") == "telegram_staff_reply" and STAFF_REPLY_CUSTOMER_FEEDBACK_PATTERN.search(text):
+        violations.append("staff_reply_framed_as_customer_feedback")
 
     if plan.get("kind") == "ask_missing_slots":
         for slot in plan.get("missing_slots") or state.get("missing_slots") or []:

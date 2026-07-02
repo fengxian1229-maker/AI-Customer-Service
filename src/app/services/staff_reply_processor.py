@@ -42,11 +42,15 @@ def staff_reply_passthrough_fallback(text: str, target_lang: str = "zh") -> str:
     reply_type = classify_staff_reply(raw)
     if target_lang == "en":
         if reply_type == "ask_customer":
+            if _PHONE_MISMATCH_PATTERN.search(lower):
+                return "The team found that the phone number may not match. Please confirm and send the correct registered phone number here so we can continue checking it."
             return with_critical_facts("The team needs additional information from you. Please send the requested details here so we can continue checking it.", raw, target_lang)
         if reply_type == "resolution":
             return with_critical_facts("The team has sent an update. We will continue helping you based on that reply.", raw, target_lang)
         return with_critical_facts("The team has received your case and is checking it now. We will keep following up in this chat. Your funds are safe within our process.", raw, target_lang)
     if reply_type == "ask_customer":
+        if _PHONE_MISMATCH_PATTERN.search(lower):
+            return "后台核实时发现手机号可能不一致，请你再次确认并发送正确的注册手机号，我们收到后会继续协助确认。"
         return with_critical_facts("后台需要你补充资料，请按照要求提供，我们收到后会继续协助确认。", raw, target_lang)
     if reply_type == "resolution":
         if re.search(r"(withdraw|retiro|出款|提款|取款).*(success|completed|done|成功|完成|processed|aprobado|procesado)", lower):
@@ -63,6 +67,7 @@ _WAIT_PATTERN = re.compile(r"(wait|checking|review|investig|pending|process(?:in
 _REJECTED_PATTERN = re.compile(r"(reject|rejected|rechazad|cancel|cancelad|returned|devuelt|failed|fall[oó]|no exitos|拒绝|拒絕|退回|取消|失败|失敗)")
 _ASK_INFO_PATTERN = re.compile(r"(send|ask|need|request|check|verify|correct|env[ií]e|enviar|mandar|solicitar|necesita|pedir|提供|补充|補充|发送|發送|检查|檢查|确认|確認|核对|核對).*(receipt|comprobante|recibo|screenshot|captura|usuario|user|phone|tel[eé]fono|numero|n[uú]mero|资料|資料|截图|截圖|凭证|憑證|电话|電話|用户|用戶|手机号|手機號)")
 _RECHECK_CONTACT_PATTERN = re.compile(r"(未查到|查不到|not found|no record|no se encontr).*(电话|電話|手机号|手機號|phone|tel[eé]fono|number|n[uú]mero|用户|用戶|usuario|user)")
+_PHONE_MISMATCH_PATTERN = re.compile(r"(电话|電話|手机号|手機號|phone|tel[eé]fono|number|n[uú]mero).{0,12}(不对|不對|错误|錯誤|有误|有誤|不一致|不符|不匹配|wrong|incorrect|mismatch|not match)")
 _RECEIPT_PATTERN = re.compile(r"(deposit receipt|successful receipt|payment receipt|transaction receipt|proof of payment|comprobante|recibo|凭证|憑證|水单|水單)")
 _SUCCESS_PATTERN = re.compile(r"(processed|approved|credited|completed|done|success|successful|aprobado|procesado|成功|完成|已处理|已處理|已到账|已到帳)")
 
@@ -71,7 +76,7 @@ def classify_staff_reply(text: str) -> str:
     lower = _compact(text).lower()
     if not lower:
         return "long_wait"
-    if _ASK_INFO_PATTERN.search(lower) or _RECHECK_CONTACT_PATTERN.search(lower) or _RECEIPT_PATTERN.search(lower):
+    if _ASK_INFO_PATTERN.search(lower) or _RECHECK_CONTACT_PATTERN.search(lower) or _PHONE_MISMATCH_PATTERN.search(lower) or _RECEIPT_PATTERN.search(lower):
         return "ask_customer"
     if _SUCCESS_PATTERN.search(lower) or _REJECTED_PATTERN.search(lower):
         return "resolution"

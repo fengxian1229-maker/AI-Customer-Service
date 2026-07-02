@@ -144,6 +144,10 @@ class LLMFinalReplyInput(TypedDict, total=False):
     missing_slots: list[str]
     sop_action: str | None
     rag_result: dict[str, Any] | None
+    backend_result: dict[str, Any] | None
+    node_reply_template: str | None
+    node_reply_instruction: str | None
+    node_facts: dict[str, Any]
     detected_language: str | None
     language_confidence: float | None
     language_source: str | None

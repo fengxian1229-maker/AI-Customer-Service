@@ -74,6 +74,8 @@ def build_graph_state_from_event(
         "rewrite_source": "deterministic",
         "rag_context": None,
         "rag_result": None,
+        "node_reply_template": None,
+        "node_facts": None,
         "recent_messages": recent_messages or [],
         "reply_plan": None,
         "response_text_fallback": None,
@@ -398,6 +400,12 @@ def make_intent_router_node(
             "reason": decision["reason"],
             "sop_name": decision.get("sop_name"),
             "faq_query": decision.get("faq_query"),
+            "faq_intent": (
+                (decision.get("faq_intent") or decision["intent"])
+                if decision["route"] == "faq"
+                else decision.get("faq_intent")
+            ),
+            "retrieval_query": decision.get("retrieval_query") or decision.get("faq_query"),
             "risk_level": decision.get("risk_level"),
             "requires_human": decision.get("requires_human"),
             "requires_backend": decision.get("requires_backend"),
@@ -429,6 +437,16 @@ def rag_node(state: GraphState) -> GraphState:
     return {
         **state,
         "rag_result": rag_result,
+        "node_reply_template": "faq_answer",
+        "node_facts": {
+            "answer": rag_result.get("answer"),
+            "matched": rag_result.get("matched"),
+            "source": rag_result.get("source"),
+            "query": rag_result.get("query"),
+            "fallback_reason": rag_result.get("fallback_reason"),
+            "documents": rag_result.get("documents"),
+            "faq_intent": _faq_intent_from_state(state),
+        },
         "response_text": fallback_text,
         "response_text_fallback": fallback_text,
         "reply_plan": build_reply_plan(
@@ -495,6 +513,12 @@ def human_handoff_node(state: GraphState) -> GraphState:
         "workflow_stage": "handoff_requested",
         "response_text": handoff_text,
         "response_text_fallback": handoff_text,
+        "node_reply_template": "human_handoff",
+        "node_facts": {
+            "reason": reason,
+            "handoff_requested": True,
+            "allowed_facts": ["客户需要真人客服", "系统将提出转接请求"],
+        },
         "reply_plan": build_reply_plan(
             kind="human_handoff",
             fallback_text=handoff_text,
@@ -517,13 +541,19 @@ def human_handoff_node(state: GraphState) -> GraphState:
 
 
 def emotion_care_node(state: GraphState) -> GraphState:
+    fallback_text = "我理解你现在很着急。我会先尽力说明处理方式；如果你愿意，也可以直接告诉我需要转接真人客服。"
     return {
         **state,
-        "response_text": "我理解你现在很着急。我会先尽力说明处理方式；如果你愿意，也可以直接告诉我需要转接真人客服。",
-        "response_text_fallback": "我理解你现在很着急。我会先尽力说明处理方式；如果你愿意，也可以直接告诉我需要转接真人客服。",
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
+        "node_reply_template": "emotion_care",
+        "node_facts": {
+            "fallback_text": fallback_text,
+            "risk_level": (state.get("intent_result") or {}).get("risk_level"),
+        },
         "reply_plan": build_reply_plan(
             kind="emotion_care",
-            fallback_text="我理解你现在很着急。我会先尽力说明处理方式；如果你愿意，也可以直接告诉我需要转接真人客服。",
+            fallback_text=fallback_text,
             must_say=["理解", "转接真人客服"],
             semantic_required_items=["human_handoff_notice"],
             must_not_say=["已到账", "已完成", "保证"],
@@ -546,6 +576,11 @@ def casual_chat_node(state: GraphState) -> GraphState:
         **state,
         "response_text": fallback_text,
         "response_text_fallback": fallback_text,
+        "node_reply_template": "default_final_reply",
+        "node_facts": {
+            "fallback_text": fallback_text,
+            "supported_topics": ["存款", "提款", "流水", "截图", "真人客服"],
+        },
         "reply_plan": build_reply_plan(
             kind="casual_chat",
             fallback_text=fallback_text,
@@ -562,6 +597,11 @@ def clarification_node(state: GraphState) -> GraphState:
         **state,
         "response_text": fallback_text,
         "response_text_fallback": fallback_text,
+        "node_reply_template": "clarification",
+        "node_facts": {
+            "fallback_text": fallback_text,
+            "supported_topics": ["存款", "提款", "流水", "真人客服"],
+        },
         "reply_plan": build_reply_plan(
             kind="clarification",
             fallback_text=fallback_text,
@@ -599,6 +639,8 @@ def _acknowledgement_state(state: GraphState) -> GraphState:
         "sop_action": "acknowledgement",
         "response_text": fallback_text,
         "response_text_fallback": fallback_text,
+        "node_reply_template": "acknowledgement",
+        "node_facts": {"fallback_text": fallback_text, "workflow_relation": "acknowledgement"},
         "reply_plan": build_reply_plan(
             kind="acknowledgement",
             fallback_text=fallback_text,
@@ -617,6 +659,8 @@ def _contextual_followup_state(state: GraphState) -> GraphState:
         "sop_action": "contextual_followup",
         "response_text": fallback_text,
         "response_text_fallback": fallback_text,
+        "node_reply_template": "contextual_followup",
+        "node_facts": {"fallback_text": fallback_text, "workflow_relation": "contextual_followup"},
         "reply_plan": build_reply_plan(
             kind="contextual_followup",
             fallback_text=fallback_text,
@@ -654,6 +698,9 @@ def _intent_result(
         result["sop_name"] = sop_name
     if faq_query:
         result["faq_query"] = faq_query
+        result["retrieval_query"] = faq_query
+    if route == "faq":
+        result["faq_intent"] = intent
     if emotion:
         result["emotion"] = emotion
     if risk_level:
@@ -663,6 +710,12 @@ def _intent_result(
     if preserve_active_workflow is not None:
         result["preserve_active_workflow"] = preserve_active_workflow
     return result
+
+
+def _faq_intent_from_state(state: dict[str, Any]) -> str | None:
+    intent_result = state.get("intent_result") or {}
+    value = intent_result.get("faq_intent") or intent_result.get("intent")
+    return str(value) if value else None
 
 
 def _with_route(

@@ -190,6 +190,8 @@ def test_telegram_reply_consumer_staff_reply_uses_final_reply_when_available():
     assert final_reply_service.calls[0]["response_text"] == "后台已回复，我们会按照这个更新继续协助你处理。"
     assert final_reply_service.calls[0]["reply_plan"]["kind"] == "telegram_staff_reply"
     assert final_reply_service.calls[0]["reply_plan"]["allowed_facts"] == ["已经到账，刷新一下页面看看"]
+    assert final_reply_service.calls[0]["node_reply_template"] == "telegram_staff_reply"
+    assert final_reply_service.calls[0]["node_facts"]["staff_reply"] == "已经到账，刷新一下页面看看"
     assert final_reply_service.calls[0]["workflow_stage"] == "backend_replied"
 
 

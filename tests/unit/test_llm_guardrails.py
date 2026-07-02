@@ -175,6 +175,30 @@ def test_validate_intent_classification_allows_current_workflow_resolution():
     assert decision["preserve_active_workflow"] is False
 
 
+def test_validate_intent_classification_allows_withdrawal_blocked_sop_name():
+    from app.llm.guardrails import validate_intent_classification_output
+
+    decision = validate_intent_classification_output(
+        {},
+        {
+            "intent": "withdrawal_blocked_or_rollover",
+            "route": "sop",
+            "confidence": 0.94,
+            "sop_name": "withdrawal_blocked_or_rollover",
+            "requires_human": False,
+            "requires_backend": True,
+            "missing_slots": ["account_or_phone"],
+            "workflow_relation": "none",
+            "preserve_active_workflow": True,
+            "reason": "Unable to withdraw requires backend rollover lookup.",
+        },
+    )
+
+    assert decision["intent"] == "withdrawal_blocked_or_rollover"
+    assert decision["sop_name"] == "withdrawal_blocked_or_rollover"
+    assert decision["requires_backend"] is True
+
+
 def test_validate_intent_classification_rejects_cross_object_current_workflow_supplement():
     from app.llm.guardrails import validate_intent_classification_output
 

@@ -65,6 +65,7 @@ async def process_pending_results(
     max_retries: int = 3,
     final_reply_service=None,
     llm_final_reply_enabled: bool = False,
+    conversation_message_repository: ConversationMessageRepository | None = None,
 ) -> list[dict]:
     worker_id = worker_id or default_worker_id()
     rows = await result_repository.lease_pending(limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
@@ -76,13 +77,19 @@ async def process_pending_results(
             result_repository=result_repository,
             conversation_message_repository=ConversationMessageRepository(result_repository.pool),
         )
+    if conversation_message_repository is None and hasattr(result_repository, "pool"):
+        conversation_message_repository = ConversationMessageRepository(result_repository.pool)
     processed = []
     for row in rows:
         try:
             handler = build_result_handler(row)
+            recent_messages = (
+                await _load_recent_messages(row, conversation_message_repository) if llm_final_reply_enabled else []
+            )
             handler = await _apply_backend_final_reply(
                 row,
                 handler,
+                recent_messages=recent_messages,
                 final_reply_service=final_reply_service,
                 llm_final_reply_enabled=llm_final_reply_enabled,
             )
@@ -120,6 +127,7 @@ async def process_result_by_id(
     max_retries: int = 3,
     final_reply_service=None,
     llm_final_reply_enabled: bool = False,
+    conversation_message_repository: ConversationMessageRepository | None = None,
 ) -> dict:
     worker_id = worker_id or default_worker_id()
     row = await result_repository.lease_pending_by_id(
@@ -137,11 +145,15 @@ async def process_result_by_id(
             result_repository=result_repository,
             conversation_message_repository=ConversationMessageRepository(result_repository.pool),
         )
+    if conversation_message_repository is None and hasattr(result_repository, "pool"):
+        conversation_message_repository = ConversationMessageRepository(result_repository.pool)
     try:
         handler = build_result_handler(row)
+        recent_messages = await _load_recent_messages(row, conversation_message_repository) if llm_final_reply_enabled else []
         handler = await _apply_backend_final_reply(
             row,
             handler,
+            recent_messages=recent_messages,
             final_reply_service=final_reply_service,
             llm_final_reply_enabled=llm_final_reply_enabled,
         )
@@ -308,6 +320,7 @@ async def _apply_backend_final_reply(
     row: dict,
     handler: dict,
     *,
+    recent_messages: list[dict] | None = None,
     final_reply_service=None,
     llm_final_reply_enabled: bool = False,
 ) -> dict:
@@ -318,7 +331,7 @@ async def _apply_backend_final_reply(
     if not fallback_text:
         return handler
 
-    final_state = _build_backend_final_reply_state(row, handler, fallback_text)
+    final_state = _build_backend_final_reply_state(row, handler, fallback_text, recent_messages=recent_messages)
     composed = None
     if llm_final_reply_enabled and final_reply_service and hasattr(final_reply_service, "compose"):
         try:
@@ -356,7 +369,13 @@ async def _apply_backend_final_reply(
     return updated
 
 
-def _build_backend_final_reply_state(row: dict, handler: dict, fallback_text: str) -> dict:
+def _build_backend_final_reply_state(
+    row: dict,
+    handler: dict,
+    fallback_text: str,
+    *,
+    recent_messages: list[dict] | None = None,
+) -> dict:
     result_json = row.get("result_json") or {}
     query = result_json.get("query") if isinstance(result_json.get("query"), dict) else {}
     reply_language = (
@@ -371,7 +390,7 @@ def _build_backend_final_reply_state(row: dict, handler: dict, fallback_text: st
         "conversation_id": row.get("conversation_id"),
         "raw_user_input": result_json.get("raw_user_input"),
         "rewritten_question": result_json.get("rewritten_question"),
-        "recent_messages": [],
+        "recent_messages": list(recent_messages or []),
         "route": "sop",
         "intent_result": {"intent": "withdrawal_blocked_or_rollover"},
         "active_workflow": "withdrawal_blocked_or_rollover",
@@ -381,6 +400,9 @@ def _build_backend_final_reply_state(row: dict, handler: dict, fallback_text: st
         "missing_slots": [],
         "sop_action": "backend_query_result",
         "rag_result": None,
+        "backend_result": _build_backend_result_context(result_json),
+        "node_reply_template": "backend_result",
+        "node_facts": _build_backend_result_context(result_json),
         "detected_language": result_json.get("detected_language"),
         "language_confidence": None,
         "language_source": "backend_query_result",
@@ -396,6 +418,37 @@ def _build_backend_final_reply_state(row: dict, handler: dict, fallback_text: st
             allowed_facts=_backend_result_allowed_facts(result_json),
         ),
         "commands": [],
+    }
+
+
+async def _load_recent_messages(row: dict, repository) -> list[dict]:
+    if row.get("result_type") != "backend.query.result" or repository is None:
+        return []
+    conversation_id = row.get("conversation_id")
+    if not conversation_id or not hasattr(repository, "fetch_recent"):
+        return []
+    return await repository.fetch_recent(conversation_id, limit=10)
+
+
+def _build_backend_result_context(result_json: dict) -> dict:
+    query = result_json.get("query") if isinstance(result_json.get("query"), dict) else {}
+    return {
+        "status": result_json.get("status"),
+        "answer": result_json.get("answer"),
+        "intent": result_json.get("intent"),
+        "raw_user_input": result_json.get("raw_user_input"),
+        "rewritten_question": result_json.get("rewritten_question"),
+        "account_or_phone": result_json.get("account_or_phone"),
+        "reply_language": result_json.get("reply_language"),
+        "query": {
+            "player_found": query.get("player_found"),
+            "remaining_turnover": query.get("remaining_turnover"),
+            "required_turnover": query.get("required_turnover"),
+            "valid_turnover": query.get("valid_turnover"),
+            "active_requirements_count": query.get("active_requirements_count"),
+            "records_count": query.get("records_count"),
+            "is_met": query.get("is_met"),
+        },
     }
 
 

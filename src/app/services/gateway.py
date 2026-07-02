@@ -930,6 +930,14 @@ class GatewayService:
             "response_text_fallback": text,
             "final_response_text": None,
             "final_reply_result": None,
+            "node_reply_template": "faq_answer",
+            "node_facts": {
+                "answer": text,
+                "matched": True,
+                "source": "faq_answer_blocks",
+                "faq_block_index": row.get("block_index"),
+                "message_kind": row.get("message_kind") or row.get("message_type"),
+            },
             "reply_plan": build_reply_plan(
                 kind="faq_answer",
                 fallback_text=text,

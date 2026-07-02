@@ -65,6 +65,13 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
             "sop_action": "append_to_case",
             "response_text": reply["reply_text"],
             "response_text_fallback": reply["reply_text"],
+            "node_reply_template": "backend_waiting",
+            "node_facts": {
+                "sop_name": active_workflow,
+                "sop_action": "append_to_case",
+                "slot_memory": slot_memory,
+                "fallback_text": reply["reply_text"],
+            },
             "reply_plan": _waiting_reply_plan("append_backend_case", reply["reply_text"]),
             "commands": [
                 build_sop_command(
@@ -85,16 +92,24 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     if explicit_human or policy["action"] == "human_handoff":
         return _build_handoff_state(state, slot_memory)
 
+    reply_text = plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"]
     return {
         **state,
         "slot_memory": slot_memory,
         "workflow_stage": "waiting_backend",
         "sop_action": "waiting_followup",
-        "response_text": plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"],
-        "response_text_fallback": plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"],
+        "response_text": reply_text,
+        "response_text_fallback": reply_text,
+        "node_reply_template": "backend_waiting",
+        "node_facts": {
+            "sop_name": active_workflow,
+            "sop_action": "waiting_followup",
+            "slot_memory": slot_memory,
+            "fallback_text": reply_text,
+        },
         "reply_plan": _waiting_reply_plan(
             "backend_waiting",
-            plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"],
+            reply_text,
         ),
         "commands": [],
     }
@@ -108,6 +123,8 @@ def _waiting_followup_state(state: dict[str, Any], slot_memory: dict[str, Any]) 
         "sop_action": "waiting_followup",
         "response_text": CASE_PENDING_REPLY,
         "response_text_fallback": CASE_PENDING_REPLY,
+        "node_reply_template": "backend_waiting",
+        "node_facts": {"sop_action": "waiting_followup", "slot_memory": slot_memory, "fallback_text": CASE_PENDING_REPLY},
         "reply_plan": _waiting_reply_plan("backend_waiting", CASE_PENDING_REPLY),
         "commands": [],
     }
@@ -122,6 +139,8 @@ def _acknowledgement_state(state: dict[str, Any], slot_memory: dict[str, Any]) -
         "sop_action": "acknowledgement",
         "response_text": text,
         "response_text_fallback": text,
+        "node_reply_template": "acknowledgement",
+        "node_facts": {"sop_action": "acknowledgement", "slot_memory": slot_memory, "fallback_text": text},
         "reply_plan": build_reply_plan(
             kind="acknowledgement",
             fallback_text=text,
@@ -144,6 +163,8 @@ def _contextual_followup_state(state: dict[str, Any], slot_memory: dict[str, Any
         "sop_action": "contextual_followup",
         "response_text": text,
         "response_text_fallback": text,
+        "node_reply_template": "contextual_followup",
+        "node_facts": {"sop_action": "contextual_followup", "slot_memory": slot_memory, "fallback_text": text},
         "reply_plan": build_reply_plan(
             kind="contextual_followup",
             fallback_text=text,
@@ -161,6 +182,8 @@ def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> 
         "status": "HANDOFF_REQUESTED",
         "response_text": "我会为你转接真人客服继续协助。",
         "response_text_fallback": "我会为你转接真人客服继续协助。",
+        "node_reply_template": "human_handoff",
+        "node_facts": {"handoff_requested": True, "slot_memory": slot_memory, "fallback_text": "我会为你转接真人客服继续协助。"},
         "reply_plan": build_reply_plan(
             kind="human_handoff",
             fallback_text="我会为你转接真人客服继续协助。",
@@ -190,6 +213,8 @@ def _resolved_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[
         "sop_action": "customer_confirmed_resolved",
         "response_text": text,
         "response_text_fallback": text,
+        "node_reply_template": "acknowledgement",
+        "node_facts": {"sop_action": "customer_confirmed_resolved", "slot_memory": next_slot_memory, "fallback_text": text},
         "reply_plan": build_reply_plan(
             kind="sop_resolved_ack",
             fallback_text=text,

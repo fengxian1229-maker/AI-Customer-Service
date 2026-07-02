@@ -4,6 +4,11 @@ from typing import Any
 
 from app.services.language_policy import normalize_language_code, parse_supported_languages
 from app.workflows.final_reply_policy import accepted_result, fallback_result, validate_final_reply_output
+from app.workflows.final_reply_templates import (
+    build_node_facts,
+    build_node_reply_instruction,
+    resolve_node_reply_template_id,
+)
 from app.workflows.slot_extractors import normalize_text
 
 
@@ -84,6 +89,8 @@ class FinalReplyService:
         }
 
     def _build_payload(self, state: dict[str, Any], fallback_text: str) -> dict[str, Any]:
+        node_reply_template = resolve_node_reply_template_id(state)
+        node_facts = build_node_facts(state)
         return {
             "tenant_id": state.get("tenant_id"),
             "channel_type": state.get("channel_type"),
@@ -100,6 +107,10 @@ class FinalReplyService:
             "missing_slots": list(state.get("missing_slots") or []),
             "sop_action": state.get("sop_action"),
             "rag_result": state.get("rag_result"),
+            "backend_result": state.get("backend_result"),
+            "node_reply_template": node_reply_template,
+            "node_reply_instruction": build_node_reply_instruction(node_reply_template),
+            "node_facts": node_facts,
             "detected_language": state.get("detected_language"),
             "language_confidence": state.get("language_confidence"),
             "language_source": state.get("language_source"),

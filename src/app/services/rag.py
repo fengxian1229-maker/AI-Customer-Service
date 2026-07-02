@@ -110,6 +110,7 @@ class RagService:
         tenant_id = state.get("tenant_id") or "default"
         kb_scope = state.get("kb_scope") or "default"
         query = _retrieval_query(state)
+        candidate_intent = _candidate_faq_intent(state)
         language = ((state.get("rewrite_result") or {}).get("language")) or None
 
         if state.get("rag_backend_fact_guard_enabled", True) and _is_backend_fact_question(query):
@@ -137,19 +138,21 @@ class RagService:
                 tenant_id=tenant_id,
                 query=query,
                 kb_scope=kb_scope,
-                limit=self.max_docs,
+                limit=max(self.max_docs * 3, 10) if candidate_intent else self.max_docs,
             )
             documents = filter_allowed_faq_documents(documents)
+            documents = _filter_candidate_faq_documents(documents, candidate_intent)[: self.max_docs]
             source = "knowledge_documents"
         else:
             documents = search_static_knowledge(
                 tenant_id=tenant_id,
                 query=query,
                 kb_scope=kb_scope,
-                limit=self.max_docs,
+                limit=max(self.max_docs * 3, 10) if candidate_intent else self.max_docs,
                 language=language,
             )
             documents = filter_allowed_faq_documents(documents)
+            documents = _filter_candidate_faq_documents(documents, candidate_intent)[: self.max_docs]
             source = "static_knowledge"
 
         if not documents:
@@ -182,6 +185,7 @@ class RagService:
             "fallback_reason": None,
             "source": source,
             "query": query,
+            "faq_intent": candidate_intent,
             "tenant_id": tenant_id,
             "kb_scope": kb_scope,
         }
@@ -201,10 +205,11 @@ def answer_from_static_knowledge(state: dict) -> dict:
         tenant_id=state.get("tenant_id") or "default",
         query=query,
         kb_scope=state.get("kb_scope") or "default",
-        limit=3,
+        limit=10 if _candidate_faq_intent(state) else 3,
         language=((state.get("rewrite_result") or {}).get("language")) or None,
     )
     documents = filter_allowed_faq_documents(documents)
+    documents = _filter_candidate_faq_documents(documents, _candidate_faq_intent(state))[:3]
     if not documents:
         return _fallback_answer("no_match", RAG_FALLBACK_ANSWER)
     return _build_answer_from_context(
@@ -398,11 +403,27 @@ def _fallback_answer(reason: str, answer: str) -> dict:
 
 def _retrieval_query(state: dict) -> str:
     return normalize_text(
-        (state.get("intent_result") or {}).get("faq_query")
+        (state.get("intent_result") or {}).get("retrieval_query")
+        or (state.get("intent_result") or {}).get("faq_query")
         or (state.get("rewrite_result") or {}).get("normalized_query")
         or state.get("rewritten_question")
         or state.get("raw_user_input")
     )
+
+
+def _candidate_faq_intent(state: dict) -> str | None:
+    intent_result = state.get("intent_result") or {}
+    value = intent_result.get("faq_intent") or intent_result.get("intent")
+    value = str(value or "").strip()
+    if value in ALLOWED_FAQ_INTENTS:
+        return value
+    return None
+
+
+def _filter_candidate_faq_documents(documents: list[dict], candidate_intent: str | None) -> list[dict]:
+    if not candidate_intent:
+        return documents
+    return [document for document in documents if document_faq_intent(document) == candidate_intent]
 
 
 def _build_answer_from_context(context: dict) -> dict:

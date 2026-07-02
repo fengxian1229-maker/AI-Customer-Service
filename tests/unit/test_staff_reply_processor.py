@@ -21,7 +21,15 @@ def test_staff_reply_fallback_detects_phone_recheck_as_ask_customer():
     result = StaffReplyProcessor(enabled=False).process("未查到该笔订单，请再检查一遍电话是否提供错误", target_lang="zh")
 
     assert result.type == "ask_customer"
-    assert "补充资料" in result.text
+    assert "手机号可能不一致" in result.text
+
+
+def test_staff_reply_fallback_detects_phone_mismatch_as_ask_customer():
+    result = StaffReplyProcessor(enabled=False).process("我查了这笔订单，貌似手机号不对", target_lang="zh")
+
+    assert result.type == "ask_customer"
+    assert "手机号可能不一致" in result.text
+    assert "正确的注册手机号" in result.text
 
 
 def test_staff_reply_fact_validation_rejects_added_success_status():

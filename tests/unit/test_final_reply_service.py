@@ -55,6 +55,84 @@ def base_state(**overrides):
     return state
 
 
+def test_final_reply_prompt_requires_contextual_answer_planning():
+    from app.llm.final_reply_provider import FINAL_REPLY_SYSTEM_PROMPT
+
+    assert "understand the customer's current question" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "recent_messages" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "backend_result" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "fallback text is a safe draft/fact source" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "answer that value directly" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "node_facts" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "reply_plan.allowed_facts" in FINAL_REPLY_SYSTEM_PROMPT
+
+
+def test_final_reply_service_payload_includes_node_template_and_facts():
+    provider = FakeFinalReplyProvider()
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                node_reply_template="sop_missing_slots",
+                node_facts={
+                    "sop_name": "deposit_missing",
+                    "missing_slots": ["account_or_phone", "deposit_screenshot"],
+                },
+            )
+        )
+    )
+
+    assert result["final_reply_result"]["status"] == "accepted"
+    assert provider.calls[0]["node_reply_template"] == "sop_missing_slots"
+    assert "Node reply template: SOP missing slots" in provider.calls[0]["node_reply_instruction"]
+    assert provider.calls[0]["node_facts"]["sop_name"] == "deposit_missing"
+    assert provider.calls[0]["recent_messages"] == [{"sender_role": "customer", "text_content": "hola"}]
+
+
+def test_final_reply_service_derives_faq_node_facts_from_rag_result():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "你可以在提款页面按提示提交提款申请。",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.91,
+            "safety_flags": [],
+            "reason": "faq answer",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                route="faq",
+                intent_result={"intent": "withdrawal_howto", "route": "faq", "faq_intent": "withdrawal_howto"},
+                rag_result={
+                    "matched": True,
+                    "answer": "你可以在提款页面按提示提交提款申请。",
+                    "source": "knowledge_documents",
+                    "query": "怎么提款",
+                    "documents": [{"title": "提款方式说明"}],
+                },
+                response_text="你可以在提款页面按提示提交提款申请。",
+                response_text_fallback="你可以在提款页面按提示提交提款申请。",
+                reply_plan={
+                    "kind": "faq_answer",
+                    "fallback_text": "你可以在提款页面按提示提交提款申请。",
+                    "must_say": ["你可以在提款页面按提示提交提款申请"],
+                    "must_not_say": ["手续费全免"],
+                    "allowed_facts": ["你可以在提款页面按提示提交提款申请。"],
+                },
+            )
+        )
+    )
+
+    assert result["final_reply_result"]["status"] == "accepted"
+    assert provider.calls[0]["node_reply_template"] == "faq_answer"
+    assert provider.calls[0]["node_facts"]["faq"]["answer"] == "你可以在提款页面按提示提交提款申请。"
+
+
 def test_final_reply_service_uses_llm_text_when_guardrails_pass():
     provider = FakeFinalReplyProvider()
     service = FinalReplyService(provider=provider, enabled=True)
@@ -64,6 +142,60 @@ def test_final_reply_service_uses_llm_text_when_guardrails_pass():
     assert result["final_response_text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
     assert result["final_reply_result"]["status"] == "accepted"
     assert provider.calls[0]["tenant_persona"]["default_language"] == "zh-Hans"
+
+
+def test_final_reply_service_payload_preserves_backend_context():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "是的，剩余流水约为 1375.09。",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.93,
+            "safety_flags": [],
+            "reason": "direct answer to current follow-up using backend fact",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+    recent_messages = [
+        {"sender_role": "assistant", "text_content": "剩余流水约为 1375.09。"},
+        {"sender_role": "customer", "text_content": "刚刚是说我还有多少流水？"},
+    ]
+    backend_result = {
+        "answer": "后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
+        "raw_user_input": "刚刚是说我还有多少流水？",
+        "rewritten_question": "刚才提到的账户 3239413629 的剩余流水金额是多少？",
+        "query": {"remaining_turnover": 1375.09, "player_found": True, "active_requirements_count": 2},
+    }
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                raw_user_input="刚刚是说我还有多少流水？",
+                rewritten_question="刚才提到的账户 3239413629 的剩余流水金额是多少？",
+                recent_messages=recent_messages,
+                response_text="后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。请先完成对应流水后再尝试提款。",
+                response_text_fallback="后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。请先完成对应流水后再尝试提款。",
+                backend_result=backend_result,
+                reply_plan={
+                    "kind": "backend_query_result",
+                    "fallback_text": "后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。请先完成对应流水后再尝试提款。",
+                    "must_say_exact": ["1375.09"],
+                    "must_not_say": ["已到账", "已完成", "保证"],
+                    "allowed_facts": [
+                        "后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
+                        "remaining_turnover=1375.09",
+                    ],
+                },
+            )
+        )
+    )
+
+    assert result["final_response_text"] == "是的，剩余流水约为 1375.09。"
+    assert result["final_reply_result"]["status"] == "accepted"
+    assert provider.calls[0]["recent_messages"] == recent_messages
+    assert provider.calls[0]["backend_result"] == backend_result
+    assert provider.calls[0]["raw_user_input"] == "刚刚是说我还有多少流水？"
+    assert provider.calls[0]["rewritten_question"] == "刚才提到的账户 3239413629 的剩余流水金额是多少？"
 
 
 def test_final_reply_service_falls_back_when_provider_raises():
@@ -130,6 +262,44 @@ def test_final_reply_service_allows_credited_fact_from_staff_reply_plan():
 
     assert result["final_response_text"] == "后台回复款项已到账，请刷新页面后确认账户余额。"
     assert result["final_reply_result"]["status"] == "accepted"
+
+
+def test_final_reply_service_rejects_staff_reply_framed_as_customer_feedback():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "收到您的反馈。关于这笔订单手机号不一致的情况，后台已进行回复，我们将依据此更新继续为您处理。",
+            "language": "zh",
+            "tone": "polite",
+            "confidence": 0.92,
+            "safety_flags": [],
+            "reason": "misframed staff reply",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                raw_user_input="我查了这笔订单，貌似手机号不对",
+                rewritten_question="我查了这笔订单，貌似手机号不对",
+                workflow_stage="waiting_customer_supplement",
+                response_text="后台核实时发现手机号可能不一致，请你再次确认并发送正确的注册手机号，我们收到后会继续协助确认。",
+                response_text_fallback="后台核实时发现手机号可能不一致，请你再次确认并发送正确的注册手机号，我们收到后会继续协助确认。",
+                reply_plan={
+                    "kind": "telegram_staff_reply",
+                    "fallback_text": "后台核实时发现手机号可能不一致，请你再次确认并发送正确的注册手机号，我们收到后会继续协助确认。",
+                    "allowed_facts": ["我查了这笔订单，貌似手机号不对"],
+                    "staff_reply_key_facts": [],
+                    "must_not_say": ["保证", "一定"],
+                },
+            )
+        )
+    )
+
+    assert result["final_response_text"] == "后台核实时发现手机号可能不一致，请你再次确认并发送正确的注册手机号，我们收到后会继续协助确认。"
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["fallback_reason"] == "guardrail_failed"
+    assert "staff_reply_framed_as_customer_feedback" in result["final_reply_result"]["violations"]
 
 
 def test_final_reply_service_falls_back_when_ask_missing_slots_omits_account():
@@ -284,3 +454,52 @@ def test_final_reply_service_rejects_backend_sync_claim_without_append_command()
 
     assert result["final_response_text"] == "收到，案件仍在确认中，有更新会在这里通知你。"
     assert "unverified_backend_sync_claim" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_provider_sends_global_and_node_system_prompts(monkeypatch):
+    from app.core.settings import Settings
+    from app.llm.final_reply_provider import FinalReplyLLMProvider
+
+    captured = {}
+
+    class FakeStructuredModel:
+        async def ainvoke(self, messages):
+            captured["messages"] = messages
+            return {
+                "text": "请提供用户名或注册手机号。",
+                "language": "zh-Hans",
+                "tone": "polite",
+                "confidence": 0.91,
+                "safety_flags": [],
+                "reason": "uses node template",
+            }
+
+    class FakeModel:
+        def with_structured_output(self, schema=None, method=None):
+            captured["schema"] = schema
+            captured["method"] = method
+            return FakeStructuredModel()
+
+    monkeypatch.setattr("app.llm.final_reply_provider.build_gemini_chat_model", lambda settings: FakeModel())
+    provider = FinalReplyLLMProvider(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
+
+    result = asyncio.run(
+        provider.compose_final_reply(
+            {
+                "raw_user_input": "无法提款",
+                "reply_language": "zh-Hans",
+                "response_text_fallback": "请提供用户名或注册手机号。",
+                "node_reply_template": "sop_missing_slots",
+                "node_reply_instruction": "Node reply template: SOP missing slots.",
+                "node_facts": {"missing_slots": ["account_or_phone"]},
+                "reply_plan": {"kind": "ask_missing_slots"},
+            }
+        )
+    )
+
+    assert result["text"] == "请提供用户名或注册手机号。"
+    assert captured["method"] == "json_schema"
+    assert captured["messages"][0][0] == "system"
+    assert "Final Reply Composer" in captured["messages"][0][1]
+    assert captured["messages"][1] == ("system", "Node reply template: SOP missing slots.")
+    assert captured["messages"][2][0] == "human"

@@ -236,6 +236,12 @@ async def finalize_staff_reply_handler(
         "active_workflow": graph_state.get("active_workflow") or result_json.get("active_workflow") or result_json.get("intent"),
         "response_text": fallback_text,
         "response_text_fallback": fallback_text,
+        "node_reply_template": "telegram_staff_reply",
+        "node_facts": {
+            "staff_reply": raw_text,
+            "fallback_text": fallback_text,
+            "staff_reply_type": (graph_state.get("slot_memory") or {}).get("last_telegram_staff_reply_type"),
+        },
         "reply_language": result_json.get("language") or "zh-Hans",
         "conversation_language": result_json.get("language") or "zh-Hans",
         "detected_language": result_json.get("language") or "zh-Hans",

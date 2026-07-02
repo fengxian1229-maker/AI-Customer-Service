@@ -87,6 +87,79 @@ def test_rag_service_retrieve_uses_repository_search():
     assert repository.calls == [("default", "充值教程", "default", 3)]
 
 
+def test_rag_service_uses_router_faq_intent_as_candidate_scope():
+    repository = FakeKnowledgeRepository([
+        {
+            "id": 1,
+            "title": "提款教程",
+            "content": "按页面提示提交提款申请。",
+            "metadata_json": {"intent_id": "withdrawal_howto", "is_canonical": True},
+            "score": 12,
+            "priority": 10,
+        },
+        {
+            "id": 2,
+            "title": "充值教程",
+            "content": "按页面提示完成充值。",
+            "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
+            "score": 10,
+            "priority": 20,
+        },
+    ])
+    service = RagService(repository)
+
+    context = asyncio.run(
+        service.retrieve(
+            {
+                "tenant_id": "default",
+                "intent_result": {
+                    "route": "faq",
+                    "intent": "deposit_howto",
+                    "faq_intent": "deposit_howto",
+                    "retrieval_query": "提款教程",
+                },
+            }
+        )
+    )
+
+    assert context["matched"] is True
+    assert context["answer"] == "按页面提示完成充值。"
+    assert context["documents"][0]["title"] == "充值教程"
+    assert repository.calls == [("default", "提款教程", "default", 10)]
+
+
+def test_rag_service_does_not_answer_when_router_faq_intent_conflicts_with_documents():
+    repository = FakeKnowledgeRepository([
+        {
+            "id": 1,
+            "title": "提款教程",
+            "content": "按页面提示提交提款申请。",
+            "metadata_json": {"intent_id": "withdrawal_howto", "is_canonical": True},
+            "score": 12,
+            "priority": 10,
+        }
+    ])
+    service = RagService(repository)
+
+    context = asyncio.run(
+        service.retrieve(
+            {
+                "tenant_id": "default",
+                "intent_result": {
+                    "route": "faq",
+                    "intent": "deposit_howto",
+                    "faq_intent": "deposit_howto",
+                    "retrieval_query": "提款教程",
+                },
+            }
+        )
+    )
+
+    assert context["matched"] is False
+    assert context["fallback_reason"] == "no_match"
+    assert context["answer"] == RAG_FALLBACK_ANSWER
+
+
 def test_is_allowed_faq_document_requires_allowed_intent_and_canonical_true():
     assert is_allowed_faq_document(
         {"title": "充值教程", "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True}}

@@ -39,6 +39,8 @@ class GraphState(TypedDict, total=False):
     rewrite_source: str | None
     rag_context: dict[str, Any] | None
     rag_result: dict[str, Any] | None
+    node_reply_template: str | None
+    node_facts: dict[str, Any] | None
 
     recent_messages: list[dict[str, Any]]
 

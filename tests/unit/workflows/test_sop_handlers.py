@@ -123,6 +123,37 @@ def test_withdrawal_blocked_or_rollover_generates_backend_query_and_no_tg():
     command_types = [command["type"] for command in state["commands"]]
     assert command_types == [CommandType.BACKEND_QUERY]
     assert CommandType.TELEGRAM_SEND_CASE_CARD not in command_types
+    assert state["node_reply_template"] == "backend_waiting"
+    assert state["node_facts"]["sop_name"] == "withdrawal_blocked_or_rollover"
+
+
+def test_withdrawal_blocked_or_rollover_missing_account_sets_sop_template_facts():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "withdrawal_blocked_or_rollover"},
+            "rewritten_question": "我无法提款",
+            "slot_memory": {},
+            "attachments": [],
+        }
+    )
+
+    assert state["workflow_stage"] == "collecting_slots"
+    assert state["commands"] == []
+    assert state["node_reply_template"] == "sop_missing_slots"
+    assert state["node_facts"]["missing_slots"] == ["account_or_phone"]
+
+
+def test_withdrawal_blocked_or_rollover_has_sop_definition_for_account_lookup():
+    from app.workflows.llm_sop_dialogue_planner import compute_missing_slots
+    from app.workflows.sop_definitions import get_sop_definition
+
+    definition = get_sop_definition("withdrawal_blocked_or_rollover")
+
+    assert definition is not None
+    assert definition.complete_action == "backend.query"
+    assert definition.required_slots == ("account_or_phone",)
+    assert compute_missing_slots("withdrawal_blocked_or_rollover", {}) == ["account_or_phone"]
+    assert compute_missing_slots("withdrawal_blocked_or_rollover", {"account_or_phone": "andy123"}) == []
 
 
 def test_pending_reply_lookup_asks_identity_when_missing():
