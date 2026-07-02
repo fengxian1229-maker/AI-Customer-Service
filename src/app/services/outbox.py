@@ -41,6 +41,21 @@ def build_command_outbox(
             inbound_event_id=inbound_event_id,
             text=payload["text"],
         ) | {"payload_json": {"type": "message", **payload}}
+    if command_type == "livechat.send_buttons":
+        payload = dict(command.get("payload") or {})
+        payload["menu_key"] = str(payload.get("menu_key") or "")
+        return {
+            "chat_id": chat_id,
+            "thread_id": thread_id,
+            "action_type": command_type,
+            "command_type": command_type,
+            "message_type": "buttons",
+            "message_kind": "buttons",
+            "payload_json": payload,
+            "status": "PENDING",
+            "conversation_id": conversation_id,
+            "inbound_event_id": inbound_event_id,
+        }
     raise ValueError(f"Unsupported outbound command type: {command_type}")
 
 

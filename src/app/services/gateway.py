@@ -9,6 +9,7 @@ from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.faq_outbound_plan import build_faq_outbound_plan_from_rag_context, faq_plan_to_outbound_rows
 from app.services.language_policy import normalize_language_code, parse_supported_languages, resolve_language_policy
+from app.services.livechat_menus import get_menu
 from app.services.message_history import build_customer_message_from_inbound
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
 from app.workflows.command_contracts import CommandType
@@ -167,6 +168,7 @@ class GatewayService:
                 else None
             )
             outbound_messages = await self._build_outbound_messages(inbound_event_id, event, conversation["conversation_id"], graph_state)
+            outbound_messages = self._append_intro_menu_if_needed(outbound_messages, inbound_event_id, event, conversation, graph_state)
             external_commands = self._build_external_commands(inbound_event_id, event, conversation, graph_state)
             result = await self.transactional_repository.process_event_transactionally(
                 inbound_event_id,
@@ -211,6 +213,13 @@ class GatewayService:
                 inbound_event_id,
                 event,
                 conversation["conversation_id"],
+                graph_state,
+            )
+            outbound_messages = self._append_intro_menu_if_needed(
+                outbound_messages,
+                inbound_event_id,
+                event,
+                conversation,
                 graph_state,
             )
             if self.message_repository and customer_message:
@@ -923,8 +932,70 @@ class GatewayService:
                 command=self._command_with_final_text(command, graph_state),
             )
             for command in graph_state.get("commands", [])
-            if str(command["type"]) == str(CommandType.LIVECHAT_SEND_TEXT)
+            if str(command["type"]) in {str(CommandType.LIVECHAT_SEND_TEXT), str(CommandType.LIVECHAT_SEND_BUTTONS)}
         ]
+
+    def _append_intro_menu_if_needed(
+        self,
+        outbound_messages: list[dict],
+        inbound_event_id: int,
+        event: InboundEvent,
+        conversation: dict,
+        graph_state: dict | None,
+    ) -> list[dict]:
+        if not graph_state or graph_state.get("route") == "human_handoff":
+            return outbound_messages
+        if graph_state.get("channel_type") != "livechat":
+            return outbound_messages
+        if not (event.payload_json or {}).get("ingress_source"):
+            return outbound_messages
+        slot_memory = graph_state.setdefault("slot_memory", {})
+        livechat_menu = dict(slot_memory.get("livechat_menu") or {})
+        if livechat_menu.get("intro_sent"):
+            return outbound_messages
+        if conversation.get("active_workflow"):
+            return outbound_messages
+        if graph_state.get("recent_messages"):
+            return outbound_messages
+        livechat_menu.update({"context": "main", "intro_sent": True})
+        slot_memory["livechat_menu"] = livechat_menu
+        outbound_messages = list(outbound_messages)
+        outbound_messages.append(
+            self._buttons_outbox(
+                chat_id=event.chat_id,
+                thread_id=event.thread_id,
+                conversation_id=conversation["conversation_id"],
+                inbound_event_id=inbound_event_id,
+                menu_key="main",
+                graph_state=graph_state,
+            )
+        )
+        return outbound_messages
+
+    def _buttons_outbox(
+        self,
+        *,
+        chat_id: str | None,
+        thread_id: str | None,
+        conversation_id: str,
+        inbound_event_id: int,
+        menu_key: str,
+        graph_state: dict,
+    ) -> dict:
+        get_menu(menu_key, graph_state.get("reply_language") or self._default_reply_language())
+        return build_command_outbox(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            conversation_id=conversation_id,
+            inbound_event_id=inbound_event_id,
+            command={
+                "type": CommandType.LIVECHAT_SEND_BUTTONS,
+                "payload": {
+                    "menu_key": menu_key,
+                    "language": graph_state.get("reply_language") or self._default_reply_language(),
+                },
+            },
+        )
 
     async def _finalize_faq_text_rows(self, rows: list[dict], graph_state: dict) -> list[dict]:
         if not self.llm_final_reply_enabled or not self.llm_final_reply_service:

@@ -6,6 +6,7 @@ from app.llm.guardrails import validate_router_decision_output, validate_sop_dia
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
 from app.services.rag import answer_from_rag_context, answer_from_static_knowledge
+from app.services.livechat_menus import BUSINESS_BUTTON_ROUTES, MENU_BY_NAV_BUTTON, detect_button_id
 from app.services.language_policy import (
     detect_language_deterministic,
     normalize_language_code,
@@ -49,6 +50,7 @@ def build_graph_state_from_event(
         "conversation_id": conversation.get("conversation_id") or f"livechat:{event.chat_id or 'unknown'}",
         "chat_id": event.chat_id or "unknown",
         "thread_id": event.thread_id,
+        "payload_json": payload,
         "raw_user_input": raw_input,
         "rewritten_question": None,
         "detected_language": None,
@@ -89,6 +91,9 @@ def build_graph_state_from_event(
 
 
 def rewrite_question_node(state: GraphState) -> GraphState:
+    menu_state = _apply_menu_button_route(state)
+    if menu_state is not None:
+        return menu_state
     if state.get("route_locked") and state.get("rewritten_question"):
         return state
     if state.get("rewrite_source") in LLM_AUTHORITATIVE_SOURCES and state.get("rewritten_question"):
@@ -123,6 +128,9 @@ def prepare_route_state(state: GraphState) -> GraphState:
 
 def make_rewrite_question_node(llm_rewrite_service=None, *, min_confidence: float = 0.0):
     async def node(state: GraphState) -> GraphState:
+        menu_state = _apply_menu_button_route(state)
+        if menu_state is not None:
+            return menu_state
         if state.get("route_locked") and state.get("rewritten_question"):
             return state
         if state.get("rewrite_source") in LLM_AUTHORITATIVE_SOURCES and state.get("rewritten_question"):
@@ -1504,6 +1512,118 @@ def extract_route_hints(state: GraphState) -> dict[str, Any]:
 def _extract_text(payload: dict[str, Any]) -> str:
     event = payload.get("event") or {}
     return normalize_text(event.get("text") or payload.get("text") or payload.get("message"))
+
+
+def _extract_button_id(payload: dict[str, Any]) -> str | None:
+    event = payload.get("event") or {}
+    candidates = (
+        payload.get("button_id"),
+        payload.get("postback_id"),
+        event.get("button_id") if isinstance(event, dict) else None,
+        event.get("postback_id") if isinstance(event, dict) else None,
+        ((event.get("postback") or {}).get("id") if isinstance(event.get("postback"), dict) else None) if isinstance(event, dict) else None,
+    )
+    for candidate in candidates:
+        value = normalize_text(candidate)
+        if value:
+            return value
+    return None
+
+
+def _apply_menu_button_route(state: GraphState) -> GraphState | None:
+    payload = state.get("payload_json") or {}
+    raw_text = normalize_text(state.get("raw_user_input") or _extract_text(payload))
+    slot_memory = dict(state.get("slot_memory") or {})
+    livechat_menu = dict(slot_memory.get("livechat_menu") or {})
+    context = livechat_menu.get("context")
+    button_id = _extract_button_id(payload)
+    if not button_id and context:
+        button_id = detect_button_id(
+            raw_text,
+            menu_context=context,
+            language=state.get("reply_language") or slot_memory.get("last_reply_language"),
+        )
+    if not button_id:
+        return None
+
+    current_context = context or "main"
+    slot_memory["livechat_menu"] = _next_menu_memory(livechat_menu, current_context, button_id)
+    base = {
+        **state,
+        "slot_memory": slot_memory,
+        "rewritten_question": raw_text,
+        "rewrite_result": {
+            "rewritten_question": raw_text,
+            "language": "unknown",
+            "detected_language": "unknown",
+            "language_confidence": 0.0,
+            "language_source": "livechat_button",
+            "mentioned_entities": {},
+            "notes": [f"livechat_button_id:{button_id}"],
+        },
+        "rewrite_source": "livechat_button",
+        "route_locked": True,
+    }
+
+    menu_key = _navigation_menu_key(button_id, livechat_menu)
+    if menu_key:
+        return {
+            **base,
+            "route": "final_reply",
+            "route_source": "livechat_button",
+            "intent_result": {
+                "intent": "menu_navigation",
+                "route": "final_reply",
+                "confidence": 1.0,
+                "reason": f"LiveChat menu navigation button {button_id}.",
+                "menu_key": menu_key,
+            },
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_BUTTONS,
+                    "payload": {"menu_key": menu_key},
+                }
+            ],
+        }
+
+    route = BUSINESS_BUTTON_ROUTES.get(button_id)
+    if not route:
+        return None
+    intent_result = {
+        "intent": route["intent"],
+        "route": route["route"],
+        "confidence": 1.0,
+        "reason": f"LiveChat button {button_id}.",
+        "sop_name": route.get("sop_name"),
+        "faq_query": route.get("faq_query"),
+    }
+    return {
+        **base,
+        "route": route["route"],
+        "route_source": "livechat_button",
+        "intent_result": intent_result,
+    }
+
+
+def _navigation_menu_key(button_id: str, livechat_menu: dict[str, Any]) -> str | None:
+    if button_id in MENU_BY_NAV_BUTTON:
+        return MENU_BY_NAV_BUTTON[button_id]
+    if button_id == "route_main":
+        return "main"
+    if button_id == "route_previous":
+        return str(livechat_menu.get("previous_context") or "main")
+    return None
+
+
+def _next_menu_memory(livechat_menu: dict[str, Any], context: str, button_id: str) -> dict[str, Any]:
+    if button_id in MENU_BY_NAV_BUTTON:
+        return {"context": MENU_BY_NAV_BUTTON[button_id], "previous_context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
+    if button_id == "route_main":
+        return {"context": "main", "previous_context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
+    if button_id == "route_previous":
+        previous = str(livechat_menu.get("previous_context") or "main")
+        return {"context": previous, "previous_context": "main", "intro_sent": livechat_menu.get("intro_sent", True)}
+    return {**livechat_menu, "context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
 
 
 def _extract_attachments(payload: dict[str, Any], event_type: str) -> list[dict[str, Any]]:

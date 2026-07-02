@@ -31,6 +31,12 @@ def make_event_with_text(text: str) -> InboundEvent:
     return event
 
 
+def make_event_with_button(button_id: str, text: str = "") -> InboundEvent:
+    event = make_inbound_event()
+    event.payload_json = {"event": {"type": "message", "text": text, "postback_id": button_id}}
+    return event
+
+
 def test_should_enqueue_reply_for_message_created():
     assert should_enqueue_reply(make_inbound_event()) is True
 
@@ -346,6 +352,118 @@ def test_gateway_service_processes_message_created():
     assert result["graph_state"]["llm_intent_result"] is None
     assert result["graph_state"]["rewrite_source"] == "deterministic"
     assert result["graph_state"]["route_source"] == "deterministic"
+
+
+def test_gateway_livechat_nav_button_sends_submenu_without_llm_router():
+    router_service = FakeLLMRouterService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+    )
+
+    result = asyncio.run(service.process_event(41, make_event_with_button("deposit_menu", "💰 Problemas de depósito")))
+
+    assert router_service.calls == []
+    assert result["graph_state"]["route"] == "final_reply"
+    assert result["graph_state"]["slot_memory"]["livechat_menu"]["context"] == "deposit"
+    assert result["outbound_messages"][0]["message_type"] == "buttons"
+    assert result["outbound_messages"][0]["payload_json"]["menu_key"] == "deposit"
+
+
+def test_gateway_livechat_business_button_routes_to_deposit_sop():
+    router_service = FakeLLMRouterService()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_intent_service=router_service,
+    )
+
+    result = asyncio.run(service.process_event(42, make_event_with_button("main_deposito", "🧾 Depósito no acreditado")))
+
+    assert router_service.calls == []
+    assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
+    assert result["graph_state"]["active_workflow"] == "deposit_missing"
+
+
+def test_gateway_livechat_faq_button_routes_to_faq():
+    rag_service = FakeRagService(
+        {
+            "matched": True,
+            "answer": "FAQ answer",
+            "answer_blocks": [{"type": "text", "text": "FAQ answer"}],
+            "documents": [],
+            "fallback_reason": None,
+            "source": "knowledge_documents",
+        }
+    )
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=rag_service,
+    )
+
+    result = asyncio.run(service.process_event(43, make_event_with_button("deposit_howto", "📘 Cómo recargar")))
+
+    assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
+    assert result["outbound_messages"][0]["payload_json"]["text"] == "FAQ answer"
+
+
+def test_gateway_livechat_human_button_routes_to_handoff():
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+    )
+
+    result = asyncio.run(service.process_event(44, make_event_with_button("global_human", "👤 Atención humana")))
+
+    assert result["graph_state"]["route"] == "human_handoff"
+    assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
+
+
+def test_gateway_livechat_real_new_conversation_appends_main_menu_once():
+    conversation_repository = FakeConversationRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+    )
+    event = make_event_with_text("mi deposito no llegó")
+    event.payload_json["ingress_source"] = "polling"
+
+    result = asyncio.run(service.process_event(45, event))
+
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["text", "buttons"]
+    assert result["outbound_messages"][1]["payload_json"]["menu_key"] == "main"
+    assert conversation_repository.updated[0][1]["slot_memory"]["livechat_menu"]["intro_sent"] is True
+
+
+def test_gateway_livechat_handoff_does_not_append_intro_menu():
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+    )
+    event = make_event_with_text("I want human agent")
+    event.payload_json["ingress_source"] = "polling"
+
+    result = asyncio.run(service.process_event(46, event))
+
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["text"]
 
 
 def test_gateway_service_uses_final_reply_text_for_outbound_message():
@@ -988,7 +1106,7 @@ def test_gateway_service_faq_authoritative_renders_multimodal_answer_blocks_to_o
         "livechat.send_text",
         "livechat.send_image",
         "livechat.send_text",
-        "livechat.buttons_preview",
+        "livechat.send_buttons",
     ]
     assert result["outbound_messages"][1]["payload_json"] == {
         "asset_key": "deposit_step_1",

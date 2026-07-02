@@ -7,6 +7,7 @@ class GraphState(TypedDict, total=False):
     conversation_id: str
     chat_id: str
     thread_id: str | None
+    payload_json: dict[str, Any]
 
     raw_user_input: str
     rewritten_question: str | None

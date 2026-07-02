@@ -123,7 +123,7 @@ def _message_plan(
             warnings.append("missing_asset_ref")
     elif message_kind == "buttons":
         payload = {"menu_key": block["menu_key"]}
-        command_type = "livechat.buttons_preview"
+        command_type = "livechat.send_buttons"
         stable_identity = block["menu_key"]
     else:
         raise ValueError(f"unknown preview block kind: {message_kind}")

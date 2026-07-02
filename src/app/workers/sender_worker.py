@@ -7,6 +7,7 @@ from app.channels.livechat.sender_client import LiveChatApiError, LiveChatSender
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import ConversationMessageRepository, OutboundMessageRepository, SenderTransactionRepository
+from app.services.livechat_menus import build_quick_replies_event, fallback_text, get_menu
 from app.services.message_history import build_assistant_message_from_outbound
 
 
@@ -68,14 +69,67 @@ async def process_pending_message(
 
     payload = message["payload_json"]
     message_type = message.get("message_type") or message.get("message_kind") or "text"
+    if message_type not in {"text", "image"}:
+        if message_type != "buttons":
+            result = {
+                "status": "SKIPPED_UNSUPPORTED",
+                "last_error": f"unsupported outbound message_type: {message_type}",
+                "retryable": False,
+            }
+            await outbound_repository.mark_failed(message["id"], result["status"], result["last_error"], retryable=False)
+            return result
+
     if message_type == "buttons":
-        result = {
-            "status": "SKIPPED_PREVIEW",
-            "last_error": "buttons preview is not sent by sender_worker",
-            "retryable": False,
-        }
-        await outbound_repository.mark_failed(message["id"], result["status"], result["last_error"], retryable=False)
+        try:
+            menu = _menu_for_payload(payload)
+        except Exception as exc:
+            result = {"status": "FAILED_UNKNOWN", "last_error": str(exc), "retryable": False}
+            await outbound_repository.mark_failed(message["id"], result["status"], result["last_error"], retryable=False)
+            return result
+        try:
+            response = await sender_client.send_buttons(
+                chat_id=message["chat_id"],
+                thread_id=message.get("thread_id"),
+                menu=menu,
+            )
+            outbound_for_history = {**message, "payload_json": {"text": fallback_text(menu), "menu_key": menu["menu_key"]}}
+        except Exception as exc:
+            fallback_result = await _send_buttons_fallback(sender_client, message, menu, exc)
+            if fallback_result.get("fallback_response") is None:
+                result = classify_send_error(exc)
+                await outbound_repository.mark_failed(
+                    message["id"],
+                    result["status"],
+                    result["last_error"],
+                    retryable=result["retryable"],
+                )
+                return result
+            response = fallback_result["fallback_response"]
+            outbound_for_history = {**message, "payload_json": {"text": fallback_text(menu), "menu_key": menu["menu_key"]}}
+            fallback_delivery_mode = "buttons_text_fallback"
+        else:
+            fallback_delivery_mode = None
+
+        result = classify_send_result(response)
+        if fallback_delivery_mode and result["status"] == "SENT":
+            result["delivery_mode"] = fallback_delivery_mode
+        if result["status"] == "SENT":
+            assistant_message = build_assistant_message_from_outbound(outbound_for_history)
+            if transaction_repository:
+                await transaction_repository.mark_sent_with_message(message["id"], assistant_message)
+            else:
+                await outbound_repository.mark_sent(message["id"])
+                if message_repository:
+                    await message_repository.insert_idempotent(assistant_message)
+        else:
+            await outbound_repository.mark_failed(
+                message["id"],
+                result["status"],
+                result["last_error"],
+                retryable=result["retryable"],
+            )
         return result
+
     if message_type not in {"text", "image"}:
         result = {
             "status": "SKIPPED_UNSUPPORTED",
@@ -147,6 +201,26 @@ def _image_mvp_fallback_text(payload: dict) -> str:
     if caption:
         text = f"{text}\n{caption}"
     return text
+
+
+def _menu_for_payload(payload: dict) -> dict:
+    menu = get_menu(payload.get("menu_key"), payload.get("language"))
+    return {
+        **menu,
+        "rich_message": build_quick_replies_event(menu),
+    }
+
+
+async def _send_buttons_fallback(sender_client, message: dict, menu: dict, original_exc: Exception) -> dict:
+    try:
+        response = await sender_client.send_text(
+            chat_id=message["chat_id"],
+            thread_id=message.get("thread_id"),
+            text=fallback_text(menu),
+        )
+    except Exception:
+        return {"fallback_response": None, "original_error": original_exc}
+    return {"fallback_response": response, "original_error": original_exc}
 
 
 async def process_next_batch(pool, sender_client, limit: int = 20) -> list[dict]:

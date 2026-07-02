@@ -108,7 +108,7 @@ def make_message_of_type(message_type: str, payload: dict, message_id: int = 7) 
     message["command_type"] = {
         "text": "livechat.send_text",
         "image": "livechat.send_image",
-        "buttons": "livechat.buttons_preview",
+        "buttons": "livechat.send_buttons",
     }.get(message_type, f"livechat.{message_type}")
     message["action_type"] = message["command_type"]
     message["payload_json"] = payload
@@ -276,18 +276,63 @@ def test_process_pending_message_image_uses_mvp_url_text_fallback():
     assert repository.sent == [7]
 
 
-def test_process_pending_message_buttons_preview_is_skipped_without_crashing():
+def test_process_pending_message_buttons_sends_quick_replies():
     class SenderClient:
-        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
-            raise AssertionError("buttons preview should not send")
+        def __init__(self) -> None:
+            self.sent_buttons = []
+
+        async def send_buttons(self, chat_id: str, thread_id: str | None, menu: dict) -> dict:
+            self.sent_buttons.append((chat_id, thread_id, menu))
+            return {"event_id": "event-buttons"}
 
     repository = FakeOutboundRepository()
+    client = SenderClient()
     message = make_message_of_type("buttons", {"menu_key": "deposit_menu"})
+
+    result = asyncio.run(process_pending_message(repository, client, message))
+
+    assert result["status"] == "SENT"
+    assert repository.sent == [7]
+    rich = client.sent_buttons[0][2]["rich_message"]
+    assert rich["template_id"] == "quick_replies"
+    assert rich["elements"][0]["buttons"][0]["postback_id"] == "main_deposito"
+
+
+def test_process_pending_message_buttons_falls_back_to_text_when_rich_send_fails():
+    class SenderClient:
+        def __init__(self) -> None:
+            self.sent_texts = []
+
+        async def send_buttons(self, chat_id: str, thread_id: str | None, menu: dict) -> dict:
+            raise RuntimeError("rich failed")
+
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            self.sent_texts.append(text)
+            return {"event_id": "event-fallback"}
+
+    repository = FakeOutboundRepository()
+    client = SenderClient()
+    message = make_message_of_type("buttons", {"menu_key": "deposit", "language": "en"})
+
+    result = asyncio.run(process_pending_message(repository, client, message))
+
+    assert result == {"status": "SENT", "last_error": None, "retryable": False, "delivery_mode": "buttons_text_fallback"}
+    assert repository.sent == [7]
+    assert client.sent_texts == ["Choose the deposit issue:\n\n1. 🧾 Deposit not credited\n2. 📘 How to deposit"]
+
+
+def test_process_pending_message_buttons_unknown_menu_fails_without_retry():
+    class SenderClient:
+        async def send_buttons(self, chat_id: str, thread_id: str | None, menu: dict) -> dict:
+            raise AssertionError("unknown menu should not send")
+
+    repository = FakeOutboundRepository()
+    message = make_message_of_type("buttons", {"menu_key": "missing"})
 
     result = asyncio.run(process_pending_message(repository, SenderClient(), message))
 
-    assert result["status"] == "SKIPPED_PREVIEW"
-    assert repository.failures == [(7, "SKIPPED_PREVIEW", "buttons preview is not sent by sender_worker", False)]
+    assert result["status"] == "FAILED_UNKNOWN"
+    assert repository.failures == [(7, "FAILED_UNKNOWN", "'unknown livechat menu_key: missing'", False)]
 
 
 def test_process_pending_message_unknown_type_is_skipped_unsupported():

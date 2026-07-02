@@ -483,7 +483,7 @@ def test_real_gemini_faq_smoke_send_fails_for_failed_sender_status(monkeypatch):
     assert "sender_results_not_all_send_safe" in result["warning"]
 
 
-def test_real_gemini_faq_smoke_send_allows_buttons_preview_with_warning(monkeypatch):
+def test_real_gemini_faq_smoke_send_allows_buttons_sent_without_warning(monkeypatch):
     import asyncio
 
     from app.workers import real_gemini_faq_smoke
@@ -495,14 +495,14 @@ def test_real_gemini_faq_smoke_send_allows_buttons_preview_with_warning(monkeypa
             before_statuses=["PENDING", "PENDING"],
             sender_results=[
                 {"status": "SENT", "inbound_event_id": 55},
-                {"status": "SKIPPED_PREVIEW", "inbound_event_id": 55},
+                {"status": "SENT", "inbound_event_id": 55},
             ],
-            after_statuses=["SENT", "SKIPPED_PREVIEW"],
+            after_statuses=["SENT", "SENT"],
         )
     )
 
     assert result["smoke_success"] is True
-    assert result["warning"] == "buttons preview was skipped by sender_worker"
+    assert result["warning"] is None
 
 
 def test_real_gemini_faq_smoke_send_fails_for_mismatched_sender_inbound_event(monkeypatch):

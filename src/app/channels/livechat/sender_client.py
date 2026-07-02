@@ -24,6 +24,7 @@ class LiveChatSenderClient:
         return ":" in decoded
 
     async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+        del thread_id
         body = {
             "chat_id": chat_id,
             "event": {
@@ -31,6 +32,14 @@ class LiveChatSenderClient:
                 "text": text,
                 "visibility": "all",
             },
+        }
+        return await self._post_json("/agent/action/send_event", body)
+
+    async def send_buttons(self, chat_id: str, thread_id: str | None, menu: dict) -> dict:
+        del thread_id
+        body = {
+            "chat_id": chat_id,
+            "event": menu["rich_message"],
         }
         return await self._post_json("/agent/action/send_event", body)
 

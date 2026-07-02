@@ -123,7 +123,7 @@ async def _test_llm_faq_authoritative_multimodal_mysql_smoke(monkeypatch) -> Non
             "livechat.send_text",
             "livechat.send_image",
             "livechat.send_text",
-            "livechat.buttons_preview",
+            "livechat.send_buttons",
         ]
         assert len({row["dedup_key"] for row in outbound_rows}) == 4
         assert outbound_rows[1]["payload_json"] == {
@@ -141,7 +141,7 @@ async def _test_llm_faq_authoritative_multimodal_mysql_smoke(monkeypatch) -> Non
             "SENT",
             "SENT",
             "SENT",
-            "SKIPPED_PREVIEW",
+            "SENT",
         ]
         assert sender_result[1]["delivery_mode"] == "mvp_text_fallback"
         assert sender_client.sent == [
@@ -153,6 +153,8 @@ async def _test_llm_faq_authoritative_multimodal_mysql_smoke(monkeypatch) -> Non
             },
             {"chat_id": chat_id, "thread_id": thread_id, "text": "选择可用通道后提交。"},
         ]
+        assert sender_client.sent_buttons[0]["menu"]["menu_key"] == "deposit"
+        assert sender_client.sent_buttons[0]["menu"]["rich_message"]["template_id"] == "quick_replies"
 
         status_rows = await fetch_all(
             pool,
@@ -164,8 +166,8 @@ async def _test_llm_faq_authoritative_multimodal_mysql_smoke(monkeypatch) -> Non
             """,
             (conversation_id,),
         )
-        assert [row["status"] for row in status_rows] == ["SENT", "SENT", "SENT", "SKIPPED_PREVIEW"]
-        assert status_rows[3]["last_error"] == "buttons preview is not sent by sender_worker"
+        assert [row["status"] for row in status_rows] == ["SENT", "SENT", "SENT", "SENT"]
+        assert status_rows[3]["last_error"] is None
 
         router_metadata = await fetch_router_metadata(pool, conversation_id)
         assert router_metadata["status"] == "accepted"
@@ -214,10 +216,15 @@ class RecordingFaqRouterProvider:
 class FakeSenderClient:
     def __init__(self) -> None:
         self.sent = []
+        self.sent_buttons = []
 
     async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
         self.sent.append({"chat_id": chat_id, "thread_id": thread_id, "text": text})
         return {"event_id": f"fake-event-{len(self.sent)}"}
+
+    async def send_buttons(self, chat_id: str, thread_id: str | None, menu: dict) -> dict:
+        self.sent_buttons.append({"chat_id": chat_id, "thread_id": thread_id, "menu": menu})
+        return {"event_id": f"fake-buttons-{len(self.sent_buttons)}"}
 
 
 async def fetch_router_metadata(pool, conversation_id: str) -> dict:

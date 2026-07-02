@@ -161,17 +161,15 @@ async def run(argv: list[str] | None = None) -> dict:
                     pending_before_count > 0
                     and sender_result_count == pending_before_count
                     and sender_scoped
-                    and sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}
+                    and sender_statuses <= {"SENT"}
                     and pending_after_count == 0
                 )
                 if sender_result_count < pending_before_count:
                     warnings.append("sender_limit_may_have_left_pending_outbounds")
                 if not sender_scoped:
                     warnings.append("sender_results_not_scoped_to_inbound_event")
-                if not sender_statuses <= {"SENT", "SKIPPED_PREVIEW"}:
+                if not sender_statuses <= {"SENT"}:
                     warnings.append("sender_results_not_all_send_safe")
-                if "SKIPPED_PREVIEW" in sender_statuses:
-                    warnings.append("buttons preview was skipped by sender_worker")
                 if pending_after_count:
                     warnings.append("pending_outbounds_remain_after_send")
             warning = "; ".join(warnings) if warnings else None
@@ -246,7 +244,7 @@ def _send_preflight_block_reason(
         return "no_pending_outbounds"
     if any(message.get("inbound_event_id") != inbound_event_id for message in outbound_messages):
         return "outbound_messages_not_scoped_to_inbound_event"
-    allowed_command_types = {"livechat.send_text", "livechat.send_image", "livechat.buttons_preview", None}
+    allowed_command_types = {"livechat.send_text", "livechat.send_image", "livechat.send_buttons", None}
     if any(message.get("command_type") not in allowed_command_types for message in outbound_messages):
         return "outbound_command_type_not_send_safe"
     return None

@@ -69,7 +69,7 @@ def test_build_faq_outbound_plan_maps_image_block_to_send_image():
     assert message["warnings"] == []
 
 
-def test_build_faq_outbound_plan_maps_buttons_block_to_preview_command():
+def test_build_faq_outbound_plan_maps_buttons_block_to_send_command():
     plan = build_faq_outbound_plan(
         answer_blocks=[{"type": "buttons", "menu_key": "deposit_recovery"}],
         **BASE_KWARGS,
@@ -77,7 +77,7 @@ def test_build_faq_outbound_plan_maps_buttons_block_to_preview_command():
 
     message = plan["messages"][0]
     assert message["message_kind"] == "buttons"
-    assert message["command_type"] == "livechat.buttons_preview"
+    assert message["command_type"] == "livechat.send_buttons"
     assert message["dedup_key"].endswith(":buttons:deposit_recovery")
     assert message["payload"] == {"menu_key": "deposit_recovery"}
 
