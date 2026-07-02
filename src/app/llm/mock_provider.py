@@ -49,7 +49,7 @@ class MockLLMProvider:
         text = normalize_text(payload.get("raw_user_input"))
         return {
             "intent": deterministic.get("intent") or "casual_chat",
-            "route": deterministic.get("route") or payload.get("deterministic_route") or "casual_chat",
+            "route": deterministic.get("route") or payload.get("deterministic_route") or "final_reply",
             "confidence": 0.84,
             "reason": "Mock shadow intent mirrors deterministic decision for offline validation.",
             "sop_name": deterministic.get("sop_name"),
@@ -63,7 +63,7 @@ class MockLLMProvider:
         deterministic = payload.get("deterministic_intent_result") or {}
         text = normalize_text(payload.get("raw_user_input"))
         active_workflow = payload.get("active_workflow")
-        route = deterministic.get("route") or payload.get("deterministic_route") or "casual_chat"
+        route = deterministic.get("route") or payload.get("deterministic_route") or "final_reply"
         relation = "none"
         preserve = True
         if active_workflow:
@@ -140,6 +140,7 @@ class MockLLMProvider:
             "tone": tone,
             "confidence": 0.90,
             "safety_flags": [],
+            "used_facts": [],
             "reason": "Mock final reply returns the deterministic fallback text for offline full-LLM validation.",
             "provider": self.provider_name,
             "mode": "final_reply",

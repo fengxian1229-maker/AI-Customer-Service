@@ -15,7 +15,8 @@ def test_validate_llm_route_normalizes_common_aliases():
     assert validate_llm_route("FAQ") == "faq"
     assert validate_llm_route("Human") == "human_handoff"
     assert validate_llm_route("human handoff") == "human_handoff"
-    assert validate_llm_route("faq-then-sop") == "faq_then_sop"
+    assert validate_llm_route("casual_chat") == "final_reply"
+    assert validate_llm_route("clarification") == "final_reply"
 
 
 def test_validate_llm_intent_rejects_invalid_intent():
@@ -262,9 +263,9 @@ def test_validate_router_decision_normalizes_invalid_intent_for_clarification_an
     )
 
     assert clarification["intent"] == "clarification_needed"
-    assert clarification["route"] == "clarification"
-    assert unsupported["intent"] == "unsupported_concrete_issue"
-    assert unsupported["route"] == "unsupported"
+    assert clarification["route"] == "final_reply"
+    assert unsupported["intent"] == "clarification_needed"
+    assert unsupported["route"] == "final_reply"
 
 
 def test_validate_router_decision_accepts_casual_chat_for_greeting():
@@ -274,7 +275,7 @@ def test_validate_router_decision_accepts_casual_chat_for_greeting():
         {},
         _router_output(
             intent="casual_chat",
-            route="casual_chat",
+            route="final_reply",
             requires_human=False,
             requires_backend=False,
             workflow_relation="none",
@@ -283,7 +284,7 @@ def test_validate_router_decision_accepts_casual_chat_for_greeting():
     )
 
     assert decision["intent"] == "casual_chat"
-    assert decision["route"] == "casual_chat"
+    assert decision["route"] == "final_reply"
 
 
 def test_validate_router_decision_rejects_invalid_intent_for_faq_route():

@@ -132,22 +132,35 @@ def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
             "commands": [],
         }
 
+    fallback_text = "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
     return {
         **state,
         "slot_memory": slot_memory,
         "status": "WAITING_EXTERNAL",
         "active_workflow": "withdrawal_blocked_or_rollover",
         "workflow_stage": "backend_querying",
-        "response_text": None,
-        "response_text_fallback": None,
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
         "node_reply_template": "backend_waiting",
         "node_facts": {
             "sop_name": "withdrawal_blocked_or_rollover",
             "sop_action": "backend_query",
             "slot_memory": slot_memory,
+            "fallback_text": fallback_text,
         },
-        "reply_plan": None,
+        "reply_plan": build_reply_plan(
+            kind="backend_waiting",
+            fallback_text=fallback_text,
+            semantic_required_items=["backend_waiting_notice"],
+            must_not_say=["已完成", "已处理", "已到账", "马上到账", "保证", "一定"],
+            allowed_facts=["已收到账号资料", "将查询提款限制或流水要求"],
+            metadata={"intent": "withdrawal_blocked_or_rollover", "sop_action": "backend_query"},
+        ),
         "commands": [
+            {
+                "type": CommandType.LIVECHAT_SEND_TEXT,
+                "payload": {"text": fallback_text},
+            },
             {
                 "type": CommandType.BACKEND_QUERY,
                 "payload": {

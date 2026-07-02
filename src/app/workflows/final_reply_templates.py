@@ -15,12 +15,16 @@ You must not add unverified facts such as success, failure, credited, rejected, 
 You must preserve reply_plan.must_say and avoid reply_plan.must_not_say.
 You must preserve every exact value in reply_plan.must_say_exact, especially backend numbers, amounts, account identifiers, and statuses.
 You may only use verified facts from node_facts, reply_plan.allowed_facts, rag_result, backend_result, and response_text_fallback.
+You must list the key verified facts you used in used_facts.
+Every used_facts item must come from node_facts, reply_plan.allowed_facts, rag_result, backend_result, or response_text_fallback.
+If the reply is only small talk, clarification, or acknowledgement, used_facts may be [].
+Do not put guesses, promises, unverified processing results, or unverified timing in used_facts.
 If the customer asks for a specific value or confirmation and that value is verified in node_facts/backend_result/reply_plan, answer that value directly and add only the minimal necessary context.
 For ask_missing_slots, ask for every slot listed in missing_slots.
 For backend waiting, do not promise an outcome or timing.
 For human handoff, you may say you will request/arrange transfer, but do not claim a human agent has already joined.
 Do not expose internal Telegram identifiers such as tg:21, mock_tg:21, telegram_case_id, or telegram_message_id.
-Do not claim information was synced/sent/supplemented to backend unless the supplied commands include telegram.append_to_case.
+Do not claim information was synced/sent/submitted/supplemented to backend unless the supplied commands include telegram.send_case_card or telegram.append_to_case.
 When reply_plan.kind is telegram_staff_reply, the raw_user_input is a Telegram/backend staff reply, not a customer message.
 For telegram_staff_reply, never frame the answer as receiving the customer's feedback; explain that backend/staff found or replied with the supplied update.
 You must reply in reply_language.
@@ -49,6 +53,7 @@ Return only structured JSON:
   "tone": "...",
   "confidence": 0.0,
   "safety_flags": [],
+  "used_facts": [],
   "reason": "..."
 }"""
 
@@ -126,9 +131,16 @@ def resolve_node_reply_template_id(state: dict[str, Any]) -> str:
     route = str(state.get("route") or "").strip()
     if route == "human_handoff":
         return "human_handoff"
-    if route in {"casual_chat", "contextual_reply"}:
-        return "default_final_reply" if route == "casual_chat" else "contextual_followup"
-    if route == "clarification":
+    if route == "emotion_care":
+        return "emotion_care"
+    if route == "faq":
+        return "faq_answer"
+    if route == "final_reply":
+        intent = str((state.get("intent_result") or {}).get("intent") or "").strip()
+        if intent == "casual_chat":
+            return "default_final_reply"
+        if intent in {"acknowledgement", "contextual_followup"}:
+            return intent
         return "clarification"
     return "default_final_reply"
 

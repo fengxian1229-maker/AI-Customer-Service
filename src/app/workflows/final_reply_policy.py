@@ -23,6 +23,11 @@ UNVERIFIED_BACKEND_FACT_PHRASES = (
     "refunded",
 )
 
+UNVERIFIED_TIME_COMMITMENT_PATTERN = re.compile(
+    r"(24\s*小时|24\s*小時|几分钟|幾分鐘|马上|立即|今天内|今天內|tomorrow|within\s+\d+\s+hours|\bsoon\b)",
+    re.I,
+)
+
 SEMANTIC_ALIASES = {
     "account_or_phone": {
         "zh-Hans": ("用户名", "注册手机号", "账号", "手机号"),
@@ -128,7 +133,10 @@ HUMAN_HANDOFF_FORBIDDEN_PROMISES = (
 )
 
 INTERNAL_TELEGRAM_IDENTIFIER_PATTERN = re.compile(r"\b(?:tg|mock_tg):\d+\b|telegram_message_id|telegram_case_id", re.I)
-BACKEND_SYNC_CLAIM_PATTERN = re.compile(r"(已同步|同步至|同步给后台|已补充给后台|補充給後台|已補充給後台|sent to backend|synced to backend)", re.I)
+BACKEND_SYNC_CLAIM_PATTERN = re.compile(
+    r"(已同步|同步至|同步给后台|已提交后台|提交给后台|已补充给后台|補充給後台|已補充給後台|sent to backend|synced to backend)",
+    re.I,
+)
 STAFF_REPLY_CUSTOMER_FEEDBACK_PATTERN = re.compile(r"(收到|感谢|感謝).{0,8}(您|你|客户|客戶).{0,8}(反馈|反饋|回复|回覆)|your feedback|customer feedback", re.I)
 
 
@@ -179,6 +187,7 @@ def accepted_result(output: dict[str, Any]) -> dict[str, Any]:
         "tone": output.get("tone"),
         "confidence": float(output.get("confidence") or 0.0),
         "safety_flags": list(output.get("safety_flags") or []),
+        "used_facts": list(output.get("used_facts") or []),
         "reason": output.get("reason"),
     }
 
@@ -222,7 +231,10 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
     if INTERNAL_TELEGRAM_IDENTIFIER_PATTERN.search(text):
         violations.append("internal_telegram_identifier")
 
-    if BACKEND_SYNC_CLAIM_PATTERN.search(text) and not _has_append_to_case_command(state, plan):
+    if UNVERIFIED_TIME_COMMITMENT_PATTERN.search(text):
+        violations.append("unverified_time_commitment")
+
+    if BACKEND_SYNC_CLAIM_PATTERN.search(text) and not _has_backend_sync_command(state, plan):
         violations.append("unverified_backend_sync_claim")
 
     if plan.get("kind") == "telegram_staff_reply" and STAFF_REPLY_CUSTOMER_FEEDBACK_PATTERN.search(text):
@@ -248,6 +260,9 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
     for fact in plan.get("staff_reply_key_facts") or []:
         if fact and str(fact).lower() not in lowered:
             violations.append("staff_reply_key_fact_missing")
+
+    used_fact_violations = _validate_used_facts(state, output)
+    violations.extend(used_fact_violations)
 
     return sorted(set(violations))
 
@@ -298,10 +313,69 @@ def _is_verified_staff_backend_fact(phrase: str, plan: dict[str, Any]) -> bool:
     return False
 
 
-def _has_append_to_case_command(state: dict[str, Any], plan: dict[str, Any]) -> bool:
-    if plan.get("kind") == "append_backend_case":
+def _validate_used_facts(state: dict[str, Any], output: dict[str, Any]) -> list[str]:
+    violations: list[str] = []
+    used_facts = output.get("used_facts") or []
+    if not isinstance(used_facts, list):
+        return ["invalid_used_facts"]
+    allowed_pool = _allowed_fact_pool(state)
+    allowed_text = "\n".join(allowed_pool).lower()
+    for raw_fact in used_facts:
+        fact = str(raw_fact or "").strip()
+        if not fact:
+            continue
+        fact_lower = fact.lower()
+        if not any(fact_lower in allowed or allowed in fact_lower for allowed in allowed_pool if allowed):
+            violations.append("unverified_used_fact")
+        if UNVERIFIED_TIME_COMMITMENT_PATTERN.search(fact) and fact_lower not in allowed_text:
+            violations.append("unverified_time_commitment")
+        if BACKEND_SYNC_CLAIM_PATTERN.search(fact) and not _has_backend_sync_command(state, state.get("reply_plan") or {}):
+            violations.append("unverified_backend_sync_claim")
+        for value in _critical_values(fact):
+            if value.lower() not in allowed_text:
+                violations.append("unverified_used_fact")
+    return violations
+
+
+def _allowed_fact_pool(state: dict[str, Any]) -> list[str]:
+    plan = state.get("reply_plan") or {}
+    values: list[str] = []
+    values.extend(str(item) for item in plan.get("allowed_facts") or [] if item)
+    values.append(str(plan.get("fallback_text") or ""))
+    values.append(str(state.get("response_text_fallback") or ""))
+    for key in ("node_facts", "rag_result", "backend_result"):
+        values.extend(_flatten_fact_values(state.get(key)))
+    return [value.lower() for value in values if str(value).strip()]
+
+
+def _flatten_fact_values(value: Any, prefix: str = "") -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (str, int, float, bool)):
+        text = str(value)
+        return [text, f"{prefix}={text}"] if prefix else [text]
+    if isinstance(value, dict):
+        result: list[str] = []
+        for key, item in value.items():
+            next_prefix = f"{prefix}.{key}" if prefix else str(key)
+            result.extend(_flatten_fact_values(item, next_prefix))
+        return result
+    if isinstance(value, (list, tuple)):
+        result: list[str] = []
+        for item in value:
+            result.extend(_flatten_fact_values(item, prefix))
+        return result
+    return [str(value)]
+
+
+def _critical_values(text: str) -> list[str]:
+    return re.findall(r"\b\d+(?:\.\d+)?\b|[A-Za-z]{1,6}\d{4,}\b|\b\d{7,}\b", text)
+
+
+def _has_backend_sync_command(state: dict[str, Any], plan: dict[str, Any]) -> bool:
+    if plan.get("kind") in {"append_backend_case", "send_backend_case"}:
         return True
     for command in state.get("commands") or []:
-        if str(command.get("type")) == "telegram.append_to_case":
+        if str(command.get("type")) in {"telegram.append_to_case", "telegram.send_case_card"}:
             return True
     return False

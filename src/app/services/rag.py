@@ -36,16 +36,7 @@ DEFAULT_KNOWLEDGE_DOCUMENTS = [
         "keywords": ["how to deposit", "deposit", "recargar", "cómo recargar", "como recargar", "如何充值", "充值"],
         "language": "multi",
         "priority": 10,
-    },
-    {
-        "id": 2,
-        "tenant_id": "default",
-        "kb_scope": "default",
-        "title": "奖金规则说明",
-        "content": "奖金规则以活动页面说明为准，请确认活动条件、有效投注要求和领取期限。",
-        "keywords": ["bonus", "bonus rules", "promotion", "bono", "奖金", "活动规则"],
-        "language": "multi",
-        "priority": 20,
+        "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
     },
     {
         "id": 3,
@@ -56,6 +47,7 @@ DEFAULT_KNOWLEDGE_DOCUMENTS = [
         "keywords": ["how to withdraw", "withdrawal howto", "cómo retirar", "como retirar", "cómo puedo retirar", "retiro", "如何提款"],
         "language": "multi",
         "priority": 12,
+        "metadata_json": {"intent_id": "withdrawal_howto", "is_canonical": True},
     },
     {
         "id": 4,
@@ -66,6 +58,7 @@ DEFAULT_KNOWLEDGE_DOCUMENTS = [
         "keywords": ["forgot password", "olvidé mi contraseña", "olvide mi contraseña", "忘记密码"],
         "language": "multi",
         "priority": 14,
+        "metadata_json": {"intent_id": "forgot_password_howto", "is_canonical": True},
     },
     {
         "id": 5,
@@ -76,26 +69,7 @@ DEFAULT_KNOWLEDGE_DOCUMENTS = [
         "keywords": ["upload screenshot", "subir captura", "enviar screenshot", "上传截图"],
         "language": "multi",
         "priority": 16,
-    },
-    {
-        "id": 6,
-        "tenant_id": "default",
-        "kb_scope": "default",
-        "title": "流水要求说明",
-        "content": "流水要求通常与活动规则或提款条件有关。具体账户是否满足条件需要进一步查询，FAQ只提供一般说明。",
-        "keywords": ["rollover explanation", "what is rollover", "qué es rollover", "que es rollover", "流水"],
-        "language": "multi",
-        "priority": 18,
-    },
-    {
-        "id": 7,
-        "tenant_id": "default",
-        "kb_scope": "default",
-        "title": "菜单导航帮助",
-        "content": "如果你看不到菜单，请先确认已正确登录，并在首页或个人中心查找充值、提款或客服入口。",
-        "keywords": ["menu help", "no veo ningun menu", "no veo ningún menú", "where is menu", "菜单"],
-        "language": "multi",
-        "priority": 22,
+        "metadata_json": {"intent_id": "screenshot_upload_howto", "is_canonical": True},
     },
 ]
 

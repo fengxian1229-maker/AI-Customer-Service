@@ -69,6 +69,9 @@ def test_workflow_graph_omits_legacy_signal_and_continue_nodes(monkeypatch):
 
     assert "signal_judgement_node" not in calls["nodes"]
     assert "continue_workflow_node" not in calls["nodes"]
+    assert "contextual_reply_node" not in calls["nodes"]
+    assert "casual_chat_node" not in calls["nodes"]
+    assert "clarification_node" not in calls["nodes"]
     assert ("rewrite_question_node", "language_policy_node") in calls["edges"]
     assert ("language_policy_node", "intent_router_node") in calls["edges"]
     assert ("final_reply_node", "command_planner_node") in calls["edges"]
@@ -122,8 +125,8 @@ def test_workflow_graph_rag_route_returns_knowledge_answer_without_placeholder_c
 
     assert result["intent_result"]["intent"] == "deposit_howto"
     assert result["route"] == "faq"
-    assert result["rag_result"]["matched"] is False
-    assert "暂时没有在知识库中找到" in result["response_text"]
+    assert result["rag_result"]["matched"] is True
+    assert "充值页面" in result["response_text"]
     assert [str(command["type"]) for command in result["commands"]] == ["livechat.send_text"]
 
 
@@ -148,7 +151,7 @@ def test_workflow_graph_non_canonical_question_asks_for_clarification_without_ra
         )
     )
 
-    assert result["route"] == "clarification"
+    assert result["route"] == "final_reply"
     assert result.get("rag_result") is None
     assert "请补充" in result["response_text"]
     assert [str(command["type"]) for command in result["commands"]] == ["livechat.send_text"]

@@ -5,13 +5,9 @@ from pydantic import BaseModel, ConfigDict, Field
 LLMRouteLiteral = Literal[
     "faq",
     "sop",
-    "faq_then_sop",
     "human_handoff",
     "emotion_care",
-    "clarification",
-    "contextual_reply",
-    "casual_chat",
-    "unsupported",
+    "final_reply",
 ]
 
 
@@ -191,6 +187,7 @@ class LLMFinalReplyOutput(TypedDict, total=False):
     tone: str
     confidence: float
     safety_flags: list[str]
+    used_facts: list[str]
     reason: str
     provider: str
     mode: str
@@ -290,4 +287,5 @@ class LLMFinalReplySchema(BaseModel):
     tone: str = "neutral"
     confidence: float = 0.0
     safety_flags: list[str] = Field(default_factory=list)
+    used_facts: list[str] = Field(default_factory=list)
     reason: str

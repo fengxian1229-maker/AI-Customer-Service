@@ -82,9 +82,9 @@ def test_intent_router_node_routes_bot66tornado_samples():
         ("mi deposito no llegó", "deposit_missing", "sop"),
         ("Cómo puedo retirar", "withdrawal_howto", "faq"),
         ("Nunca me pagaron el retiro", "withdrawal_missing", "sop"),
-        ("No puedo retirar", "withdrawal_blocked_or_rollover", "faq_then_sop"),
+        ("No puedo retirar", "withdrawal_blocked_or_rollover", "sop"),
         ("Tengo un caso anterior", "pending_reply_lookup", "sop"),
-        ("no veo ningun menu", "clarification_needed", "clarification"),
+        ("no veo ningun menu", "clarification_needed", "final_reply"),
         ("Todo el tiempo lo mismo", "service_frustration", "human_handoff"),
         ("Problemas técnicos del juego", "unsupported_concrete_issue", "human_handoff"),
     ]
@@ -160,10 +160,12 @@ def test_active_workflow_acknowledgement_routes_to_contextual_reply_without_sop_
         }
     )
 
-    assert result["route"] == "contextual_reply"
+    assert result["route"] == "final_reply"
     assert result["intent_result"]["intent"] == "acknowledgement"
     assert result["intent_result"]["workflow_relation"] == "acknowledgement"
     assert result["intent_result"]["preserve_active_workflow"] is True
+    assert result["node_reply_template"] == "acknowledgement"
+    assert result["reply_plan"]["kind"] == "acknowledgement"
 
 
 def test_active_workflow_name_offer_routes_to_contextual_followup():
@@ -177,10 +179,12 @@ def test_active_workflow_name_offer_routes_to_contextual_followup():
         }
     )
 
-    assert result["route"] == "contextual_reply"
+    assert result["route"] == "final_reply"
     assert result["intent_result"]["intent"] == "contextual_followup"
     assert result["intent_result"]["workflow_relation"] == "contextual_followup"
     assert result["intent_result"]["preserve_active_workflow"] is True
+    assert result["node_reply_template"] == "contextual_followup"
+    assert result["reply_plan"]["kind"] == "contextual_followup"
 
 
 def test_active_collecting_workflow_allows_independent_faq_without_clearing_workflow():
@@ -211,9 +215,11 @@ def test_active_collecting_workflow_new_sop_request_asks_before_switching():
         }
     )
 
-    assert result["route"] == "clarification"
+    assert result["route"] == "final_reply"
     assert result["intent_result"]["workflow_relation"] == "new_workflow_request"
     assert result["active_workflow"] == "deposit_missing"
+    assert result["node_reply_template"] == "clarification"
+    assert result["reply_plan"]["kind"] == "clarification"
 
 
 def test_active_withdrawal_workflow_deposit_resolution_is_not_current_supplement():
@@ -226,15 +232,17 @@ def test_active_withdrawal_workflow_deposit_resolution_is_not_current_supplement
         }
     )
 
-    assert result["route"] == "clarification"
+    assert result["route"] == "final_reply"
     assert result["intent_result"]["workflow_relation"] == "new_workflow_request"
 
 
 def test_without_active_workflow_greeting_routes_to_casual_chat():
     result = intent_router_node({"raw_user_input": "hello, how are you?", "rewritten_question": "hello, how are you?"})
 
-    assert result["route"] == "casual_chat"
+    assert result["route"] == "final_reply"
     assert result["intent_result"]["intent"] == "casual_chat"
+    assert result["node_reply_template"] == "default_final_reply"
+    assert result["reply_plan"]["kind"] == "casual_chat"
 
 
 def test_llm_intent_invalid_active_workflow_switch_falls_back_to_deterministic_faq():

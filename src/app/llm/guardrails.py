@@ -8,13 +8,9 @@ from app.workflows.sop_definitions import get_sop_definition
 ALLOWED_LLM_ROUTES = (
     "faq",
     "sop",
-    "faq_then_sop",
     "human_handoff",
     "emotion_care",
-    "clarification",
-    "contextual_reply",
-    "casual_chat",
-    "unsupported",
+    "final_reply",
 )
 
 CANONICAL_FAQ_INTENTS = (
@@ -153,15 +149,16 @@ def normalize_llm_route(route: str) -> str:
     route_aliases = {
         "sop": "sop",
         "faq": "faq",
-        "clarification": "clarification",
-        "contextual_reply": "contextual_reply",
-        "casual_chat": "casual_chat",
-        "unsupported": "unsupported",
+        "clarification": "final_reply",
+        "contextual_reply": "final_reply",
+        "casual_chat": "final_reply",
+        "unsupported": "final_reply",
+        "final": "final_reply",
+        "final reply": "final_reply",
+        "final_reply": "final_reply",
         "human": "human_handoff",
         "human handoff": "human_handoff",
         "human_handoff": "human_handoff",
-        "faq then sop": "faq_then_sop",
-        "faq_then_sop": "faq_then_sop",
     }
     return route_aliases.get(normalized, normalized)
 
@@ -198,14 +195,14 @@ def normalize_router_decision_intent(intent: str, route: str, requires_human: bo
         return normalized
     if route == "human_handoff" and requires_human:
         return "explicit_human_request"
-    if route == "clarification":
+    if route == "final_reply" and normalized in {"clarification", "clarification_needed", "unsupported", "unsupported_concrete_issue"}:
         return "clarification_needed"
-    if route == "contextual_reply":
+    if route == "final_reply" and normalized in {"contextual_reply", "contextual_followup"}:
         return "contextual_followup"
-    if route == "casual_chat":
+    if route == "final_reply" and normalized == "casual_chat":
         return "casual_chat"
-    if route == "unsupported":
-        return "unsupported_concrete_issue"
+    if route == "final_reply":
+        return "clarification_needed"
     raise ValueError(f"Unsupported llm intent: {normalized or intent}")
 
 
@@ -359,10 +356,14 @@ def _validate_intent_classification_contract(payload: dict[str, Any], output: di
             raise ValueError("SOP route for backend workflows must set requires_backend=true.")
     if route == "human_handoff" and not output.get("requires_human"):
         raise ValueError("human_handoff route must set requires_human=true.")
-    if route == "contextual_reply" and intent not in {"acknowledgement", "contextual_followup"}:
-        raise ValueError("contextual_reply route requires acknowledgement or contextual_followup intent.")
-    if route == "casual_chat" and intent != "casual_chat":
-        raise ValueError("casual_chat route requires casual_chat intent.")
+    if route == "final_reply" and intent not in {
+        "acknowledgement",
+        "contextual_followup",
+        "casual_chat",
+        "clarification_needed",
+        "unsupported_concrete_issue",
+    }:
+        raise ValueError("final_reply route requires a final-reply intent.")
     if not active_workflow:
         return
     if relation == "current_workflow_supplement":
@@ -393,7 +394,7 @@ def _validate_intent_classification_contract(payload: dict[str, Any], output: di
         if not output.get("preserve_active_workflow"):
             raise ValueError("independent_faq must preserve active workflow.")
     elif relation == "new_workflow_request":
-        if route != "clarification" or intent != "clarification_needed":
+        if route != "final_reply" or intent != "clarification_needed":
             raise ValueError("new_workflow_request must ask clarification before switching workflow.")
         if not output.get("preserve_active_workflow"):
             raise ValueError("new_workflow_request must preserve active workflow.")
@@ -401,18 +402,18 @@ def _validate_intent_classification_contract(payload: dict[str, Any], output: di
         if route != "human_handoff":
             raise ValueError("human_escalation requires route=human_handoff.")
     elif relation == "acknowledgement":
-        if route != "contextual_reply" or intent != "acknowledgement":
-            raise ValueError("acknowledgement requires contextual_reply route.")
+        if route != "final_reply" or intent != "acknowledgement":
+            raise ValueError("acknowledgement requires final_reply route.")
         if not output.get("preserve_active_workflow"):
             raise ValueError("acknowledgement must preserve active workflow.")
     elif relation == "contextual_followup":
-        if route != "contextual_reply" or intent != "contextual_followup":
-            raise ValueError("contextual_followup requires contextual_reply route.")
+        if route != "final_reply" or intent != "contextual_followup":
+            raise ValueError("contextual_followup requires final_reply route.")
         if not output.get("preserve_active_workflow"):
             raise ValueError("contextual_followup must preserve active workflow.")
     elif relation == "unclear":
-        if route != "clarification":
-            raise ValueError("unclear workflow relation requires route=clarification.")
+        if route != "final_reply":
+            raise ValueError("unclear workflow relation requires route=final_reply.")
         if not output.get("preserve_active_workflow"):
             raise ValueError("unclear workflow relation must preserve active workflow.")
 

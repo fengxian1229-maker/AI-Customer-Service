@@ -254,13 +254,13 @@ def test_rag_service_does_not_match_legacy_static_faq_questions():
         assert context["documents"] == []
 
 
-def test_static_fallback_does_not_return_legacy_default_knowledge_documents():
+def test_static_fallback_returns_canonical_default_knowledge_documents():
     result = answer_from_static_knowledge({"raw_user_input": "如何充值"})
     documents = search_static_knowledge("default", "如何充值")
 
-    assert result["matched"] is False
-    assert "你可以在充值页面选择可用通道" not in result["answer"]
-    assert documents == []
+    assert result["matched"] is True
+    assert "你可以在充值页面选择可用通道" in result["answer"]
+    assert documents[0]["metadata_json"] == {"intent_id": "deposit_howto", "is_canonical": True}
 
 
 def test_rag_service_retrieve_prefers_llm_faq_query_then_normalized_query():
@@ -449,9 +449,34 @@ def test_rag_service_matches_multilingual_static_queries():
     spanish = asyncio.run(service.answer({"tenant_id": "default", "raw_user_input": "cómo recargar"}))
     chinese = asyncio.run(service.answer({"tenant_id": "default", "raw_user_input": "如何充值"}))
 
-    assert english["matched"] is False
-    assert spanish["matched"] is False
-    assert chinese["matched"] is False
+    assert english["matched"] is True
+    assert spanish["matched"] is True
+    assert chinese["matched"] is True
+
+
+def test_static_knowledge_retrieves_all_four_canonical_faq_intents():
+    service = RagService()
+    cases = [
+        ("如何充值", "deposit_howto"),
+        ("如何提款", "withdrawal_howto"),
+        ("忘记密码", "forgot_password_howto"),
+        ("如何上传截图", "screenshot_upload_howto"),
+    ]
+
+    for query, intent in cases:
+        context = asyncio.run(
+            service.retrieve(
+                {
+                    "tenant_id": "default",
+                    "raw_user_input": query,
+                    "intent_result": {"intent": intent, "faq_intent": intent, "faq_query": query},
+                }
+            )
+        )
+
+        assert context["matched"] is True
+        assert context["faq_intent"] == intent
+        assert context["documents"][0]["metadata_json"] == {"intent_id": intent, "is_canonical": True}
 
 
 def test_rank_knowledge_document_prefers_exact_title_match():
@@ -636,5 +661,5 @@ def test_rag_service_returns_text_block_for_legacy_document():
 def test_answer_from_rag_context_without_context_uses_static_fallback():
     result = answer_from_rag_context({"raw_user_input": "如何充值"})
 
-    assert result["matched"] is False
-    assert result["fallback_reason"] == "no_match"
+    assert result["matched"] is True
+    assert result["fallback_reason"] is None

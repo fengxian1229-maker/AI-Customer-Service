@@ -110,7 +110,7 @@ def test_withdrawal_missing_does_not_generate_case_card_with_order_amount_and_ch
     assert state["response_text"] == "请提供用户名或注册手机号，并上传提款截图。"
 
 
-def test_withdrawal_blocked_or_rollover_generates_backend_query_and_no_tg():
+def test_withdrawal_blocked_or_rollover_generates_waiting_reply_and_backend_query_no_tg():
     state = run_sop(
         {
             "intent_result": {"intent": "withdrawal_blocked_or_rollover"},
@@ -121,10 +121,15 @@ def test_withdrawal_blocked_or_rollover_generates_backend_query_and_no_tg():
     )
 
     command_types = [command["type"] for command in state["commands"]]
-    assert command_types == [CommandType.BACKEND_QUERY]
+    assert command_types == [CommandType.LIVECHAT_SEND_TEXT, CommandType.BACKEND_QUERY]
     assert CommandType.TELEGRAM_SEND_CASE_CARD not in command_types
+    assert state["response_text"] == "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
+    assert state["response_text_fallback"] == "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。"
     assert state["node_reply_template"] == "backend_waiting"
     assert state["node_facts"]["sop_name"] == "withdrawal_blocked_or_rollover"
+    assert state["reply_plan"]["kind"] == "backend_waiting"
+    unsafe = "已完成 / 已处理 / 保证 / 马上到账 / 一定"
+    assert all(token not in state["response_text"] for token in unsafe.split(" / "))
 
 
 def test_withdrawal_blocked_or_rollover_missing_account_sets_sop_template_facts():

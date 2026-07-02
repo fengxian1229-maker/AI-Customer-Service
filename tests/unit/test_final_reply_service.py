@@ -198,6 +198,107 @@ def test_final_reply_service_payload_preserves_backend_context():
     assert provider.calls[0]["rewritten_question"] == "刚才提到的账户 3239413629 的剩余流水金额是多少？"
 
 
+def test_final_reply_service_accepts_used_facts_from_backend_result():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "后台查询显示剩余流水约为 1375.09。",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.93,
+            "safety_flags": [],
+            "used_facts": ["remaining_turnover=1375.09"],
+            "reason": "used verified backend number",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                response_text="后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
+                response_text_fallback="后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
+                backend_result={"answer": "查询完成", "query": {"remaining_turnover": 1375.09}},
+                reply_plan={
+                    "kind": "backend_query_result",
+                    "fallback_text": "后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
+                    "must_say_exact": ["1375.09"],
+                    "allowed_facts": ["remaining_turnover=1375.09"],
+                },
+            )
+        )
+    )
+
+    assert result["final_reply_result"]["status"] == "accepted"
+    assert result["final_reply_result"]["used_facts"] == ["remaining_turnover=1375.09"]
+
+
+def test_final_reply_service_rejects_unverified_time_commitment_in_used_facts():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "我会为你查询，24小时内处理。",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.93,
+            "safety_flags": [],
+            "used_facts": ["24小时内处理"],
+            "reason": "invented time",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                response_text="已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。",
+                response_text_fallback="已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。",
+                reply_plan={
+                    "kind": "backend_waiting",
+                    "fallback_text": "已收到你的账号资料，我会为你查询提款限制或流水要求，请稍等。",
+                    "allowed_facts": ["已收到账号资料", "将查询提款限制或流水要求"],
+                },
+            )
+        )
+    )
+
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert "unverified_used_fact" in result["final_reply_result"]["violations"]
+    assert "unverified_time_commitment" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_service_rejects_backend_sync_claim_without_command_even_in_used_facts():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "已提交后台，请稍等。",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.93,
+            "safety_flags": [],
+            "used_facts": ["已提交后台"],
+            "reason": "invented sync",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                response_text="请稍等，我们会继续协助确认。",
+                response_text_fallback="请稍等，我们会继续协助确认。",
+                reply_plan={
+                    "kind": "backend_waiting",
+                    "fallback_text": "请稍等，我们会继续协助确认。",
+                    "allowed_facts": ["继续协助确认"],
+                },
+                commands=[],
+            )
+        )
+    )
+
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert "unverified_backend_sync_claim" in result["final_reply_result"]["violations"]
+    assert "unverified_used_fact" in result["final_reply_result"]["violations"]
+
+
 def test_final_reply_service_falls_back_when_provider_raises():
     provider = FakeFinalReplyProvider(error=RuntimeError("model down"))
     service = FinalReplyService(provider=provider, enabled=True)
@@ -402,8 +503,8 @@ def test_final_reply_service_rejects_internal_telegram_case_id():
     )
     service = FinalReplyService(provider=provider, enabled=True)
     state = base_state(
-        route="contextual_reply",
-        intent_result={"intent": "acknowledgement", "route": "contextual_reply"},
+        route="final_reply",
+        intent_result={"intent": "acknowledgement", "route": "final_reply"},
         active_workflow="withdrawal_missing",
         workflow_stage="waiting_backend",
         response_text="收到，案件仍在确认中，有更新会在这里通知你。",
@@ -435,8 +536,8 @@ def test_final_reply_service_rejects_backend_sync_claim_without_append_command()
     )
     service = FinalReplyService(provider=provider, enabled=True)
     state = base_state(
-        route="contextual_reply",
-        intent_result={"intent": "acknowledgement", "route": "contextual_reply"},
+        route="final_reply",
+        intent_result={"intent": "acknowledgement", "route": "final_reply"},
         active_workflow="withdrawal_missing",
         workflow_stage="waiting_backend",
         response_text="收到，案件仍在确认中，有更新会在这里通知你。",

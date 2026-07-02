@@ -279,7 +279,7 @@ def test_gemini_provider_route_accepts_casual_chat_for_greeting(monkeypatch):
         async def ainvoke(self, payload):
             return {
                 "intent": "casual_chat",
-                "route": "casual_chat",
+                "route": "final_reply",
                 "confidence": 0.95,
                 "requires_human": False,
                 "requires_backend": False,
@@ -298,7 +298,7 @@ def test_gemini_provider_route_accepts_casual_chat_for_greeting(monkeypatch):
 
     result = asyncio.run(provider.route({"raw_user_input": "你好", "router_mode": "guarded_authoritative"}))
 
-    assert result["route"] == "casual_chat"
+    assert result["route"] == "final_reply"
     assert result["intent"] == "casual_chat"
 
 
@@ -337,10 +337,10 @@ def test_gemini_provider_guarded_prompt_allows_casual_chat_for_greetings():
     from app.llm.gemini_provider import GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
     assert "- casual_chat" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
-    assert "- contextual_reply" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    assert "- final_reply" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
     assert "- casual_chat" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT.split("Allowed intents", 1)[1]
     assert "without a service request" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
-    assert "use route: casual_chat and intent: casual_chat" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    assert "use route: final_reply and intent: casual_chat" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
     assert "你好，我想提款" not in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
 

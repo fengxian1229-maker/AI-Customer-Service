@@ -2,7 +2,7 @@ import re
 
 from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
 from app.graph.builder import build_workflow_graph
-from app.graph.nodes import build_graph_state_from_event, prepare_route_state
+from app.graph.nodes import build_graph_state_from_event, prepare_route_state, _prepare_final_reply_state
 from app.llm.contracts import LLMIntentClassificationInput, LLMIntentShadowInput, LLMRewriteShadowInput, LLMSopSlotExtractionInput
 from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output
 from app.schemas.events import InboundEvent
@@ -58,12 +58,14 @@ class GatewayService:
         rag_service=None,
         llm_rewrite_service=None,
         llm_intent_service=None,
+        llm_router_mode: str | None = None,
         llm_rewrite_shadow_enabled: bool = False,
         llm_rewrite_fallback_enabled: bool = False,
         llm_intent_shadow_enabled: bool = False,
         llm_intent_fallback_enabled: bool = False,
         llm_intent_min_confidence: float = 0.75,
         llm_intent_fallback_to_deterministic: bool = True,
+        llm_router_fallback_to_deterministic: bool | None = None,
         llm_sop_slot_service=None,
         llm_sop_slot_enabled: bool = False,
         llm_sop_slot_min_confidence: float = 0.70,
@@ -95,13 +97,21 @@ class GatewayService:
         self.checkpoint_run_repository = checkpoint_run_repository
         self.checkpoint_mode = checkpoint_mode
         self.rag_service = rag_service
-        self.llm_rewrite_service = llm_rewrite_service
-        self.llm_intent_service = llm_intent_service
+        self.llm_router_mode = str(llm_router_mode or "guarded_authoritative").lower()
+        legacy_shadow_only_rewrite = bool(llm_rewrite_shadow_enabled and not llm_rewrite_fallback_enabled)
+        legacy_shadow_only_intent = bool(llm_intent_shadow_enabled and not llm_intent_fallback_enabled)
+        deterministic_router = self.llm_router_mode == "deterministic"
+        self.llm_rewrite_service = None if deterministic_router or legacy_shadow_only_rewrite else llm_rewrite_service
+        self.llm_intent_service = None if deterministic_router or legacy_shadow_only_intent else llm_intent_service
+        self._configured_llm_rewrite_service = llm_rewrite_service
+        self._configured_llm_intent_service = llm_intent_service
         self.llm_rewrite_shadow_enabled = llm_rewrite_shadow_enabled
         self.llm_rewrite_fallback_enabled = llm_rewrite_fallback_enabled
         self.llm_intent_shadow_enabled = llm_intent_shadow_enabled
         self.llm_intent_fallback_enabled = llm_intent_fallback_enabled
         self.llm_intent_min_confidence = float(llm_intent_min_confidence)
+        if llm_router_fallback_to_deterministic is not None:
+            llm_intent_fallback_to_deterministic = llm_router_fallback_to_deterministic
         self.llm_intent_fallback_to_deterministic = bool(llm_intent_fallback_to_deterministic)
         self.llm_sop_slot_service = llm_sop_slot_service
         self.llm_sop_slot_enabled = bool(llm_sop_slot_enabled)
@@ -133,6 +143,7 @@ class GatewayService:
             language_persist_to_slot_memory=self.language_persist_to_slot_memory,
             llm_intent_min_confidence=self.llm_intent_min_confidence,
             llm_intent_fallback_to_deterministic=self.llm_intent_fallback_to_deterministic,
+            llm_router_mode=self.llm_router_mode,
             llm_sop_slot_enabled=self.llm_sop_slot_enabled,
             llm_sop_slot_min_confidence=self.llm_sop_slot_min_confidence,
             llm_sop_slot_fallback_to_deterministic=self.llm_sop_slot_fallback_to_deterministic,
@@ -408,14 +419,12 @@ class GatewayService:
         mode = sanitized_raw.get("mode") or "guarded_authoritative"
         if decision["confidence"] < self.llm_intent_min_confidence:
             return self._router_fallback_state(deterministic_state, "low_confidence", decision=decision, provider=provider, mode=mode)
-        if decision["route"] == "unsupported":
-            return self._router_fallback_state(deterministic_state, "unsupported_route", decision=decision, provider=provider, mode=mode)
         if decision["route"] == "faq" and (decision["requires_backend"] or self._contains_backend_fact_signal(deterministic_state)):
             return self._router_fallback_state(deterministic_state, "backend_fact_guard", decision=decision, provider=provider, mode=mode)
         if decision["requires_human"] and decision["route"] != "human_handoff":
             return self._router_fallback_state(deterministic_state, "human_guard", decision=decision, provider=provider, mode=mode)
 
-        return {
+        routed_state = {
             **deterministic_state,
             "intent_result": {
                 "intent": decision["intent"],
@@ -437,13 +446,19 @@ class GatewayService:
                 mode=mode,
             ),
         }
+        if decision["route"] == "final_reply":
+            kind = decision.get("workflow_relation") if decision.get("workflow_relation") in {"acknowledgement", "contextual_followup"} else None
+            if not kind:
+                kind = "casual_chat" if decision["intent"] == "casual_chat" else "clarification"
+            return _prepare_final_reply_state(routed_state, str(kind))
+        return routed_state
 
     def _router_hard_guard_reason(self, graph_state: dict) -> str | None:
         if graph_state.get("event_type") == "FILE_RECEIVED" and not normalize_text(graph_state.get("raw_user_input")):
             return "file_without_text"
         if is_explicit_human_request(graph_state.get("raw_user_input")):
             return "explicit_human_request"
-        if graph_state.get("route") in {"sop", "faq_then_sop"}:
+        if graph_state.get("route") == "sop":
             return "deterministic_sop"
         if graph_state.get("route") in {"human_handoff", "emotion_care"}:
             return "deterministic_human"
@@ -466,15 +481,15 @@ class GatewayService:
         hard_guard: str | None = None,
     ) -> dict:
         if not self.llm_intent_fallback_to_deterministic and hard_guard is None:
-            return {
+            return _prepare_final_reply_state({
                 **deterministic_state,
                 "intent_result": {
                     "intent": "clarification_needed",
-                    "route": "clarification",
+                    "route": "final_reply",
                     "confidence": 0.0,
                     "reason": "Guarded-authoritative router failed and deterministic fallback is disabled.",
                 },
-                "route": "clarification",
+                "route": "final_reply",
                 "route_source": "llm_guarded_authoritative",
                 "llm_router_result": self._router_result_summary(
                     status="fallback",
@@ -486,7 +501,7 @@ class GatewayService:
                     error_message=str(exc) if exc else None,
                     fallback_to_deterministic=False,
                 ),
-            }
+            }, "clarification")
         state = dict(deterministic_state)
         if hard_guard == "backend_fact" and state.get("route") == "faq":
             state.update(

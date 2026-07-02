@@ -300,10 +300,9 @@ def intent_router_node(state: GraphState) -> GraphState:
         return _with_route(
             state,
             "withdrawal_blocked_or_rollover",
-            "faq_then_sop",
-            "Withdrawal restriction or rollover questions need explanation first, then SOP.",
+            "sop",
+            "Withdrawal restriction or rollover questions require SOP handling.",
             sop_name="withdrawal_blocked_or_rollover",
-            faq_query=text,
         )
     if _is_deposit_howto(lower):
         return _with_route(state, "deposit_howto", "faq", "Deposit how-to is a FAQ/manual question.", faq_query=text)
@@ -314,14 +313,14 @@ def intent_router_node(state: GraphState) -> GraphState:
     if _is_screenshot_upload_howto(lower, hints):
         return _with_route(state, "screenshot_upload_howto", "faq", "Screenshot upload instructions are FAQ/manual content.", faq_query=text)
     if _is_menu_help(lower, hints):
-        return _with_route(state, "clarification_needed", "clarification", "Menu recovery is outside canonical FAQ.")
+        return _final_reply_route(state, "clarification_needed", "Menu recovery is outside canonical FAQ.", kind="clarification")
     if state.get("event_type") == "FILE_RECEIVED":
-        return _with_route(state, "clarification_needed", "clarification", "File upload without a clear issue needs clarification.")
+        return _final_reply_route(state, "clarification_needed", "File upload without a clear issue needs clarification.", kind="clarification")
     if _is_casual_chat(state):
-        return _with_route(state, "casual_chat", "casual_chat", "Non-business greeting or small talk.", confidence=0.82)
+        return _final_reply_route(state, "casual_chat", "Non-business greeting or small talk.", confidence=0.82, kind="casual_chat")
     if text:
-        return _with_route(state, "clarification_needed", "clarification", "Question is outside canonical FAQ targets.", confidence=0.55)
-    return _with_route(state, "clarification_needed", "clarification", "No clear question content provided.", confidence=0.2)
+        return _final_reply_route(state, "clarification_needed", "Question is outside canonical FAQ targets.", confidence=0.55, kind="clarification")
+    return _final_reply_route(state, "clarification_needed", "No clear question content provided.", confidence=0.2, kind="clarification")
 
 
 def make_intent_router_node(
@@ -329,6 +328,7 @@ def make_intent_router_node(
     *,
     llm_intent_min_confidence: float = 0.70,
     llm_intent_fallback_to_deterministic: bool = True,
+    llm_router_mode: str = "guarded_authoritative",
 ):
     min_confidence = float(llm_intent_min_confidence)
     fallback_to_deterministic = bool(llm_intent_fallback_to_deterministic)
@@ -356,7 +356,7 @@ def make_intent_router_node(
         if not llm_intent_service or not hasattr(llm_intent_service, "route"):
             return _router_fallback_state(state, "missing_provider", "guarded_authoritative", fallback_to_deterministic)
 
-        payload = _build_llm_router_payload(state)
+        payload = {**_build_llm_router_payload(state), "router_mode": llm_router_mode}
         try:
             raw_result = await llm_intent_service.route(payload)
             raw = dict(raw_result or {})
@@ -413,14 +413,20 @@ def make_intent_router_node(
             "workflow_relation": decision.get("workflow_relation"),
             "preserve_active_workflow": decision.get("preserve_active_workflow"),
         }
-        route = "clarification" if decision["route"] == "unsupported" else decision["route"]
-        return {
+        route = "final_reply" if decision["route"] == "unsupported" else decision["route"]
+        next_state = {
             **state,
             "intent_result": intent_result,
             "llm_router_result": _router_result_summary("accepted", decision=decision, provider=provider, mode=mode),
             "route": route,
             "route_source": "llm_guarded_authoritative",
         }
+        if route == "final_reply":
+            kind = decision.get("workflow_relation") if decision.get("workflow_relation") in {"acknowledgement", "contextual_followup"} else None
+            if not kind:
+                kind = "casual_chat" if decision["intent"] == "casual_chat" else "clarification"
+            return _prepare_final_reply_state(next_state, str(kind))
+        return next_state
 
     return node
 
@@ -452,7 +458,7 @@ def rag_node(state: GraphState) -> GraphState:
         "reply_plan": build_reply_plan(
             kind="faq_answer",
             fallback_text=fallback_text,
-            must_say=[fallback_text] if fallback_text else [],
+            must_say=[],
             must_not_say=["已到账", "已完成", "已退款", "保证到账", "手续费全免"],
             allowed_facts=[fallback_text] if fallback_text else [],
         ),
@@ -562,57 +568,6 @@ def emotion_care_node(state: GraphState) -> GraphState:
         "commands": [],
     }
 
-
-def contextual_reply_node(state: GraphState) -> GraphState:
-    relation = (state.get("intent_result") or {}).get("workflow_relation")
-    if relation == "contextual_followup":
-        return _contextual_followup_state(state)
-    return _acknowledgement_state(state)
-
-
-def casual_chat_node(state: GraphState) -> GraphState:
-    fallback_text = _casual_reply_text(str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans"))
-    return {
-        **state,
-        "response_text": fallback_text,
-        "response_text_fallback": fallback_text,
-        "node_reply_template": "default_final_reply",
-        "node_facts": {
-            "fallback_text": fallback_text,
-            "supported_topics": ["存款", "提款", "流水", "截图", "真人客服"],
-        },
-        "reply_plan": build_reply_plan(
-            kind="casual_chat",
-            fallback_text=fallback_text,
-            must_not_say=["已到账", "已完成", "已处理", "已同步", "tg:"],
-            allowed_facts=["用户发送非业务闲聊或问候"],
-        ),
-        "commands": [],
-    }
-
-
-def clarification_node(state: GraphState) -> GraphState:
-    fallback_text = "请补充你要咨询的问题，或说明是存款、提款、流水还是需要真人客服。"
-    return {
-        **state,
-        "response_text": fallback_text,
-        "response_text_fallback": fallback_text,
-        "node_reply_template": "clarification",
-        "node_facts": {
-            "fallback_text": fallback_text,
-            "supported_topics": ["存款", "提款", "流水", "真人客服"],
-        },
-        "reply_plan": build_reply_plan(
-            kind="clarification",
-            fallback_text=fallback_text,
-            must_say=["存款", "提款", "流水", "真人客服"],
-            must_not_say=["已到账", "已完成", "已处理"],
-            allowed_facts=["需要客户补充问题类型"],
-        ),
-        "commands": [],
-    }
-
-
 def command_planner_node(state: GraphState) -> GraphState:
     commands = list(state.get("commands") or [])
     text = state.get("final_response_text") or state.get("response_text")
@@ -630,46 +585,6 @@ def command_planner_node(state: GraphState) -> GraphState:
                 },
             )
     return {**state, "commands": commands}
-
-
-def _acknowledgement_state(state: GraphState) -> GraphState:
-    fallback_text = _acknowledgement_reply_text(state)
-    return {
-        **state,
-        "sop_action": "acknowledgement",
-        "response_text": fallback_text,
-        "response_text_fallback": fallback_text,
-        "node_reply_template": "acknowledgement",
-        "node_facts": {"fallback_text": fallback_text, "workflow_relation": "acknowledgement"},
-        "reply_plan": build_reply_plan(
-            kind="acknowledgement",
-            fallback_text=fallback_text,
-            must_not_say=["已到账", "已完成", "已处理", "已同步", "已补充给后台", "tg:"],
-            allowed_facts=[fallback_text],
-            metadata={"workflow_relation": "acknowledgement"},
-        ),
-        "commands": [],
-    }
-
-
-def _contextual_followup_state(state: GraphState) -> GraphState:
-    fallback_text = _contextual_followup_reply_text(state)
-    return {
-        **state,
-        "sop_action": "contextual_followup",
-        "response_text": fallback_text,
-        "response_text_fallback": fallback_text,
-        "node_reply_template": "contextual_followup",
-        "node_facts": {"fallback_text": fallback_text, "workflow_relation": "contextual_followup"},
-        "reply_plan": build_reply_plan(
-            kind="contextual_followup",
-            fallback_text=fallback_text,
-            must_not_say=["已到账", "已完成", "已处理", "已同步", "已补充给后台", "tg:"],
-            allowed_facts=[fallback_text],
-            metadata={"workflow_relation": "contextual_followup"},
-        ),
-        "commands": [],
-    }
 
 
 def persist_state_node(state: GraphState) -> GraphState:
@@ -749,26 +664,93 @@ def _with_route(
     }
 
 
+def _final_reply_route(
+    state: GraphState,
+    intent: str,
+    reason: str,
+    confidence: float = 0.9,
+    *,
+    workflow_relation: str | None = None,
+    preserve_active_workflow: bool | None = None,
+    kind: str,
+) -> GraphState:
+    next_state = _with_route(
+        state,
+        intent,
+        "final_reply",
+        reason,
+        confidence=confidence,
+        workflow_relation=workflow_relation,
+        preserve_active_workflow=preserve_active_workflow,
+    )
+    return _prepare_final_reply_state(next_state, kind)
+
+
+def _prepare_final_reply_state(state: GraphState, kind: str) -> GraphState:
+    if kind == "acknowledgement":
+        fallback_text = _acknowledgement_reply_text(state)
+        template = "acknowledgement"
+        must_not_say = ["已到账", "已完成", "已处理", "已同步", "已补充给后台", "tg:"]
+        allowed_facts = [fallback_text]
+    elif kind == "contextual_followup":
+        fallback_text = _contextual_followup_reply_text(state)
+        template = "contextual_followup"
+        must_not_say = ["已到账", "已完成", "已处理", "已同步", "已补充给后台", "tg:"]
+        allowed_facts = [fallback_text]
+    elif kind == "casual_chat":
+        fallback_text = _casual_reply_text(str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans"))
+        template = "default_final_reply"
+        must_not_say = ["已到账", "已完成", "已处理", "已同步", "tg:"]
+        allowed_facts = ["用户发送非业务闲聊或问候"]
+    else:
+        fallback_text = "请补充你要咨询的问题，或说明是存款、提款、流水还是需要真人客服。"
+        template = "clarification"
+        kind = "clarification"
+        must_not_say = ["已到账", "已完成", "已处理"]
+        allowed_facts = ["需要客户补充问题类型"]
+
+    return {
+        **state,
+        "response_text": fallback_text,
+        "response_text_fallback": fallback_text,
+        "node_reply_template": template,
+        "node_facts": {
+            "fallback_text": fallback_text,
+            "workflow_relation": (state.get("intent_result") or {}).get("workflow_relation"),
+            "supported_topics": ["存款", "提款", "流水", "截图", "真人客服"],
+        },
+        "reply_plan": build_reply_plan(
+            kind=kind,
+            fallback_text=fallback_text,
+            must_say=["存款", "提款", "流水", "真人客服"] if kind == "clarification" else [],
+            must_not_say=must_not_say,
+            allowed_facts=allowed_facts,
+            metadata={"workflow_relation": (state.get("intent_result") or {}).get("workflow_relation")},
+        ),
+        "commands": [],
+    }
+
+
 def _active_workflow_deterministic_route(state: GraphState, active_workflow: str) -> GraphState:
     if _is_acknowledgement(state):
-        return _with_route(
+        return _final_reply_route(
             state,
             "acknowledgement",
-            "contextual_reply",
             "Customer acknowledged the previous message; preserve active workflow without SOP side effects.",
             confidence=0.88,
             workflow_relation="acknowledgement",
             preserve_active_workflow=True,
+            kind="acknowledgement",
         )
     if _is_contextual_followup(state):
-        return _with_route(
+        return _final_reply_route(
             state,
             "contextual_followup",
-            "contextual_reply",
             "Customer asks a context-dependent follow-up about the active workflow requirements.",
             confidence=0.86,
             workflow_relation="contextual_followup",
             preserve_active_workflow=True,
+            kind="contextual_followup",
         )
     faq = _is_independent_faq_during_workflow(state)
     if faq:
@@ -783,24 +765,24 @@ def _active_workflow_deterministic_route(state: GraphState, active_workflow: str
             preserve_active_workflow=True,
         )
     if _is_cross_workflow_business_object(state, active_workflow):
-        return _with_route(
+        return _final_reply_route(
             state,
             "clarification_needed",
-            "clarification",
             "Message mentions a different business object than the active workflow; ask before changing state.",
             confidence=0.78,
             workflow_relation="new_workflow_request",
             preserve_active_workflow=True,
+            kind="clarification",
         )
     if _is_new_workflow_request(state, active_workflow):
-        return _with_route(
+        return _final_reply_route(
             state,
             "clarification_needed",
-            "clarification",
             "New SOP-like request during active workflow; ask whether to switch workflow before changing state.",
             confidence=0.78,
             workflow_relation="new_workflow_request",
             preserve_active_workflow=True,
+            kind="clarification",
         )
     if _is_current_workflow_supplement(state, active_workflow):
         return _with_route(
@@ -813,14 +795,14 @@ def _active_workflow_deterministic_route(state: GraphState, active_workflow: str
             workflow_relation="current_workflow_supplement",
             preserve_active_workflow=True,
         )
-    return _with_route(
+    return _final_reply_route(
         state,
         "clarification_needed",
-        "clarification",
         "Message relation to the active workflow is unclear.",
         confidence=0.55,
         workflow_relation="unclear",
         preserve_active_workflow=True,
+        kind="clarification",
     )
 
 
@@ -985,17 +967,17 @@ def _router_fallback_state(
     if fallback_to_deterministic:
         next_state = intent_router_node(state)
     else:
-        next_state = {
+        next_state = _prepare_final_reply_state({
             **state,
             "intent_result": {
                 "intent": "clarification_needed",
-                "route": "clarification",
+                "route": "final_reply",
                 "confidence": 0.0,
                 "reason": "LLM intent classifier failed and deterministic fallback is disabled.",
             },
-            "route": "clarification",
+            "route": "final_reply",
             "route_source": "llm_guarded_authoritative",
-        }
+        }, "clarification")
     next_state["llm_router_result"] = _router_result_summary(
         "fallback",
         decision=decision,

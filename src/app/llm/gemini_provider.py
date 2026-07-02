@@ -113,13 +113,9 @@ You must not promise that anything was processed, credited, successful, or faile
 Allowed routes. The route field must be exactly one of these values:
 - faq
 - sop
-- faq_then_sop
 - human_handoff
 - emotion_care
-- clarification
-- contextual_reply
-- casual_chat
-- unsupported
+- final_reply
 
 {ALLOWED_INTENT_CONTRACT}
 
@@ -133,13 +129,13 @@ Routing rules:
 - For user wording like "I just registered and want to put money into my account to start playing", use route: faq, intent: deposit_howto, faq_query: 怎么存款.
 - For deposit/recharge/top-up/cash-in status, missing funds, payment not credited, or "I paid but it did not arrive", use route: sop and intent: deposit_missing.
 - For withdrawal not received, use route: sop and intent: withdrawal_missing.
-- For unable to withdraw, insufficient rollover/流水, checking whether rollover/流水 is enough, or asking to query rollover/流水, use route: sop or faq_then_sop and intent: withdrawal_blocked_or_rollover.
+- For unable to withdraw, insufficient rollover/流水, checking whether rollover/流水 is enough, or asking to query rollover/流水, use route: sop and intent: withdrawal_blocked_or_rollover.
 - For requests to check the previous case, prior reply, pending handling, or last ticket, use route: sop and intent: pending_reply_lookup.
 - For account, order, payment, balance, deposit status, withdrawal status, or other backend fact-like requests, prefer SOP/human/backend-safe handling and set requires_backend: true when backend facts are needed.
 - For escalation, take-over requests, specialist review requests, or cases where automated replies are not helping, use route: human_handoff, intent: explicit_human_request, requires_human: true.
 - If the customer explicitly asks for a human, route must be human_handoff.
-- For simple greetings or small talk without a service request, such as 你好, 您好, hi, or hello, use route: casual_chat and intent: casual_chat.
-- If no route is safe because the message is too ambiguous, use route: clarification and intent: clarification_needed.
+- For simple greetings or small talk without a service request, such as 你好, 您好, hi, or hello, use route: final_reply and intent: casual_chat.
+- If no route is safe because the message is too ambiguous, use route: final_reply and intent: clarification_needed.
 
 Workflow relation rules:
 - Always set workflow_relation and preserve_active_workflow.
@@ -147,13 +143,13 @@ Workflow relation rules:
 - If active_workflow is present, do not assume every new message must continue SOP.
 - When active_workflow is present, classify the latest message relation to the current workflow:
   - current_workflow_supplement: the user is supplying account, phone, amount, order ID, screenshot/proof, payment channel, or concrete follow-up details for the current SOP. Use route: sop, intent: active_workflow, sop_name: active_workflow.
-  - acknowledgement: the user only acknowledges or thanks, such as OK, 好的, 明白, 收到, thanks. Use route: contextual_reply, intent: acknowledgement, preserve_active_workflow: true. Do not treat this as a supplement.
-  - contextual_followup: the user asks a question about the current requested information or whether another detail can substitute, such as "May I provide my name?". Use route: contextual_reply, intent: contextual_followup, preserve_active_workflow: true.
+  - acknowledgement: the user only acknowledges or thanks, such as OK, 好的, 明白, 收到, thanks. Use route: final_reply, intent: acknowledgement, preserve_active_workflow: true. Do not treat this as a supplement.
+  - contextual_followup: the user asks a question about the current requested information or whether another detail can substitute, such as "May I provide my name?". Use route: final_reply, intent: contextual_followup, preserve_active_workflow: true.
   - current_workflow_resolution: the user says the current active SOP is solved, arrived, credited, received, fixed, or no longer needs checking. Use route: sop, intent: active_workflow, sop_name: active_workflow, requires_backend: false, preserve_active_workflow: false.
   - independent_faq: the user temporarily asks a standalone FAQ. Use route: faq, canonical FAQ intent, faq_query, requires_backend: false, requires_human: false, preserve_active_workflow: true.
-  - new_workflow_request: the user raises a different new SOP issue or mentions a different business object unrelated to the current workflow. Use route: clarification, intent: clarification_needed, preserve_active_workflow: true. Do not switch workflows directly.
+  - new_workflow_request: the user raises a different new SOP issue or mentions a different business object unrelated to the current workflow. Use route: final_reply, intent: clarification_needed, preserve_active_workflow: true. Do not switch workflows directly.
   - human_escalation: the user explicitly asks for a human/manager/real support. Use route: human_handoff, intent: explicit_human_request, requires_human: true.
-  - unclear: relation to the current workflow is unclear. Use route: clarification, intent: clarification_needed, preserve_active_workflow: true.
+  - unclear: relation to the current workflow is unclear. Use route: final_reply, intent: clarification_needed, preserve_active_workflow: true.
 - If the business object conflicts with active_workflow, never output current_workflow_supplement or current_workflow_resolution. Example: active_workflow=withdrawal_missing but latest_user_text says deposit/deposito/存款; this is new_workflow_request unless the user explicitly says they meant the withdrawal case.
 - Never clear, replace, or switch active_workflow. The system owns workflow state.
 
@@ -161,15 +157,15 @@ Examples when active_workflow=deposit_missing:
 - "账号 abc123" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_supplement, preserve_active_workflow: true.
 - "金额1000" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_supplement, preserve_active_workflow: true.
 - "截图发给你了" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_supplement, preserve_active_workflow: true.
-- "好的" -> route: contextual_reply, intent: acknowledgement, workflow_relation: acknowledgement, preserve_active_workflow: true.
-- "May I provide my name?" -> route: contextual_reply, intent: contextual_followup, workflow_relation: contextual_followup, preserve_active_workflow: true.
+- "好的" -> route: final_reply, intent: acknowledgement, workflow_relation: acknowledgement, preserve_active_workflow: true.
+- "May I provide my name?" -> route: final_reply, intent: contextual_followup, workflow_relation: contextual_followup, preserve_active_workflow: true.
 - "ya llegó el depósito" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_resolution, preserve_active_workflow: false, requires_backend: false.
 - "怎么提款？" -> route: faq, intent: withdrawal_howto, faq_query: 如何提款, workflow_relation: independent_faq, preserve_active_workflow: true.
-- "我还有一笔提款没到账" -> route: clarification, intent: clarification_needed, workflow_relation: new_workflow_request, preserve_active_workflow: true.
+- "我还有一笔提款没到账" -> route: final_reply, intent: clarification_needed, workflow_relation: new_workflow_request, preserve_active_workflow: true.
 - "我要人工" -> route: human_handoff, intent: explicit_human_request, workflow_relation: human_escalation, requires_human: true.
 
 Example when active_workflow=withdrawal_missing:
-- "Gracias.. ya llego el deposito" -> route: clarification, intent: clarification_needed, workflow_relation: new_workflow_request, preserve_active_workflow: true. Reason: the user mentions deposito/deposit while the active workflow is withdrawal_missing, so it must not be treated as a withdrawal case supplement.
+- "Gracias.. ya llego el deposito" -> route: final_reply, intent: clarification_needed, workflow_relation: new_workflow_request, preserve_active_workflow: true. Reason: the user mentions deposito/deposit while the active workflow is withdrawal_missing, so it must not be treated as a withdrawal case supplement.
 
 Return only structured JSON matching the schema."""
 

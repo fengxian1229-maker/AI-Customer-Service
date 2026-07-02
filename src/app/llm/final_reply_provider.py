@@ -42,6 +42,7 @@ class FinalReplyLLMProvider:
             "tone": result.get("tone") or "neutral",
             "confidence": float(result.get("confidence") or 0.0),
             "safety_flags": list(result.get("safety_flags") or []),
+            "used_facts": list(result.get("used_facts") or []),
             "reason": result.get("reason") or "",
             "provider": self.provider_name,
             "mode": "final_reply",
