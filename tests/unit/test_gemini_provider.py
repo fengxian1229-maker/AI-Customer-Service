@@ -271,6 +271,37 @@ def test_gemini_provider_route_uses_prompt_and_mode_from_router_mode(monkeypatch
     ]
 
 
+def test_gemini_provider_route_accepts_casual_chat_for_greeting(monkeypatch):
+    from app.core.settings import Settings
+    from app.llm.gemini_provider import GeminiLLMProvider
+
+    class FakeStructuredModel:
+        async def ainvoke(self, payload):
+            return {
+                "intent": "casual_chat",
+                "route": "casual_chat",
+                "confidence": 0.95,
+                "requires_human": False,
+                "requires_backend": False,
+                "missing_slots": [],
+                "workflow_relation": "none",
+                "preserve_active_workflow": True,
+                "reason": "The user only says hello.",
+            }
+
+    class FakeModel:
+        def with_structured_output(self, schema=None, method=None):
+            return FakeStructuredModel()
+
+    monkeypatch.setattr("app.llm.gemini_provider.build_gemini_chat_model", lambda settings: FakeModel())
+    provider = GeminiLLMProvider(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
+
+    result = asyncio.run(provider.route({"raw_user_input": "你好", "router_mode": "guarded_authoritative"}))
+
+    assert result["route"] == "casual_chat"
+    assert result["intent"] == "casual_chat"
+
+
 def test_gemini_provider_faq_targets_are_limited_to_canonical_howto_intents():
     from app.llm.gemini_provider import (
         FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT,
@@ -299,6 +330,18 @@ def test_gemini_provider_faq_targets_are_limited_to_canonical_howto_intents():
     ):
         assert banned not in FAQ_KNOWLEDGE_TARGETS
         assert banned not in FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+        assert banned not in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
+
+def test_gemini_provider_guarded_prompt_allows_casual_chat_for_greetings():
+    from app.llm.gemini_provider import GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
+    assert "- casual_chat" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    assert "- contextual_reply" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    assert "- casual_chat" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT.split("Allowed intents", 1)[1]
+    assert "without a service request" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    assert "use route: casual_chat and intent: casual_chat" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    assert "你好，我想提款" not in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
 
 def test_gemini_provider_guarded_prompt_keeps_sop_boundary_rules_out_of_faq_targets():

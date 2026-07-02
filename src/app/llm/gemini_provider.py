@@ -72,22 +72,13 @@ FAQ_KNOWLEDGE_TARGETS = """FAQ knowledge targets. For FAQ route, choose the clos
    - intent: screenshot_upload_howto
    - faq_query: 上传截图
    - Use for: how to upload/send screenshot or proof image.
-
-5. 流水说明
-   - route: faq
-   - intent: rollover_explanation
-   - faq_query: 流水说明
-   - Use for: what rollover/流水 means, wagering requirement explanation, turnover explanation.
 """
 
 ALLOWED_INTENT_CONTRACT = """Allowed intents. The intent field must be exactly one of these values. Do not invent, translate, rename, or paraphrase intent names:
-- faq_general
 - deposit_howto
 - withdrawal_howto
 - forgot_password_howto
 - screenshot_upload_howto
-- rollover_explanation
-- menu_help
 - deposit_missing
 - withdrawal_missing
 - withdrawal_blocked_or_rollover
@@ -99,6 +90,9 @@ ALLOWED_INTENT_CONTRACT = """Allowed intents. The intent field must be exactly o
 - abusive_or_emotional
 - unsupported_concrete_issue
 - clarification_needed
+- acknowledgement
+- contextual_followup
+- casual_chat
 - backend_fact_like
 """
 
@@ -123,6 +117,8 @@ Allowed routes. The route field must be exactly one of these values:
 - human_handoff
 - emotion_care
 - clarification
+- contextual_reply
+- casual_chat
 - unsupported
 
 {ALLOWED_INTENT_CONTRACT}
@@ -142,6 +138,7 @@ Routing rules:
 - For account, order, payment, balance, deposit status, withdrawal status, or other backend fact-like requests, prefer SOP/human/backend-safe handling and set requires_backend: true when backend facts are needed.
 - For escalation, take-over requests, specialist review requests, or cases where automated replies are not helping, use route: human_handoff, intent: explicit_human_request, requires_human: true.
 - If the customer explicitly asks for a human, route must be human_handoff.
+- For simple greetings or small talk without a service request, such as 你好, 您好, hi, or hello, use route: casual_chat and intent: casual_chat.
 - If no route is safe because the message is too ambiguous, use route: clarification and intent: clarification_needed.
 
 Workflow relation rules:
@@ -168,7 +165,6 @@ Examples when active_workflow=deposit_missing:
 - "May I provide my name?" -> route: contextual_reply, intent: contextual_followup, workflow_relation: contextual_followup, preserve_active_workflow: true.
 - "ya llegó el depósito" -> route: sop, intent: deposit_missing, sop_name: deposit_missing, workflow_relation: current_workflow_resolution, preserve_active_workflow: false, requires_backend: false.
 - "怎么提款？" -> route: faq, intent: withdrawal_howto, faq_query: 如何提款, workflow_relation: independent_faq, preserve_active_workflow: true.
-- "流水是什么意思？" -> route: faq, intent: rollover_explanation, faq_query: 流水说明, workflow_relation: independent_faq, preserve_active_workflow: true.
 - "我还有一笔提款没到账" -> route: clarification, intent: clarification_needed, workflow_relation: new_workflow_request, preserve_active_workflow: true.
 - "我要人工" -> route: human_handoff, intent: explicit_human_request, workflow_relation: human_escalation, requires_human: true.
 
@@ -177,7 +173,9 @@ Example when active_workflow=withdrawal_missing:
 
 Return only structured JSON matching the schema."""
 
-ROUTER_SYSTEM_PROMPT = GUARDED_AUTHORITATIVE_INTENT_CLASSIFIER_SYSTEM_PROMPT
+GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT = GUARDED_AUTHORITATIVE_INTENT_CLASSIFIER_SYSTEM_PROMPT
+FAQ_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT = GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+ROUTER_SYSTEM_PROMPT = GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
 SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT = """You are a SOP slot extraction node for a customer service system.
 
@@ -267,10 +265,11 @@ class GeminiLLMProvider:
         )
         response = await structured_model.ainvoke(_build_chat_messages(ROUTER_SYSTEM_PROMPT, payload))
         result = validate_router_decision_output(payload, _model_dump(response))
+        mode = str(payload.get("router_mode") or "guarded_authoritative")
         return {
             **result,
             "provider": self.provider_name,
-            "mode": "guarded_authoritative",
+            "mode": mode,
         }
 
     async def extract_sop_slots(self, payload: LLMSopSlotExtractionInput) -> LLMSopSlotExtractionOutput:

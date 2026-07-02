@@ -22,7 +22,6 @@ CANONICAL_FAQ_INTENTS = (
     "withdrawal_howto",
     "forgot_password_howto",
     "screenshot_upload_howto",
-    "rollover_explanation",
 )
 
 WORKFLOW_RELATIONS_WITH_ACTIVE = (
@@ -45,10 +44,7 @@ SOP_INTENTS = (
 )
 
 ALLOWED_LLM_INTENTS = (
-    "faq_general",
     *CANONICAL_FAQ_INTENTS,
-    "rollover_explanation",
-    "menu_help",
     "deposit_missing",
     "withdrawal_missing",
     "withdrawal_blocked_or_rollover",

@@ -34,6 +34,21 @@ def test_validate_llm_intent_normalizes_common_aliases():
     assert validate_llm_intent("withdraw") == "withdrawal_howto"
 
 
+def test_validate_llm_intent_rejects_unbacked_future_intents():
+    from app.llm.guardrails import validate_llm_intent
+
+    for intent in ("faq_general", "menu_help", "rollover_explanation"):
+        with pytest.raises(ValueError, match="Unsupported llm intent"):
+            validate_llm_intent(intent)
+
+
+def test_canonical_faq_intents_match_rag_allowed_intents():
+    from app.llm.guardrails import CANONICAL_FAQ_INTENTS
+    from app.services.rag import ALLOWED_FAQ_INTENTS
+
+    assert set(CANONICAL_FAQ_INTENTS) == ALLOWED_FAQ_INTENTS
+
+
 def _router_output(**overrides):
     output = {
         "rewritten_question": "I need a real support agent",
@@ -226,6 +241,25 @@ def test_validate_router_decision_normalizes_invalid_intent_for_clarification_an
     assert clarification["route"] == "clarification"
     assert unsupported["intent"] == "unsupported_concrete_issue"
     assert unsupported["route"] == "unsupported"
+
+
+def test_validate_router_decision_accepts_casual_chat_for_greeting():
+    from app.llm.guardrails import validate_router_decision_output
+
+    decision = validate_router_decision_output(
+        {},
+        _router_output(
+            intent="casual_chat",
+            route="casual_chat",
+            requires_human=False,
+            requires_backend=False,
+            workflow_relation="none",
+            reason="The user only says hello.",
+        ),
+    )
+
+    assert decision["intent"] == "casual_chat"
+    assert decision["route"] == "casual_chat"
 
 
 def test_validate_router_decision_rejects_invalid_intent_for_faq_route():
