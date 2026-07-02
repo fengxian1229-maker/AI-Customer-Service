@@ -12,6 +12,7 @@ from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import ConversationRepository, ExternalCommandRepository, ExternalCommandResultRepository
 from app.services.backend_query_service import BackendQueryService
+from app.services.pending_reply_lookup import PendingReplyLookupService
 from app.services.telegram_case_card import build_telegram_case_append, build_telegram_case_card
 from app.services.telegram_target_resolver import resolve_telegram_target
 from app.backends.factory import BackendProviderFactory
@@ -33,7 +34,10 @@ logger = logging.getLogger(__name__)
 HUMAN_HANDOFF_NOTICE_TEXT = "我会为你转接真人客服继续协助。"
 HUMAN_HANDOFF_COMMAND_TYPE = "human_handoff.requested"
 HUMAN_HANDOFF_RESULT_TYPE = "human_handoff.transfer_chat.result"
-NO_EXECUTION_MODE_ERROR = "must pass either --dry-run or --execute-human-handoff or --execute-telegram or --execute-backend"
+NO_EXECUTION_MODE_ERROR = (
+    "must pass either --dry-run or --execute-human-handoff, --execute-telegram, "
+    "--execute-backend, or --execute-pending-reply-lookup"
+)
 FAILED_AFTER_EXTERNAL_SUCCESS = "FAILED_AFTER_EXTERNAL_SUCCESS"
 
 
@@ -82,9 +86,11 @@ async def process_pending_commands(
     execute_human_handoff: bool = False,
     execute_telegram: bool = False,
     execute_backend: bool = False,
+    execute_pending_reply_lookup: bool = False,
     settings: Settings | None = None,
     sender_client_factory=None,
     telegram_client_factory=None,
+    pending_reply_lookup_service=None,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
@@ -94,6 +100,7 @@ async def process_pending_commands(
         execute_human_handoff=execute_human_handoff,
         execute_telegram=execute_telegram,
         execute_backend=execute_backend,
+        execute_pending_reply_lookup=execute_pending_reply_lookup,
     )
     if emit_result and result_repository is None:
         raise ValueError("result_repository is required when emit_result=True")
@@ -123,9 +130,11 @@ async def process_pending_commands(
                     execute_human_handoff=execute_human_handoff,
                     execute_telegram=execute_telegram,
                     execute_backend=execute_backend,
+                    execute_pending_reply_lookup=execute_pending_reply_lookup,
                     settings=settings,
                     sender_client_factory=sender_client_factory,
                     telegram_client_factory=telegram_client_factory,
+                    pending_reply_lookup_service=pending_reply_lookup_service,
                     max_retries=max_retries,
                 )
             results.append(item)
@@ -163,9 +172,11 @@ async def _process_real_command(
     execute_human_handoff: bool,
     execute_telegram: bool,
     execute_backend: bool,
+    execute_pending_reply_lookup: bool,
     settings: Settings | None,
     sender_client_factory,
     telegram_client_factory,
+    pending_reply_lookup_service,
     max_retries: int = 3,
 ) -> dict:
     command_type = command["command_type"]
@@ -187,7 +198,18 @@ async def _process_real_command(
             result_repository=result_repository,
             emit_result=emit_result,
             execute_backend=execute_backend,
+            execute_pending_reply_lookup=execute_pending_reply_lookup,
             settings=settings,
+            max_retries=max_retries,
+        )
+    if command_type == "pending_reply.lookup":
+        return await _process_real_pending_reply_lookup_command(
+            command,
+            repository=repository,
+            result_repository=result_repository,
+            emit_result=emit_result,
+            execute_pending_reply_lookup=execute_pending_reply_lookup,
+            pending_reply_lookup_service=pending_reply_lookup_service,
             max_retries=max_retries,
         )
     if command_type != HUMAN_HANDOFF_COMMAND_TYPE:
@@ -432,13 +454,61 @@ async def _process_real_backend_query_command(
     return item
 
 
+async def _process_real_pending_reply_lookup_command(
+    command: dict,
+    repository: ExternalCommandRepository,
+    result_repository: ExternalCommandResultRepository | None,
+    emit_result: bool,
+    execute_pending_reply_lookup: bool,
+    pending_reply_lookup_service,
+    max_retries: int = 3,
+) -> dict:
+    if not execute_pending_reply_lookup:
+        error = "--execute-pending-reply-lookup is required"
+        await _mark_command_status(repository, command["id"], "SKIPPED_DISABLED", error, max_retries=max_retries)
+        return {"id": command["id"], "command_type": command["command_type"], "status": "SKIPPED_DISABLED", "error": error}
+    if emit_result and result_repository is None:
+        raise ValueError("result_repository is required when emit_result=True")
+    if pending_reply_lookup_service is None:
+        if not hasattr(repository, "pool"):
+            error = "pending_reply_lookup_service is required when repository has no pool"
+            await _mark_command_status(repository, command["id"], "FAILED_CONFIG", error, max_retries=max_retries)
+            return {"id": command["id"], "command_type": command["command_type"], "status": "FAILED_CONFIG", "error": error}
+        pending_reply_lookup_service = PendingReplyLookupService(repository.pool)
+
+    payload = command.get("payload_json") or {}
+    identity = payload.get("pending_reply_identity") or (payload.get("slot_memory") or {}).get("pending_reply_identity")
+    result_json = await pending_reply_lookup_service.lookup(
+        identity,
+        tenant_id=command.get("tenant_id") or "default",
+        current_conversation_id=command.get("conversation_id"),
+    )
+    result_insert = None
+    if emit_result:
+        result_insert = await result_repository.insert_idempotent(
+            _build_result_record(command, "pending_reply.lookup.result", result_json)
+        )
+    await repository.mark_sent(command["id"])
+    item = {"id": command["id"], "command_type": command["command_type"], "status": "SENT", "pending_reply_result": result_json}
+    if emit_result:
+        item["result_insert"] = result_insert
+    return item
+
+
 def validate_execution_mode(
     dry_run: bool,
     execute_human_handoff: bool,
     execute_telegram: bool = False,
     execute_backend: bool = False,
+    execute_pending_reply_lookup: bool = False,
 ) -> None:
-    if not dry_run and not execute_human_handoff and not execute_telegram and not execute_backend:
+    if (
+        not dry_run
+        and not execute_human_handoff
+        and not execute_telegram
+        and not execute_backend
+        and not execute_pending_reply_lookup
+    ):
         raise ValueError(NO_EXECUTION_MODE_ERROR)
 
 
@@ -678,6 +748,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--execute-telegram", action="store_true", help="Explicitly allow real Telegram SOP delivery.")
     parser.add_argument("--execute-backend", action="store_true", help="Explicitly allow real backend.query execution.")
+    parser.add_argument(
+        "--execute-pending-reply-lookup",
+        action="store_true",
+        help="Explicitly allow real pending_reply.lookup execution against local case history.",
+    )
     parser.add_argument("--emit-result", action="store_true", help="Emit mock external_command_results in dry-run mode.")
     parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
     parser.add_argument("--lease-seconds", type=int, default=60, help="Seconds before a queue lease expires.")
@@ -702,6 +777,7 @@ async def run_once(
     execute_human_handoff: bool = False,
     execute_telegram: bool = False,
     execute_backend: bool = False,
+    execute_pending_reply_lookup: bool = False,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
@@ -711,8 +787,11 @@ async def run_once(
         execute_human_handoff=execute_human_handoff,
         execute_telegram=execute_telegram,
         execute_backend=execute_backend,
+        execute_pending_reply_lookup=execute_pending_reply_lookup,
     )
-    settings = Settings() if (execute_human_handoff or execute_telegram or execute_backend) else Settings(
+    settings = Settings() if (
+        execute_human_handoff or execute_telegram or execute_backend or execute_pending_reply_lookup
+    ) else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
     )
@@ -731,6 +810,7 @@ async def run_once(
             execute_human_handoff=execute_human_handoff,
             execute_telegram=execute_telegram,
             execute_backend=execute_backend,
+            execute_pending_reply_lookup=execute_pending_reply_lookup,
             settings=settings,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
@@ -743,6 +823,7 @@ async def run_once(
             "execute_human_handoff": execute_human_handoff,
             "execute_telegram": execute_telegram,
             "execute_backend": execute_backend,
+            "execute_pending_reply_lookup": execute_pending_reply_lookup,
             "emit_result": emit_result,
             **summarize_results(results),
             "results": results,
@@ -779,6 +860,7 @@ async def run_forever(
     execute_human_handoff: bool = False,
     execute_telegram: bool = False,
     execute_backend: bool = False,
+    execute_pending_reply_lookup: bool = False,
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
@@ -789,8 +871,11 @@ async def run_forever(
         execute_human_handoff=execute_human_handoff,
         execute_telegram=execute_telegram,
         execute_backend=execute_backend,
+        execute_pending_reply_lookup=execute_pending_reply_lookup,
     )
-    settings = Settings() if (execute_human_handoff or execute_telegram or execute_backend) else Settings(
+    settings = Settings() if (
+        execute_human_handoff or execute_telegram or execute_backend or execute_pending_reply_lookup
+    ) else Settings(
         livechat_agent_access_token="unused-for-external-command-worker",
         livechat_account_id="unused-for-external-command-worker",
     )
@@ -834,6 +919,7 @@ async def run_polling_loop(
     execute_human_handoff: bool = False,
     execute_telegram: bool = False,
     execute_backend: bool = False,
+    execute_pending_reply_lookup: bool = False,
     settings: Settings | None = None,
     worker_id: str | None = None,
     lease_seconds: int = 60,
@@ -848,6 +934,7 @@ async def run_polling_loop(
         execute_human_handoff=execute_human_handoff,
         execute_telegram=execute_telegram,
         execute_backend=execute_backend,
+        execute_pending_reply_lookup=execute_pending_reply_lookup,
     )
     iteration = 0
     while iterations is None or iteration < iterations:
@@ -867,6 +954,7 @@ async def run_polling_loop(
                 execute_human_handoff=execute_human_handoff,
                 execute_telegram=execute_telegram,
                 execute_backend=execute_backend,
+                execute_pending_reply_lookup=execute_pending_reply_lookup,
                 settings=settings,
                 worker_id=worker_id,
                 lease_seconds=lease_seconds,
@@ -891,6 +979,7 @@ def main(argv: list[str] | None = None) -> int:
                     execute_human_handoff=args.execute_human_handoff,
                     execute_telegram=args.execute_telegram,
                     execute_backend=args.execute_backend,
+                    execute_pending_reply_lookup=args.execute_pending_reply_lookup,
                     worker_id=args.worker_id,
                     lease_seconds=args.lease_seconds,
                     max_retries=args.max_retries,
@@ -906,6 +995,7 @@ def main(argv: list[str] | None = None) -> int:
                     execute_human_handoff=args.execute_human_handoff,
                     execute_telegram=args.execute_telegram,
                     execute_backend=args.execute_backend,
+                    execute_pending_reply_lookup=args.execute_pending_reply_lookup,
                     worker_id=args.worker_id,
                     lease_seconds=args.lease_seconds,
                     max_retries=args.max_retries,

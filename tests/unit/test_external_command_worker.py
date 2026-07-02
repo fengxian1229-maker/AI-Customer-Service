@@ -43,6 +43,14 @@ def test_external_command_worker_cli_accepts_execute_backend():
     assert args.execute_backend is True
 
 
+def test_external_command_worker_cli_accepts_execute_pending_reply_lookup():
+    from app.workers.external_command_worker import build_arg_parser
+
+    args = build_arg_parser().parse_args(["--once", "--execute-pending-reply-lookup"])
+
+    assert args.execute_pending_reply_lookup is True
+
+
 def test_external_command_worker_cli_accepts_lease_options():
     from app.workers.external_command_worker import build_arg_parser
 
@@ -1278,6 +1286,75 @@ def test_external_command_worker_emit_result_inserts_mock_results_idempotently()
     assert result_repository.inserted[0]["result_type"] == "backend.query.result"
     assert result_repository.inserted[0]["result_json"]["status"] == "success"
     assert result[0]["result_insert"] == {"inserted": True, "duplicate": False, "id": 99}
+
+
+def test_external_command_worker_executes_pending_reply_lookup_with_service():
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.sent = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 31,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-new",
+                    "chat_id": "chat-new",
+                    "thread_id": "thread-new",
+                    "inbound_event_id": 71,
+                    "command_type": "pending_reply.lookup",
+                    "payload_json": {"pending_reply_identity": "andy123"},
+                }
+            ]
+
+        async def mark_sent(self, command_id: int) -> None:
+            self.sent.append(command_id)
+
+    class FakeResultRepository:
+        def __init__(self) -> None:
+            self.inserted = []
+
+        async def insert_idempotent(self, result: dict) -> dict:
+            self.inserted.append(result)
+            return {"inserted": True, "duplicate": False, "id": 121}
+
+    class FakeLookupService:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def lookup(self, identity: str, *, tenant_id: str = "default", current_conversation_id: str | None = None):
+            self.calls.append((identity, tenant_id, current_conversation_id))
+            return {
+                "status": "found",
+                "reason": "found_last_customer_reply",
+                "reply_text": "已找到你上一笔案件的最新回复：\n仍在处理中。",
+                "matched_conversation_id": "livechat:chat-old",
+            }
+
+    command_repository = FakeCommandRepository()
+    result_repository = FakeResultRepository()
+    lookup_service = FakeLookupService()
+
+    result = asyncio.run(
+        process_pending_commands(
+            command_repository,
+            result_repository=result_repository,
+            limit=20,
+            dry_run=False,
+            emit_result=True,
+            execute_pending_reply_lookup=True,
+            pending_reply_lookup_service=lookup_service,
+            worker_id="worker-a",
+        )
+    )
+
+    assert lookup_service.calls == [("andy123", "default", "livechat:chat-new")]
+    assert command_repository.sent == [31]
+    assert result_repository.inserted[0]["result_type"] == "pending_reply.lookup.result"
+    assert result_repository.inserted[0]["result_json"]["status"] == "found"
+    assert result[0]["status"] == "SENT"
 
 
 def test_external_command_worker_marks_processing_failed_on_error():

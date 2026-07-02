@@ -529,6 +529,18 @@ def test_result_consumer_pending_reply_lookup_result_found_writes_reply():
     assert "上一笔案件仍在处理中" in outbound_repository.inserted[0]["payload_json"]["text"]
 
 
+def test_result_consumer_pending_reply_lookup_result_not_found_writes_safe_reply():
+    _processed, result_repository, conversation_repository, outbound_repository = run_consumer_for(
+        make_result("pending_reply.lookup.result")
+        | {"result_json": {"status": "not_found", "reply_text": "目前没有找到这组资料的上一笔有效案件。"}}
+    )
+
+    assert result_repository.processed == [7]
+    assert conversation_repository.updated[0][1]["workflow_stage"] == "pending_reply_not_found"
+    assert conversation_repository.updated[0][1]["active_workflow"] is None
+    assert "没有找到" in outbound_repository.inserted[0]["payload_json"]["text"]
+
+
 def test_result_consumer_backend_query_result_success_uses_final_reply_text():
     from app.workers.external_result_consumer import process_pending_results
 

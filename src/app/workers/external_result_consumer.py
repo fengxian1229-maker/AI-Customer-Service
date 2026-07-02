@@ -247,17 +247,31 @@ def build_result_handler(row: dict) -> dict:
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)
         return resolved
     if result_type == "pending_reply.lookup.result":
-        if result_json.get("status") != "found" or not result_json.get("reply_text"):
-            raise ValueError("pending_reply.lookup.result not found")
+        status = result_json.get("status")
+        reply_text = str(result_json.get("reply_text") or "").strip()
+        if status not in {"found", "waiting", "human_handoff", "not_found"} or not reply_text:
+            raise ValueError("pending_reply.lookup.result invalid")
+        workflow_stage = {
+            "found": "pending_reply_found",
+            "waiting": "pending_reply_waiting",
+            "human_handoff": "pending_reply_human_handoff",
+            "not_found": "pending_reply_not_found",
+        }[status]
+        graph_status = "WAITING_EXTERNAL" if status in {"waiting", "human_handoff"} else "AI_ACTIVE"
         resolved = {
-            "text": result_json["reply_text"],
+            "text": reply_text,
             "summary_sender_role": "system",
-            "summary_text": "pending reply 查询成功，已生成可回复摘要。",
+            "summary_text": f"pending reply 查询完成：{status}",
             "graph_state": {
-                "status": "AI_ACTIVE",
-                "active_workflow": "pending_reply_lookup",
-                "workflow_stage": "pending_reply_found",
-                "slot_memory": {"pending_reply_status": "found"},
+                "status": graph_status,
+                "active_workflow": "pending_reply_lookup" if status in {"waiting", "human_handoff"} else None,
+                "workflow_stage": workflow_stage,
+                "slot_memory": {
+                    "pending_reply_status": status,
+                    "matched_conversation_id": result_json.get("matched_conversation_id"),
+                    "matched_chat_id": result_json.get("matched_chat_id"),
+                    "matched_telegram_case_id": result_json.get("telegram_case_id"),
+                },
             },
         }
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)
