@@ -378,6 +378,14 @@ def intent_router_node(state: GraphState) -> GraphState:
         return _final_reply_route(state, "clarification_needed", "File upload without a clear issue needs clarification.", kind="clarification")
     if _is_casual_chat(state):
         return _final_reply_route(state, "casual_chat", "Non-business greeting or small talk.", confidence=0.82, kind="casual_chat")
+    if _is_conversation_memory_lookup(state):
+        return _final_reply_route(
+            state,
+            "conversation_memory_lookup",
+            "Customer asks about recent conversation content.",
+            confidence=0.86,
+            kind="contextual_followup",
+        )
     if text:
         return _final_reply_route(state, "clarification_needed", "Question is outside canonical FAQ targets.", confidence=0.55, kind="clarification")
     return _final_reply_route(state, "clarification_needed", "No clear question content provided.", confidence=0.2, kind="clarification")
@@ -484,7 +492,12 @@ def make_intent_router_node(
         if route == "final_reply":
             kind = decision.get("workflow_relation") if decision.get("workflow_relation") in {"acknowledgement", "contextual_followup"} else None
             if not kind:
-                kind = "casual_chat" if decision["intent"] == "casual_chat" else "clarification"
+                if decision["intent"] == "casual_chat":
+                    kind = "casual_chat"
+                elif decision["intent"] == "conversation_memory_lookup":
+                    kind = "contextual_followup"
+                else:
+                    kind = "clarification"
             return _prepare_final_reply_state(next_state, str(kind))
         return next_state
 
@@ -761,7 +774,7 @@ def _prepare_final_reply_state(state: GraphState, kind: str) -> GraphState:
         fallback_text = _casual_reply_text(str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans"))
         template = "default_final_reply"
         must_not_say = ["已到账", "已完成", "已处理", "已同步", "tg:"]
-        allowed_facts = ["用户发送非业务闲聊或问候"]
+        allowed_facts = _system_capability_facts() + ["用户发送非业务闲聊或问候"]
     else:
         fallback_text = "请补充你要咨询的问题，或说明是存款、提款、流水还是需要真人客服。"
         template = "clarification"
@@ -777,7 +790,8 @@ def _prepare_final_reply_state(state: GraphState, kind: str) -> GraphState:
         "node_facts": {
             "fallback_text": fallback_text,
             "workflow_relation": (state.get("intent_result") or {}).get("workflow_relation"),
-            "supported_topics": ["存款", "提款", "流水", "截图", "真人客服"],
+            "supported_topics": ["存款", "提款", "流水", "截图", "账号访问", "真人客服"],
+            "allowed_facts": allowed_facts,
         },
         "reply_plan": build_reply_plan(
             kind=kind,
@@ -904,6 +918,8 @@ def _is_contextual_followup(state: GraphState) -> bool:
     text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
     if not text:
         return False
+    if _is_conversation_memory_lookup(state):
+        return True
     name_patterns = (
         r"\bmay i provide my name\b",
         r"\bcan i provide my name\b",
@@ -914,6 +930,23 @@ def _is_contextual_followup(state: GraphState) -> bool:
         r"(姓名|名字).*可以",
     )
     return any(re.search(pattern, text, flags=re.I) for pattern in name_patterns)
+
+
+def _is_conversation_memory_lookup(state: GraphState) -> bool:
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    if not text:
+        return False
+    return any(
+        re.search(pattern, text, flags=re.I)
+        for pattern in (
+            r"(刚刚|剛剛|上一句|上句|前一句|刚才|剛才).*(说|說|回复|回覆|讲|講|问|問|提到)",
+            r"(我|你).*(刚刚|剛剛|上一句|上句|前一句|刚才|剛才).*(说|說|回复|回覆|讲|講|问|問|提到)",
+            r"\bwhat did i just say\b",
+            r"\bwhat was my previous message\b",
+            r"\bwhat did you just say\b",
+            r"\bwhat did you reply\b",
+        )
+    )
 
 
 def _is_casual_chat(state: GraphState) -> bool:
@@ -949,6 +982,9 @@ def _acknowledgement_reply_text(state: GraphState) -> str:
 
 
 def _contextual_followup_reply_text(state: GraphState) -> str:
+    memory_text = _conversation_memory_reply_text(state)
+    if memory_text:
+        return memory_text
     language = str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans").lower()
     active = str(state.get("active_workflow") or "")
     if language.startswith("en"):
@@ -966,8 +1002,46 @@ def _contextual_followup_reply_text(state: GraphState) -> str:
 
 def _casual_reply_text(language: str) -> str:
     if language.lower().startswith("en"):
-        return "Hello, I am here to help. Please tell me what you need assistance with."
-    return "你好，我在这里协助你。请告诉我需要咨询的问题。"
+        return "Hello, I can help with deposits, withdrawals, rollover requirements, screenshots, account access, and human support requests."
+    return "你好，我可以协助处理存款、提款、流水要求、截图凭证、账号访问问题，也可以帮你请求真人客服。"
+
+
+def _conversation_memory_reply_text(state: GraphState) -> str | None:
+    if not _is_conversation_memory_lookup(state):
+        return None
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    wants_assistant = _contains_any(text, ("你刚", "你剛", "你上", "你回复", "你回覆", "what did you", "you reply"))
+    target_role = "assistant" if wants_assistant else "customer"
+    previous = _previous_message_text(state, target_role)
+    if previous:
+        if target_role == "assistant":
+            return f"我刚才回复的是：{previous}"
+        return f"你上一句说的是：{previous}"
+    return "我这里暂时没有可确认的上一句聊天内容。请你再说明一次需要处理的问题，我会继续协助。"
+
+
+def _previous_message_text(state: GraphState, sender_role: str) -> str | None:
+    current = normalize_text(state.get("raw_user_input"))
+    for message in reversed(list(state.get("recent_messages") or [])):
+        role = str(message.get("sender_role") or "")
+        if role != sender_role:
+            continue
+        text = normalize_text(message.get("text_content") or message.get("text") or message.get("content"))
+        if not text or text == current:
+            continue
+        return text
+    return None
+
+
+def _system_capability_facts() -> list[str]:
+    return [
+        "支持存款问题",
+        "支持提款问题",
+        "支持流水要求查询",
+        "支持截图或凭证补充",
+        "支持账号访问或忘记密码说明",
+        "支持请求真人客服",
+    ]
 
 
 def _build_llm_rewrite_payload(state: GraphState) -> dict[str, Any]:

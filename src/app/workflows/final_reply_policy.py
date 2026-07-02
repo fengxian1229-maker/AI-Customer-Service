@@ -320,21 +320,37 @@ def _validate_used_facts(state: dict[str, Any], output: dict[str, Any]) -> list[
         return ["invalid_used_facts"]
     allowed_pool = _allowed_fact_pool(state)
     allowed_text = "\n".join(allowed_pool).lower()
+    allow_unverified_low_risk_facts = _allows_low_risk_final_reply_facts(state)
     for raw_fact in used_facts:
         fact = str(raw_fact or "").strip()
         if not fact:
             continue
         fact_lower = fact.lower()
-        if not any(fact_lower in allowed or allowed in fact_lower for allowed in allowed_pool if allowed):
+        if not allow_unverified_low_risk_facts and not any(fact_lower in allowed or allowed in fact_lower for allowed in allowed_pool if allowed):
             violations.append("unverified_used_fact")
         if UNVERIFIED_TIME_COMMITMENT_PATTERN.search(fact) and fact_lower not in allowed_text:
             violations.append("unverified_time_commitment")
         if BACKEND_SYNC_CLAIM_PATTERN.search(fact) and not _has_backend_sync_command(state, state.get("reply_plan") or {}):
             violations.append("unverified_backend_sync_claim")
+        for phrase in UNVERIFIED_BACKEND_FACT_PHRASES:
+            if phrase.lower() in fact_lower and not _is_verified_staff_backend_fact(str(phrase), state.get("reply_plan") or {}):
+                violations.append("forbidden_backend_fact")
         for value in _critical_values(fact):
             if value.lower() not in allowed_text:
                 violations.append("unverified_used_fact")
     return violations
+
+
+def _allows_low_risk_final_reply_facts(state: dict[str, Any]) -> bool:
+    plan = state.get("reply_plan") or {}
+    intent = str((state.get("intent_result") or {}).get("intent") or "")
+    return plan.get("kind") in {"casual_chat", "clarification", "emotion_care", "acknowledgement"} or intent in {
+        "casual_chat",
+        "clarification_needed",
+        "abusive_or_emotional",
+        "service_frustration",
+        "acknowledgement",
+    }
 
 
 def _allowed_fact_pool(state: dict[str, Any]) -> list[str]:

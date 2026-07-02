@@ -54,6 +54,7 @@ ALLOWED_LLM_INTENTS = (
     "clarification_needed",
     "acknowledgement",
     "contextual_followup",
+    "conversation_memory_lookup",
     "casual_chat",
     "backend_fact_like",
 )
@@ -199,6 +200,8 @@ def normalize_router_decision_intent(intent: str, route: str, requires_human: bo
         return "clarification_needed"
     if route == "final_reply" and normalized in {"contextual_reply", "contextual_followup"}:
         return "contextual_followup"
+    if route == "final_reply" and normalized in {"conversation_memory", "conversation_memory_lookup", "previous_message_lookup"}:
+        return "conversation_memory_lookup"
     if route == "final_reply" and normalized == "casual_chat":
         return "casual_chat"
     if route == "final_reply":
@@ -296,11 +299,11 @@ def validate_intent_classification_output(payload: dict[str, Any], output: dict[
         "intent": intent,
         "route": route,
         "confidence": normalize_confidence(output.get("confidence")),
-        "sop_name": _optional_str(output.get("sop_name")),
+        "sop_name": _normalize_sop_name(route, intent, output.get("sop_name")),
         "faq_query": _optional_str(output.get("faq_query")),
         "risk_level": _optional_str(output.get("risk_level")),
         "requires_human": requires_human,
-        "requires_backend": bool(output.get("requires_backend", False)),
+        "requires_backend": _normalize_requires_backend(route, intent, workflow_relation, output.get("requires_backend")),
         "missing_slots": _string_list(output.get("missing_slots")),
         "workflow_relation": workflow_relation,
         "preserve_active_workflow": preserve_active_workflow,
@@ -322,8 +325,27 @@ def _validate_workflow_relation(payload: dict[str, Any], value, route: str) -> s
     if relation is None:
         return None
     if relation not in WORKFLOW_RELATIONS_WITHOUT_ACTIVE:
-        raise ValueError(f"workflow_relation without active workflow must be none or null: {relation}")
+        return "none"
     return relation
+
+
+def _normalize_sop_name(route: str, intent: str, value) -> str | None:
+    sop_name = _optional_str(value)
+    if route != "sop":
+        return sop_name
+    if sop_name and get_sop_definition(sop_name):
+        return sop_name
+    if intent in SOP_INTENTS and get_sop_definition(intent):
+        return intent
+    return sop_name
+
+
+def _normalize_requires_backend(route: str, intent: str, workflow_relation: str | None, value) -> bool:
+    if bool(value):
+        return True
+    if route == "sop" and intent in SOP_INTENTS and workflow_relation != "current_workflow_resolution":
+        return True
+    return False
 
 
 def _validate_intent_classification_contract(payload: dict[str, Any], output: dict[str, Any]) -> None:
@@ -359,6 +381,7 @@ def _validate_intent_classification_contract(payload: dict[str, Any], output: di
     if route == "final_reply" and intent not in {
         "acknowledgement",
         "contextual_followup",
+        "conversation_memory_lookup",
         "casual_chat",
         "clarification_needed",
         "unsupported_concrete_issue",

@@ -449,7 +449,12 @@ class GatewayService:
         if decision["route"] == "final_reply":
             kind = decision.get("workflow_relation") if decision.get("workflow_relation") in {"acknowledgement", "contextual_followup"} else None
             if not kind:
-                kind = "casual_chat" if decision["intent"] == "casual_chat" else "clarification"
+                if decision["intent"] == "casual_chat":
+                    kind = "casual_chat"
+                elif decision["intent"] == "conversation_memory_lookup":
+                    kind = "contextual_followup"
+                else:
+                    kind = "clarification"
             return _prepare_final_reply_state(routed_state, str(kind))
         return routed_state
 

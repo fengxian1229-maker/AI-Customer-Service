@@ -139,8 +139,10 @@ def resolve_node_reply_template_id(state: dict[str, Any]) -> str:
         intent = str((state.get("intent_result") or {}).get("intent") or "").strip()
         if intent == "casual_chat":
             return "default_final_reply"
-        if intent in {"acknowledgement", "contextual_followup"}:
-            return intent
+        if intent == "acknowledgement":
+            return "acknowledgement"
+        if intent in {"contextual_followup", "conversation_memory_lookup"}:
+            return "contextual_followup"
         return "clarification"
     return "default_final_reply"
 

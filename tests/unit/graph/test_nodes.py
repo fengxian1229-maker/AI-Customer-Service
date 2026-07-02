@@ -303,6 +303,25 @@ def test_without_active_workflow_greeting_routes_to_casual_chat():
     assert result["reply_plan"]["kind"] == "casual_chat"
 
 
+def test_conversation_memory_lookup_uses_recent_customer_message():
+    result = intent_router_node(
+        {
+            "raw_user_input": "我刚刚说什么了？",
+            "rewritten_question": "我刚刚说什么了？",
+            "recent_messages": [
+                {"sender_role": "customer", "text_content": "我忘记我的密码了"},
+                {"sender_role": "assistant", "text_content": "请按照页面提示重设密码。"},
+                {"sender_role": "customer", "text_content": "我刚刚说什么了？"},
+            ],
+        }
+    )
+
+    assert result["route"] == "final_reply"
+    assert result["intent_result"]["intent"] == "conversation_memory_lookup"
+    assert result["node_reply_template"] == "contextual_followup"
+    assert result["response_text"] == "你上一句说的是：我忘记我的密码了"
+
+
 def test_llm_intent_invalid_active_workflow_switch_falls_back_to_deterministic_faq():
     import asyncio
 

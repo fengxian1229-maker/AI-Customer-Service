@@ -200,6 +200,49 @@ def test_validate_intent_classification_allows_withdrawal_blocked_sop_name():
     assert decision["requires_backend"] is True
 
 
+def test_validate_intent_classification_normalizes_absent_workflow_relation_and_backend_contract():
+    from app.llm.guardrails import validate_intent_classification_output
+
+    decision = validate_intent_classification_output(
+        {"active_workflow": None},
+        {
+            "intent": "withdrawal_blocked_or_rollover",
+            "route": "sop",
+            "confidence": 0.94,
+            "sop_name": None,
+            "requires_human": False,
+            "requires_backend": False,
+            "missing_slots": ["account_or_phone"],
+            "workflow_relation": "current_workflow_supplement",
+            "preserve_active_workflow": True,
+            "reason": "The user is following up on a rollover check without an active workflow.",
+        },
+    )
+
+    assert decision["workflow_relation"] == "none"
+    assert decision["sop_name"] == "withdrawal_blocked_or_rollover"
+    assert decision["requires_backend"] is True
+
+
+def test_validate_router_decision_allows_conversation_memory_lookup():
+    from app.llm.guardrails import validate_router_decision_output
+
+    decision = validate_router_decision_output(
+        {},
+        _router_output(
+            intent="previous_message_lookup",
+            route="final_reply",
+            requires_human=False,
+            requires_backend=False,
+            workflow_relation="none",
+            reason="The user asks what they said previously.",
+        ),
+    )
+
+    assert decision["route"] == "final_reply"
+    assert decision["intent"] == "conversation_memory_lookup"
+
+
 def test_validate_intent_classification_rejects_cross_object_current_workflow_supplement():
     from app.llm.guardrails import validate_intent_classification_output
 

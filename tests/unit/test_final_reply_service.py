@@ -232,6 +232,80 @@ def test_final_reply_service_accepts_used_facts_from_backend_result():
     assert result["final_reply_result"]["used_facts"] == ["remaining_turnover=1375.09"]
 
 
+def test_final_reply_service_allows_low_risk_capability_used_facts():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "你好，我可以协助处理存款、提款、流水要求、截图凭证、账号访问问题，也可以帮你请求真人客服。",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.93,
+            "safety_flags": [],
+            "used_facts": ["可以咨询存款、提款、流水、截图、账号访问或真人客服"],
+            "reason": "capability answer",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                raw_user_input="你还能做什么？",
+                rewritten_question="你还能做什么？",
+                route="final_reply",
+                intent_result={"intent": "casual_chat", "route": "final_reply"},
+                active_workflow=None,
+                workflow_stage=None,
+                response_text="你好，我可以协助处理存款、提款、流水要求、截图凭证、账号访问问题，也可以帮你请求真人客服。",
+                response_text_fallback="你好，我可以协助处理存款、提款、流水要求、截图凭证、账号访问问题，也可以帮你请求真人客服。",
+                node_facts={
+                    "supported_topics": ["存款", "提款", "流水", "截图", "账号访问", "真人客服"],
+                    "allowed_facts": ["支持存款问题", "支持提款问题", "支持流水要求查询", "支持请求真人客服"],
+                },
+                reply_plan={
+                    "kind": "casual_chat",
+                    "fallback_text": "你好，我可以协助处理存款、提款、流水要求、截图凭证、账号访问问题，也可以帮你请求真人客服。",
+                    "allowed_facts": ["支持存款问题", "支持提款问题", "支持流水要求查询", "支持请求真人客服"],
+                },
+            )
+        )
+    )
+
+    assert result["final_reply_result"]["status"] == "accepted"
+    assert result["final_response_text"].startswith("你好，我可以协助处理存款")
+
+
+def test_final_reply_service_still_rejects_backend_fact_in_low_risk_used_facts():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "你好，我可以继续协助你确认问题。",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.93,
+            "safety_flags": [],
+            "used_facts": ["款项已到账"],
+            "reason": "bad metadata fact",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                route="final_reply",
+                intent_result={"intent": "casual_chat", "route": "final_reply"},
+                active_workflow=None,
+                workflow_stage=None,
+                response_text="你好，我可以继续协助你确认问题。",
+                response_text_fallback="你好，我可以继续协助你确认问题。",
+                reply_plan={"kind": "casual_chat", "fallback_text": "你好，我可以继续协助你确认问题。"},
+            )
+        )
+    )
+
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert "forbidden_backend_fact" in result["final_reply_result"]["violations"]
+
+
 def test_final_reply_service_rejects_unverified_time_commitment_in_used_facts():
     provider = FakeFinalReplyProvider(
         {

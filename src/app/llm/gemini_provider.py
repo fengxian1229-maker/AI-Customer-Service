@@ -92,6 +92,7 @@ ALLOWED_INTENT_CONTRACT = """Allowed intents. The intent field must be exactly o
 - clarification_needed
 - acknowledgement
 - contextual_followup
+- conversation_memory_lookup
 - casual_chat
 - backend_fact_like
 """
@@ -142,11 +143,13 @@ Routing rules:
   - explicit human request -> route: human_handoff, intent: explicit_human_request.
 - In those cases, preserve the emotional signal via risk_level, but do not choose route: emotion_care.
 - For simple greetings or small talk without a service request, such as 你好, 您好, hi, or hello, use route: final_reply and intent: casual_chat.
+- For questions about recent chat content, such as "我刚刚说什么了？", "我上一句说的什么？", or "what did I just say?", use route: final_reply and intent: conversation_memory_lookup.
 - If no route is safe because the message is too ambiguous, use route: final_reply and intent: clarification_needed.
 
 Workflow relation rules:
 - Always set workflow_relation and preserve_active_workflow.
 - If active_workflow is absent, set workflow_relation: none.
+- If active_workflow is absent and the message is a new SOP request, still set workflow_relation: none; do not use new_workflow_request without an active workflow.
 - If active_workflow is present, do not assume every new message must continue SOP.
 - When active_workflow is present, classify the latest message relation to the current workflow:
   - current_workflow_supplement: the user is supplying account, phone, amount, order ID, screenshot/proof, payment channel, or concrete follow-up details for the current SOP. Use route: sop, intent: active_workflow, sop_name: active_workflow.
