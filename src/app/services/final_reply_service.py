@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.chinese_script import adapt_chinese_script, adapt_chinese_strings
 from app.services.language_policy import normalize_language_code, parse_supported_languages
 from app.services.reply_renderer import render_customer_reply
 from app.workflows.final_reply_policy import accepted_result, fallback_result, validate_final_reply_output
@@ -38,11 +39,13 @@ class FinalReplyService:
         self.supported_languages = parse_supported_languages(self.tenant_persona.get("supported_languages"))
 
     async def compose(self, state: dict[str, Any]) -> dict[str, Any]:
+        reply_language = self._target_reply_language(state)
         fallback_text = normalize_text(
             state.get("response_text_fallback")
             or state.get("response_text")
             or self._render_structured_fallback(state)
         )
+        fallback_text = normalize_text(adapt_chinese_script(fallback_text, reply_language))
         if not fallback_text:
             return {
                 **state,
@@ -108,7 +111,11 @@ class FinalReplyService:
 
     def _build_payload(self, state: dict[str, Any], fallback_text: str) -> dict[str, Any]:
         node_reply_template = resolve_node_reply_template_id(state)
-        node_facts = build_node_facts(state)
+        reply_language = self._target_reply_language(state)
+        node_facts = adapt_chinese_strings(build_node_facts(state), reply_language)
+        reply_plan = adapt_chinese_strings(dict(state.get("reply_plan") or {}), reply_language)
+        rag_result = adapt_chinese_strings(state.get("rag_result"), reply_language)
+        backend_result = adapt_chinese_strings(state.get("backend_result"), reply_language)
         return {
             "tenant_id": state.get("tenant_id"),
             "channel_type": state.get("channel_type"),
@@ -124,8 +131,8 @@ class FinalReplyService:
             "slot_memory": dict(state.get("slot_memory") or {}),
             "missing_slots": list(state.get("missing_slots") or []),
             "sop_action": state.get("sop_action"),
-            "rag_result": state.get("rag_result"),
-            "backend_result": state.get("backend_result"),
+            "rag_result": rag_result,
+            "backend_result": backend_result,
             "node_reply_template": node_reply_template,
             "node_reply_instruction": build_node_reply_instruction(node_reply_template),
             "node_facts": node_facts,
@@ -137,7 +144,13 @@ class FinalReplyService:
             "language_result": state.get("language_result"),
             "supported_languages": list(state.get("supported_languages") or self.supported_languages),
             "response_text_fallback": fallback_text,
-            "reply_plan": dict(state.get("reply_plan") or {}),
+            "reply_plan": reply_plan,
             "commands": list(state.get("commands") or []),
             "tenant_persona": dict(self.tenant_persona),
         }
+
+    def _target_reply_language(self, state: dict[str, Any]) -> str:
+        language = normalize_language_code(state.get("reply_language"))
+        if language != "unknown":
+            return language
+        return normalize_language_code(self.tenant_persona.get("default_language"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.services.chinese_script import adapt_chinese_script, chinese_script_mismatch
 from app.services.language_policy import detect_language_deterministic, normalize_language_code
 
 UNVERIFIED_BACKEND_FACT_PHRASES = (
@@ -215,6 +216,8 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
     output_language = normalize_language_code(output.get("language"))
     if reply_language != "unknown" and output_language != reply_language:
         violations.append("language_mismatch")
+    if chinese_script_mismatch(text, reply_language):
+        violations.append("language_script_mismatch")
 
     fallback_language = detect_language_deterministic(plan.get("fallback_text") or state.get("response_text_fallback")).get("detected_language")
     should_enforce_legacy_must_say = reply_language in {"unknown", fallback_language}
@@ -371,13 +374,19 @@ def _allows_low_risk_final_reply_facts(state: dict[str, Any]) -> bool:
 
 def _allowed_fact_pool(state: dict[str, Any]) -> list[str]:
     plan = state.get("reply_plan") or {}
+    reply_language = _reply_language(state)
     values: list[str] = []
     values.extend(str(item) for item in plan.get("allowed_facts") or [] if item)
     values.append(str(plan.get("fallback_text") or ""))
     values.append(str(state.get("response_text_fallback") or ""))
     for key in ("node_facts", "rag_result", "backend_result"):
         values.extend(_flatten_fact_values(state.get(key)))
-    return [value.lower() for value in values if str(value).strip()]
+    adapted_values = []
+    for value in values:
+        if str(value).strip():
+            adapted_values.append(value)
+            adapted_values.append(adapt_chinese_script(value, reply_language))
+    return [value.lower() for value in adapted_values if str(value).strip()]
 
 
 def _flatten_fact_values(value: Any, prefix: str = "") -> list[str]:
