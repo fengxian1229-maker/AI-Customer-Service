@@ -1896,6 +1896,7 @@ class GatewayTransactionRepository:
         outbound_message: dict | list[dict] | None,
         external_commands: list[dict] | None = None,
         graph_state: dict | None = None,
+        assistant_messages: list[dict] | None = None,
     ) -> dict:
         outbound_messages = []
         if isinstance(outbound_message, list):
@@ -1903,6 +1904,7 @@ class GatewayTransactionRepository:
         elif outbound_message:
             outbound_messages = [outbound_message]
         external_commands = external_commands or []
+        assistant_messages = assistant_messages or []
         async with self.pool.acquire() as conn:
             await conn.begin()
             try:
@@ -1915,6 +1917,12 @@ class GatewayTransactionRepository:
                 if customer_message is not None:
                     customer_message["conversation_id"] = conversation["conversation_id"]
                     message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(conn, customer_message)
+                assistant_message_inserts = []
+                for assistant_message in assistant_messages:
+                    assistant_message["conversation_id"] = conversation["conversation_id"]
+                    assistant_message_inserts.append(
+                        await self.conversation_message_repository.insert_idempotent_on_connection(conn, assistant_message)
+                    )
                 if graph_state is not None:
                     await self.conversation_repository.update_workflow_state_on_connection(
                         conn,
@@ -1940,4 +1948,5 @@ class GatewayTransactionRepository:
             "outbound_insert": outbound_inserts[0] if len(outbound_inserts) == 1 else None,
             "outbound_inserts": outbound_inserts,
             "external_command_inserts": external_command_inserts,
+            "assistant_message_inserts": assistant_message_inserts,
         }

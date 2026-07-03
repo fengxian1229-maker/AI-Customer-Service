@@ -5,6 +5,8 @@ from app.llm.contracts import (
     LLMIntentClassificationInput,
     LLMFinalReplyInput,
     LLMFinalReplyOutput,
+    LLMImageAttachmentAnalysisInput,
+    LLMImageAttachmentAnalysisOutput,
     LLMRewriteShadowInput,
     LLMRewriteShadowOutput,
     LLMSopDialoguePlannerInput,
@@ -130,6 +132,27 @@ class MockLLMProvider:
             "mode": "sop_dialogue_planner",
         }
 
+    async def analyze_image_attachment(self, payload: LLMImageAttachmentAnalysisInput) -> LLMImageAttachmentAnalysisOutput:
+        text = " ".join(
+            str(payload.get(key) or "").lower()
+            for key in ("attachment_url", "filename")
+        )
+        if any(token in text for token in ("deposit", "deposito", "depósito", "recarga", "充值", "存款")):
+            return _image_candidate_result("deposit_missing_candidate", "deposit", 0.88)
+        if any(token in text for token in ("withdraw", "withdrawal", "retiro", "提款", "提现")):
+            return _image_candidate_result("withdrawal_missing_candidate", "withdrawal", 0.88)
+        return {
+            "candidate_intents": ["unknown_image"],
+            "candidate_slots": {},
+            "receipt_kind": "unknown",
+            "is_receipt_like": False,
+            "confidence": 0.2,
+            "evidence_summary": "Mock image analyzer found no receipt-like filename signal.",
+            "safety_flags": ["candidate_only"],
+            "provider": self.provider_name,
+            "mode": "image_analysis_candidate",
+        }
+
     async def compose_final_reply(self, payload: LLMFinalReplyInput) -> LLMFinalReplyOutput:
         fallback_text = normalize_text(payload.get("response_text_fallback"))
         language = payload.get("reply_language") or payload.get("conversation_language") or payload.get("detected_language") or "zh-Hans"
@@ -157,3 +180,17 @@ def _risk_flags(text: str, active_workflow: str | None = None) -> list[str]:
     if any(token in lower for token in ("amount", "金额", "monto", "usuario", "phone", "telefono", "手机号")):
         flags.append("user_fact_present")
     return flags
+
+
+def _image_candidate_result(intent: str, receipt_kind: str, confidence: float) -> LLMImageAttachmentAnalysisOutput:
+    return {
+        "candidate_intents": [intent],
+        "candidate_slots": {},
+        "receipt_kind": receipt_kind,
+        "is_receipt_like": True,
+        "confidence": confidence,
+        "evidence_summary": "Mock image analyzer matched a receipt-like filename signal.",
+        "safety_flags": ["candidate_only"],
+        "provider": "mock",
+        "mode": "image_analysis_candidate",
+    }

@@ -47,6 +47,16 @@ ALLOWED_LLM_INTENTS = (
     "pending_reply_lookup",
     "account_access_issue",
     "account_profile_or_wallet_change",
+    "screenshot_upload_failed",
+    "wallet_identity_risk",
+    "account_verification_issue",
+    "promo_refund_unsupported",
+    "game_technical_issue",
+    "abuse_or_fraud_risk",
+    "tutorial_failed_aftercare",
+    "active_workflow_conflict_with_data",
+    "menu_stuck_repeated",
+    "waiting_backend_repeat_dispute",
     "explicit_human_request",
     "service_frustration",
     "abusive_or_emotional",
@@ -578,7 +588,7 @@ def _allowed_attachment_urls(payload: dict[str, Any]) -> set[str]:
     urls = {
         str(item.get("url"))
         for item in payload.get("attachments_summary") or []
-        if item.get("url")
+        if item.get("url") and item.get("verified_receipt_attachment")
     }
     current = payload.get("current_slot_memory") or {}
     for key in ("deposit_screenshot", "withdrawal_screenshot"):

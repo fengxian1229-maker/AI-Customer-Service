@@ -103,7 +103,12 @@ def make_event(case_name: str, index: int, message: str) -> InboundEvent:
     standard_event_type = "FILE_RECEIVED" if case_name == "waiting_backend_supplement" else "MESSAGE_CREATED"
     payload = {"event": {"text": message}, "text": message}
     if standard_event_type == "FILE_RECEIVED":
-        payload["event"]["file"] = {"url": "https://example.test/supplement.jpg", "name": "supplement.jpg"}
+        payload["event"]["file"] = {
+            "url": "https://example.test/supplement.jpg",
+            "name": "supplement.jpg",
+            "verified_receipt_attachment": True,
+            "receipt_kind": "deposit",
+        }
     return InboundEvent(
         source="replay_fixture",
         raw_action="replay.message",

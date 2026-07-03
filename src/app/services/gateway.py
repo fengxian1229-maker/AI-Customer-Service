@@ -1,3 +1,4 @@
+import copy
 import re
 
 from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
@@ -7,9 +8,11 @@ from app.llm.contracts import LLMIntentClassificationInput, LLMIntentShadowInput
 from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
+from app.services.chinese_script import adapt_chinese_script
 from app.services.faq_outbound_plan import build_faq_outbound_plan_from_rag_context, faq_plan_to_outbound_rows
 from app.services.language_policy import normalize_language_code, parse_supported_languages, resolve_language_policy
-from app.services.livechat_menus import get_menu
+from app.services.livechat_preview import LiveChatPreviewPublisher
+from app.services.livechat_menus import MENU_BY_NAV_BUTTON, detect_button_id, get_menu
 from app.services.message_history import build_customer_message_from_inbound
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
 from app.workflows.command_contracts import CommandType
@@ -26,7 +29,28 @@ EXTERNAL_COMMAND_TYPES = {
     str(CommandType.RAG_PLACEHOLDER),
 }
 
+
+def _deepcopy_jsonish(value):
+    return copy.deepcopy(value)
+
 ACTIVE_WORKFLOW_GUARD_STAGES = {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}
+INTRO_EVENT_TYPES = {"CHAT_STARTED", "THREAD_STARTED"}
+FAST_NAV_BUTTON_IDS = set(MENU_BY_NAV_BUTTON) | {"route_main", "route_previous"}
+PREVIEW_ALLOWED_ROUTES = {"faq", "final_reply"}
+PREVIEW_BLOCKED_STAGES = {"backend_querying", "waiting_backend", "handoff_requested"}
+PREVIEW_BLOCKED_INTENTS = {
+    "deposit_missing",
+    "withdrawal_missing",
+    "withdrawal_blocked_or_rollover",
+    "explicit_human_request",
+    "service_frustration",
+    "abusive_or_emotional",
+}
+PREVIEW_BLOCKED_COMMANDS = {
+    str(CommandType.BACKEND_QUERY),
+    str(CommandType.TELEGRAM_SEND_CASE_CARD),
+    str(CommandType.HUMAN_HANDOFF_REQUESTED),
+}
 
 
 def should_enqueue_reply(event: InboundEvent) -> bool:
@@ -75,6 +99,18 @@ class GatewayService:
         llm_final_reply_enabled: bool = False,
         llm_final_reply_min_confidence: float = 0.70,
         llm_final_reply_fallback_enabled: bool = True,
+        livechat_sender_client=None,
+        preview_publisher_factory=None,
+        final_reply_streaming_service=None,
+        image_attachment_analyzer=None,
+        llm_final_reply_streaming_enabled: bool = False,
+        llm_final_reply_preview_enabled: bool = False,
+        llm_final_reply_preview_min_chars: int = 80,
+        llm_final_reply_preview_interval_ms: int = 700,
+        llm_final_reply_preview_min_delta_chars: int = 24,
+        llm_final_reply_preview_max_updates: int = 12,
+        livechat_typing_indicator_enabled: bool = True,
+        livechat_thinking_indicator_enabled: bool = False,
         language_detection_enabled: bool = True,
         language_detection_min_confidence: float = 0.70,
         tenant_persona_default_language: str = "zh-Hans",
@@ -122,6 +158,18 @@ class GatewayService:
         self.llm_final_reply_enabled = bool(llm_final_reply_enabled)
         self.llm_final_reply_min_confidence = float(llm_final_reply_min_confidence)
         self.llm_final_reply_fallback_enabled = bool(llm_final_reply_fallback_enabled)
+        self.livechat_sender_client = livechat_sender_client
+        self.preview_publisher_factory = preview_publisher_factory
+        self.final_reply_streaming_service = final_reply_streaming_service
+        self.image_attachment_analyzer = image_attachment_analyzer
+        self.llm_final_reply_streaming_enabled = bool(llm_final_reply_streaming_enabled)
+        self.llm_final_reply_preview_enabled = bool(llm_final_reply_preview_enabled)
+        self.llm_final_reply_preview_min_chars = int(llm_final_reply_preview_min_chars)
+        self.llm_final_reply_preview_interval_ms = int(llm_final_reply_preview_interval_ms)
+        self.llm_final_reply_preview_min_delta_chars = int(llm_final_reply_preview_min_delta_chars)
+        self.llm_final_reply_preview_max_updates = int(llm_final_reply_preview_max_updates)
+        self.livechat_typing_indicator_enabled = bool(livechat_typing_indicator_enabled)
+        self.livechat_thinking_indicator_enabled = bool(livechat_thinking_indicator_enabled)
         self.language_detection_enabled = bool(language_detection_enabled)
         self.language_detection_min_confidence = float(language_detection_min_confidence)
         self.tenant_persona_default_language = normalize_language_code(tenant_persona_default_language)
@@ -156,20 +204,34 @@ class GatewayService:
             should_reply = should_enqueue_reply(event)
             conversation = await self._load_transactional_conversation(event)
             human_active = self._is_human_active(conversation)
-            recent_messages = await self._load_recent_messages(conversation) if not human_active else []
-            graph_state = (
-                await self._run_graph_with_boundary(inbound_event_id, event, conversation, recent_messages)
-                if not human_active and (should_reply or event.standard_event_type == "FILE_RECEIVED")
-                else None
+            event_for_graph = await self._event_with_image_analysis(event, conversation) if not human_active else event
+            fast_graph_state = self._build_pre_graph_state(event, conversation) if not human_active else None
+            recent_messages = (
+                await self._load_recent_messages(conversation)
+                if not human_active and fast_graph_state is None
+                else []
             )
+            graph_state = fast_graph_state
+            if graph_state is None and not human_active and (should_reply or event.standard_event_type == "FILE_RECEIVED"):
+                graph_state = await self._run_graph_with_boundary(inbound_event_id, event_for_graph, conversation, recent_messages)
             customer_message = (
                 build_customer_message_from_inbound(event, conversation, inbound_event_id)
-                if graph_state or (human_active and (should_reply or event.standard_event_type == "FILE_RECEIVED"))
+                if (
+                    (graph_state and event.standard_event_type in {"MESSAGE_CREATED", "FILE_RECEIVED"})
+                    or (human_active and (should_reply or event.standard_event_type == "FILE_RECEIVED"))
+                )
                 else None
             )
-            outbound_messages = await self._build_outbound_messages(inbound_event_id, event, conversation["conversation_id"], graph_state)
-            outbound_messages = self._append_intro_menu_if_needed(outbound_messages, inbound_event_id, event, conversation, graph_state)
+            outbound_messages = await self._build_outbound_messages(inbound_event_id, event_for_graph, conversation["conversation_id"], graph_state)
+            outbound_messages = self._append_intro_menu_if_needed(outbound_messages, inbound_event_id, event_for_graph, conversation, graph_state)
             external_commands = self._build_external_commands(inbound_event_id, event, conversation, graph_state)
+            graph_state, outbound_messages, assistant_messages = await self._maybe_stream_official_livechat_text(
+                inbound_event_id,
+                event_for_graph,
+                conversation,
+                graph_state,
+                outbound_messages,
+            )
             result = await self.transactional_repository.process_event_transactionally(
                 inbound_event_id,
                 event,
@@ -177,6 +239,7 @@ class GatewayService:
                 outbound_messages,
                 external_commands,
                 graph_state,
+                assistant_messages,
             )
             return {
                 "conversation": result["conversation"],
@@ -196,34 +259,80 @@ class GatewayService:
             thread_id=event.thread_id,
         )
         human_active = self._is_human_active(conversation)
+        event_for_graph = await self._event_with_image_analysis(event, conversation) if not human_active else event
 
         graph_state = None
         outbound_messages = []
+        assistant_messages = []
         customer_message = None
-        if human_active and (should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED"):
+        fast_graph_state = self._build_pre_graph_state(event, conversation) if not human_active else None
+        if fast_graph_state is not None:
+            graph_state = fast_graph_state
+            customer_message = (
+                build_customer_message_from_inbound(event, conversation, inbound_event_id)
+                if event.standard_event_type in {"MESSAGE_CREATED", "FILE_RECEIVED"}
+                else None
+            )
+            outbound_messages = await self._build_outbound_messages(
+                inbound_event_id,
+                event_for_graph,
+                conversation["conversation_id"],
+                graph_state,
+            )
+            graph_state, outbound_messages, assistant_messages = await self._maybe_stream_official_livechat_text(
+                inbound_event_id,
+                event_for_graph,
+                conversation,
+                graph_state,
+                outbound_messages,
+            )
+            if self.message_repository and customer_message:
+                await self.message_repository.insert_idempotent(customer_message)
+            if self.message_repository:
+                for assistant_message in assistant_messages:
+                    await self.message_repository.insert_idempotent(assistant_message)
+            if hasattr(self.conversation_repository, "update_workflow_state"):
+                await self.conversation_repository.update_workflow_state(conversation["conversation_id"], graph_state)
+            for outbound_message in outbound_messages:
+                await self.outbound_repository.insert(outbound_message)
+            external_commands = self._build_external_commands(inbound_event_id, event, conversation, graph_state)
+            if self.external_command_repository:
+                for command in external_commands:
+                    await self.external_command_repository.insert_idempotent(command)
+        elif human_active and (should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED"):
             customer_message = build_customer_message_from_inbound(event, conversation, inbound_event_id)
             if self.message_repository:
                 await self.message_repository.insert_idempotent(customer_message)
             external_commands = []
         elif should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED":
             recent_messages = await self._load_recent_messages(conversation)
-            graph_state = await self._run_graph_with_boundary(inbound_event_id, event, conversation, recent_messages)
+            graph_state = await self._run_graph_with_boundary(inbound_event_id, event_for_graph, conversation, recent_messages)
             customer_message = build_customer_message_from_inbound(event, conversation, inbound_event_id)
             outbound_messages = await self._build_outbound_messages(
                 inbound_event_id,
-                event,
+                event_for_graph,
                 conversation["conversation_id"],
                 graph_state,
             )
             outbound_messages = self._append_intro_menu_if_needed(
                 outbound_messages,
                 inbound_event_id,
-                event,
+                event_for_graph,
                 conversation,
                 graph_state,
             )
+            graph_state, outbound_messages, assistant_messages = await self._maybe_stream_official_livechat_text(
+                inbound_event_id,
+                event_for_graph,
+                conversation,
+                graph_state,
+                outbound_messages,
+            )
             if self.message_repository and customer_message:
                 await self.message_repository.insert_idempotent(customer_message)
+            if self.message_repository:
+                for assistant_message in assistant_messages:
+                    await self.message_repository.insert_idempotent(assistant_message)
             if hasattr(self.conversation_repository, "update_workflow_state"):
                 await self.conversation_repository.update_workflow_state(conversation["conversation_id"], graph_state)
             for outbound_message in outbound_messages:
@@ -249,6 +358,240 @@ class GatewayService:
     def _is_human_active(self, conversation: dict) -> bool:
         return str(conversation.get("status") or "").upper() == "HUMAN_ACTIVE"
 
+    def _build_pre_graph_state(self, event: InboundEvent, conversation: dict) -> dict | None:
+        if str(event.standard_event_type or "") in INTRO_EVENT_TYPES:
+            return self._build_intro_menu_state(event, conversation)
+        if event.standard_event_type != "MESSAGE_CREATED":
+            return None
+        button_id = self._extract_livechat_button_id(event, conversation)
+        if button_id in FAST_NAV_BUTTON_IDS:
+            return self._build_nav_button_state(event, conversation, button_id)
+        if button_id == "global_human":
+            return self._build_fast_handoff_state(event, conversation, button_id)
+        return None
+
+    def _build_intro_menu_state(self, event: InboundEvent, conversation: dict) -> dict:
+        slot_memory = dict(conversation.get("slot_memory") or {})
+        livechat_menu = self._mark_intro_sent(slot_memory.get("livechat_menu") or {}, event.thread_id)
+        livechat_menu["context"] = "main"
+        slot_memory["livechat_menu"] = livechat_menu
+        reply_language = self._fast_menu_language(slot_memory=slot_memory, conversation=conversation)
+        slot_memory["last_reply_language"] = reply_language
+        return {
+            **self._base_pre_graph_state(event, conversation, slot_memory, reply_language),
+            "route": "final_reply",
+            "route_source": "livechat_intro",
+            "intent_result": {
+                "intent": "menu_navigation",
+                "route": "final_reply",
+                "confidence": 1.0,
+                "reason": "LiveChat thread started; send intro menu.",
+                "menu_key": "main",
+            },
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_BUTTONS,
+                    "payload": {"menu_key": "main", "language": reply_language},
+                }
+            ],
+        }
+
+    def _build_nav_button_state(self, event: InboundEvent, conversation: dict, button_id: str) -> dict:
+        slot_memory = dict(conversation.get("slot_memory") or {})
+        livechat_menu = dict(slot_memory.get("livechat_menu") or {})
+        current_context = str(livechat_menu.get("context") or "main")
+        menu_key = self._navigation_menu_key(button_id, livechat_menu)
+        livechat_menu = self._next_fast_menu_memory(livechat_menu, current_context, button_id)
+        slot_memory["livechat_menu"] = livechat_menu
+        reply_language = self._fast_menu_language(slot_memory=slot_memory, conversation=conversation)
+        slot_memory["last_reply_language"] = reply_language
+        return {
+            **self._base_pre_graph_state(event, conversation, slot_memory, reply_language),
+            "route": "final_reply",
+            "route_source": "livechat_button",
+            "intent_result": {
+                "intent": "menu_navigation",
+                "route": "final_reply",
+                "confidence": 1.0,
+                "reason": f"LiveChat menu navigation button {button_id}.",
+                "menu_key": menu_key,
+            },
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_BUTTONS,
+                    "payload": {"menu_key": menu_key, "language": reply_language},
+                }
+            ],
+        }
+
+    def _build_fast_handoff_state(self, event: InboundEvent, conversation: dict, button_id: str) -> dict:
+        slot_memory = dict(conversation.get("slot_memory") or {})
+        reply_language = self._fast_menu_language(slot_memory=slot_memory, conversation=conversation)
+        handoff_text = "我会为你转接真人客服继续协助。"
+        return {
+            **self._base_pre_graph_state(event, conversation, slot_memory, reply_language),
+            "status": "HANDOFF_REQUESTED",
+            "active_workflow": "human_handoff",
+            "workflow_stage": "handoff_requested",
+            "route": "human_handoff",
+            "route_source": "livechat_button",
+            "response_text": handoff_text,
+            "response_text_fallback": handoff_text,
+            "final_response_text": handoff_text,
+            "node_reply_template": "human_handoff",
+            "node_facts": {
+                "reason": "explicit_human_request",
+                "handoff_requested": True,
+                "allowed_facts": ["客户需要真人客服", "系统将提出转接请求"],
+            },
+            "reply_plan": build_reply_plan(
+                kind="human_handoff",
+                fallback_text=handoff_text,
+                must_say=["转接真人客服"],
+                semantic_required_items=["human_handoff_notice"],
+                must_not_say=["已接入", "马上处理", "已处理", "已到账", "已完成"],
+                allowed_facts=["客户需要真人客服", "系统将提出转接请求"],
+            ),
+            "intent_result": {
+                "intent": "explicit_human_request",
+                "route": "human_handoff",
+                "confidence": 1.0,
+                "reason": f"LiveChat button {button_id}.",
+            },
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_TEXT,
+                    "payload": {"text": handoff_text, "handoff_ack": True},
+                },
+                {
+                    "type": CommandType.HUMAN_HANDOFF_REQUESTED,
+                    "payload": {"reason": "explicit_human_request"},
+                },
+            ],
+        }
+
+    def _base_pre_graph_state(self, event: InboundEvent, conversation: dict, slot_memory: dict, reply_language: str) -> dict:
+        raw_text = normalize_text((event.payload_json or {}).get("text") or ((event.payload_json or {}).get("event") or {}).get("text"))
+        return {
+            "conversation_id": conversation["conversation_id"],
+            "tenant_id": conversation.get("tenant_id") or "default",
+            "channel_type": conversation.get("channel_type") or "livechat",
+            "chat_id": event.chat_id,
+            "thread_id": event.thread_id,
+            "event_type": event.standard_event_type,
+            "raw_user_input": raw_text,
+            "rewritten_question": raw_text,
+            "attachments": [],
+            "recent_messages": [],
+            "active_workflow": conversation.get("active_workflow"),
+            "workflow_stage": conversation.get("workflow_stage"),
+            "slot_memory": slot_memory,
+            "detected_language": reply_language,
+            "conversation_language": reply_language,
+            "reply_language": reply_language,
+            "language_result": {
+                "detected_language": reply_language,
+                "conversation_language": reply_language,
+                "reply_language": reply_language,
+                "language_source": "livechat_fast_path",
+            },
+            "rewrite_result": {
+                "rewritten_question": raw_text,
+                "language": reply_language,
+                "detected_language": reply_language,
+                "language_confidence": 1.0,
+                "language_source": "livechat_fast_path",
+                "mentioned_entities": {},
+                "notes": [],
+            },
+            "rewrite_source": "livechat_fast_path",
+            "route_locked": True,
+            "final_reply_result": None,
+            "commands": [],
+        }
+
+    def _extract_livechat_button_id(self, event: InboundEvent, conversation: dict) -> str | None:
+        payload = event.payload_json or {}
+        event_payload = payload.get("event") or {}
+        candidates = (
+            payload.get("button_id"),
+            payload.get("postback_id"),
+            event_payload.get("button_id") if isinstance(event_payload, dict) else None,
+            event_payload.get("postback_id") if isinstance(event_payload, dict) else None,
+            ((event_payload.get("postback") or {}).get("id") if isinstance(event_payload.get("postback"), dict) else None)
+            if isinstance(event_payload, dict)
+            else None,
+        )
+        for candidate in candidates:
+            value = normalize_text(candidate)
+            if value:
+                return value
+        slot_memory = conversation.get("slot_memory") or {}
+        livechat_menu = slot_memory.get("livechat_menu") or {}
+        context = livechat_menu.get("context")
+        raw_text = normalize_text(event_payload.get("text") if isinstance(event_payload, dict) else None)
+        if not raw_text:
+            return None
+        return detect_button_id(
+            raw_text,
+            menu_context=context,
+            language=slot_memory.get("last_reply_language") or self._default_reply_language(),
+        )
+
+    def _mark_intro_sent(self, livechat_menu: dict, thread_id: str | None) -> dict:
+        result = dict(livechat_menu or {})
+        thread_value = str(thread_id or "")
+        intro_threads = {
+            str(value)
+            for value in (result.get("intro_sent_threads") or [])
+            if str(value or "").strip()
+        }
+        if thread_value:
+            intro_threads.add(thread_value)
+        result.update(
+            {
+                "intro_sent": True,
+                "intro_thread_id": thread_value or result.get("intro_thread_id"),
+                "intro_sent_threads": sorted(intro_threads),
+            }
+        )
+        return result
+
+    def _navigation_menu_key(self, button_id: str, livechat_menu: dict) -> str:
+        if button_id in MENU_BY_NAV_BUTTON:
+            return MENU_BY_NAV_BUTTON[button_id]
+        if button_id == "route_main":
+            return "main"
+        if button_id == "route_previous":
+            return str(livechat_menu.get("previous_context") or "main")
+        return "main"
+
+    def _next_fast_menu_memory(self, livechat_menu: dict, context: str, button_id: str) -> dict:
+        preserved_intro = {
+            key: livechat_menu[key]
+            for key in ("intro_sent", "intro_thread_id", "intro_sent_threads")
+            if key in livechat_menu
+        }
+        if button_id in MENU_BY_NAV_BUTTON:
+            return {**preserved_intro, "context": MENU_BY_NAV_BUTTON[button_id], "previous_context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
+        if button_id == "route_main":
+            return {**preserved_intro, "context": "main", "previous_context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
+        if button_id == "route_previous":
+            previous = str(livechat_menu.get("previous_context") or "main")
+            return {**preserved_intro, "context": previous, "previous_context": "main", "intro_sent": livechat_menu.get("intro_sent", True)}
+        return {**livechat_menu, "context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
+
+    def _fast_menu_language(self, *, slot_memory: dict, conversation: dict) -> str:
+        for value in (
+            slot_memory.get("last_reply_language"),
+            conversation.get("conversation_language"),
+            self._default_reply_language(),
+        ):
+            normalized = normalize_language_code(value)
+            if normalized != "unknown":
+                return normalized
+        return "zh-Hans"
+
     async def _run_graph_with_boundary(
         self,
         inbound_event_id: int,
@@ -269,6 +612,7 @@ class GatewayService:
                 graph_state,
                 config={"configurable": {"thread_id": graph_thread_id}},
             )
+            result = await self._maybe_stream_final_reply_preview(inbound_event_id, event, result)
             await self._mark_checkpoint_run_succeeded(checkpoint_run_id, result)
             return result
         except Exception as exc:
@@ -281,6 +625,246 @@ class GatewayService:
                 error=exc,
             )
             raise
+
+    async def _maybe_stream_final_reply_preview(self, inbound_event_id: int, event: InboundEvent, graph_state: dict) -> dict:
+        if self.llm_final_reply_streaming_enabled:
+            return graph_state
+        if not self._should_preview_stream_final_reply(graph_state):
+            return graph_state
+        if not self.final_reply_streaming_service or not hasattr(self.final_reply_streaming_service, "stream_final_reply"):
+            return graph_state
+        sender_client = self.livechat_sender_client
+        if not sender_client:
+            return graph_state
+        chat_id = event.chat_id or graph_state.get("chat_id")
+        if not chat_id:
+            return graph_state
+
+        preview_publisher = self._build_preview_publisher(sender_client, chat_id, inbound_event_id)
+        await self._send_optional_preview_indicators(sender_client, chat_id, inbound_event_id, is_typing=True)
+        try:
+            return await self.final_reply_streaming_service.stream_final_reply(graph_state, preview_publisher)
+        finally:
+            await self._send_optional_typing_indicator(sender_client, chat_id, False)
+
+    def _build_preview_publisher(self, sender_client, chat_id: str, inbound_event_id: int):
+        if self.preview_publisher_factory:
+            return self.preview_publisher_factory(
+                sender_client=sender_client,
+                chat_id=chat_id,
+                inbound_event_id=inbound_event_id,
+                min_interval_ms=self.llm_final_reply_preview_interval_ms,
+                min_delta_chars=self.llm_final_reply_preview_min_delta_chars,
+                max_updates=self.llm_final_reply_preview_max_updates,
+            )
+        return LiveChatPreviewPublisher(
+            sender_client,
+            chat_id=chat_id,
+            inbound_event_id=inbound_event_id,
+            min_interval_ms=self.llm_final_reply_preview_interval_ms,
+            min_delta_chars=self.llm_final_reply_preview_min_delta_chars,
+            max_updates=self.llm_final_reply_preview_max_updates,
+        )
+
+    async def _send_optional_preview_indicators(self, sender_client, chat_id: str, inbound_event_id: int, *, is_typing: bool) -> None:
+        await self._send_optional_typing_indicator(sender_client, chat_id, is_typing)
+        if not self.livechat_thinking_indicator_enabled or not hasattr(sender_client, "send_thinking_indicator"):
+            return
+        try:
+            await sender_client.send_thinking_indicator(chat_id, custom_id=f"thinking:{inbound_event_id}")
+        except Exception:
+            return
+
+    async def _send_optional_typing_indicator(self, sender_client, chat_id: str, is_typing: bool) -> None:
+        if not self.livechat_typing_indicator_enabled or not hasattr(sender_client, "send_typing_indicator"):
+            return
+        try:
+            await sender_client.send_typing_indicator(chat_id, is_typing=is_typing)
+        except Exception:
+            return
+
+    def _should_preview_stream_final_reply(self, graph_state: dict) -> bool:
+        if not self.llm_final_reply_preview_enabled:
+            return False
+        if graph_state.get("channel_type") != "livechat":
+            return False
+        if graph_state.get("route") not in PREVIEW_ALLOWED_ROUTES:
+            return False
+        response_text = normalize_text(graph_state.get("response_text") or graph_state.get("response_text_fallback"))
+        if len(response_text) < self.llm_final_reply_preview_min_chars:
+            return False
+        if graph_state.get("active_workflow") == "human_handoff":
+            return False
+        if graph_state.get("workflow_stage") in PREVIEW_BLOCKED_STAGES:
+            return False
+        intent_result = graph_state.get("intent_result") or {}
+        if intent_result.get("intent") in PREVIEW_BLOCKED_INTENTS:
+            return False
+        if graph_state.get("requires_backend") is True or intent_result.get("requires_backend") is True:
+            return False
+        for command in graph_state.get("commands") or []:
+            if str(command.get("type")) in PREVIEW_BLOCKED_COMMANDS:
+                return False
+        return True
+
+    async def _maybe_stream_official_livechat_text(
+        self,
+        inbound_event_id: int,
+        event: InboundEvent,
+        conversation: dict,
+        graph_state: dict | None,
+        outbound_messages: list[dict],
+    ) -> tuple[dict | None, list[dict], list[dict]]:
+        if not self.llm_final_reply_streaming_enabled:
+            return graph_state, outbound_messages, []
+        if not graph_state or graph_state.get("channel_type") != "livechat":
+            return graph_state, outbound_messages, []
+        if not self.final_reply_streaming_service or not hasattr(self.final_reply_streaming_service, "stream_final_reply"):
+            return graph_state, outbound_messages, []
+        sender_client = self.livechat_sender_client
+        if not sender_client:
+            return graph_state, outbound_messages, []
+        chat_id = event.chat_id or graph_state.get("chat_id")
+        if not chat_id:
+            return graph_state, outbound_messages, []
+        text_indexes = [
+            index
+            for index, message in enumerate(outbound_messages)
+            if (message.get("message_type") or message.get("message_kind") or "text") == "text"
+            and normalize_text((message.get("payload_json") or {}).get("text"))
+        ]
+        if len(text_indexes) != 1:
+            return graph_state, outbound_messages, []
+
+        text_index = text_indexes[0]
+        text_message = outbound_messages[text_index]
+        text = normalize_text((text_message.get("payload_json") or {}).get("text"))
+        stream_state = {
+            **graph_state,
+            "response_text": text,
+            "response_text_fallback": graph_state.get("response_text_fallback") or text,
+            "final_response_text": None,
+        }
+        preview_publisher = self._build_preview_publisher(sender_client, chat_id, inbound_event_id)
+        await self._send_optional_preview_indicators(sender_client, chat_id, inbound_event_id, is_typing=True)
+        try:
+            streamed_state = await self.final_reply_streaming_service.stream_final_reply(stream_state, preview_publisher)
+        except Exception:
+            return graph_state, outbound_messages, []
+        finally:
+            await self._send_optional_typing_indicator(sender_client, chat_id, False)
+
+        final_text = normalize_text(streamed_state.get("final_response_text"))
+        if not final_text:
+            return graph_state, outbound_messages, []
+        remaining_messages = [message for index, message in enumerate(outbound_messages) if index != text_index]
+        assistant_message = self._build_streamed_assistant_message(
+            inbound_event_id,
+            event,
+            conversation,
+            final_text,
+        )
+        return streamed_state, remaining_messages, [assistant_message]
+
+    def _build_streamed_assistant_message(
+        self,
+        inbound_event_id: int,
+        event: InboundEvent,
+        conversation: dict,
+        text: str,
+    ) -> dict:
+        return {
+            "conversation_id": conversation["conversation_id"],
+            "tenant_id": conversation.get("tenant_id") or "default",
+            "channel_type": conversation.get("channel_type") or "livechat",
+            "chat_id": event.chat_id,
+            "thread_id": event.thread_id,
+            "inbound_event_id": inbound_event_id,
+            "outbound_message_id": None,
+            "external_command_result_id": None,
+            "sender_role": "assistant",
+            "message_type": "text",
+            "text_content": text,
+            "attachment_refs": [],
+            "source": "livechat_stream",
+            "occurred_at": None,
+        }
+
+    async def _event_with_image_analysis(self, event: InboundEvent, conversation: dict) -> InboundEvent:
+        if event.standard_event_type != "FILE_RECEIVED":
+            return event
+        analyzer = self.image_attachment_analyzer
+        if not analyzer or not hasattr(analyzer, "analyze"):
+            return event
+        payload = dict(event.payload_json or {})
+        targets = self._image_analysis_targets(payload)
+        if not targets:
+            return event
+        enriched_payload = _deepcopy_jsonish(payload)
+        first_analysis = None
+        for target in targets:
+            attachment = target["attachment"]
+            try:
+                analysis = await analyzer.analyze(
+                    attachment,
+                    tenant_id=conversation.get("tenant_id") or "default",
+                    conversation_id=conversation.get("conversation_id"),
+                    active_workflow=conversation.get("active_workflow"),
+                    workflow_stage=conversation.get("workflow_stage"),
+                )
+            except Exception:
+                continue
+            if not isinstance(analysis, dict) or not analysis:
+                continue
+            first_analysis = first_analysis or analysis
+            self._write_image_analysis(enriched_payload, target, analysis)
+        if not first_analysis:
+            return event
+        enriched_payload["image_analysis"] = first_analysis
+        return event.model_copy(update={"payload_json": enriched_payload}, deep=True)
+
+    def _image_analysis_targets(self, payload: dict) -> list[dict]:
+        targets = []
+        for index, attachment in enumerate(payload.get("attachments") or []):
+            sanitized = self._image_attachment_for_analysis(attachment)
+            if sanitized:
+                targets.append({"location": "attachments", "index": index, "attachment": sanitized})
+        event_payload = payload.get("event") or {}
+        file_payload = event_payload.get("file") if isinstance(event_payload.get("file"), dict) else event_payload
+        sanitized = self._image_attachment_for_analysis(file_payload)
+        if sanitized:
+            targets.append({"location": "event", "attachment": sanitized})
+        return targets
+
+    def _image_attachment_for_analysis(self, item: dict | None) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        url = item.get("url") or item.get("content_url") or item.get("thumbnail_url")
+        content_type = item.get("content_type") or item.get("mime_type")
+        if not url or not str(content_type or "").startswith("image/"):
+            return None
+        return {
+            "url": url,
+            "name": item.get("name") or item.get("filename"),
+            "filename": item.get("filename") or item.get("name"),
+            "mime_type": content_type,
+            "content_type": content_type,
+        }
+
+    def _write_image_analysis(self, payload: dict, target: dict, analysis: dict) -> None:
+        if target["location"] == "attachments":
+            attachments = payload.get("attachments")
+            if isinstance(attachments, list) and target["index"] < len(attachments) and isinstance(attachments[target["index"]], dict):
+                attachments[target["index"]]["image_analysis"] = analysis
+                attachments[target["index"]]["image_analysis_status"] = "analyzed"
+            return
+        event_payload = payload.get("event")
+        if not isinstance(event_payload, dict):
+            return
+        file_payload = event_payload.get("file") if isinstance(event_payload.get("file"), dict) else event_payload
+        if isinstance(file_payload, dict):
+            file_payload["image_analysis"] = analysis
+            file_payload["image_analysis_status"] = "analyzed"
 
     async def _create_checkpoint_run_metadata(
         self,
@@ -867,6 +1451,12 @@ class GatewayService:
                 {
                     "url": attachment.get("url"),
                     "name": attachment.get("name"),
+                    "mime_type": attachment.get("mime_type"),
+                    "content_type": attachment.get("content_type"),
+                    "image_analysis_status": attachment.get("image_analysis_status"),
+                    "image_candidate_id": attachment.get("image_candidate_id"),
+                    "verified_receipt_attachment": attachment.get("verified_receipt_attachment"),
+                    "receipt_kind": attachment.get("receipt_kind"),
                 }
             )
         return attachments
@@ -907,7 +1497,7 @@ class GatewayService:
                 tenant_id=graph_state.get("tenant_id") or "default",
                 conversation_id=conversation_id,
                 inbound_event_id=inbound_event_id,
-                platform="JUE999",
+                platform="CON777",
                 channel_type=graph_state.get("channel_type") or "livechat",
                 language=graph_state.get("reply_language") or self._default_reply_language(),
             )
@@ -921,7 +1511,8 @@ class GatewayService:
                 channel_type=graph_state.get("channel_type") or "livechat",
             )
             if rows:
-                rows = await self._finalize_faq_text_rows(rows, graph_state)
+                if not self.llm_final_reply_streaming_enabled:
+                    rows = await self._finalize_faq_text_rows(rows, graph_state)
                 return rows
         return [
             build_command_outbox(
@@ -949,17 +1540,39 @@ class GatewayService:
             return outbound_messages
         if not (event.payload_json or {}).get("ingress_source"):
             return outbound_messages
+        if self._has_buttons_outbound(outbound_messages):
+            return outbound_messages
+        if graph_state.get("route_source") == "livechat_button":
+            return outbound_messages
+        if not self._should_show_intro_menu(graph_state):
+            return outbound_messages
         slot_memory = graph_state.setdefault("slot_memory", {})
         livechat_menu = dict(slot_memory.get("livechat_menu") or {})
-        if livechat_menu.get("intro_sent"):
+        thread_id = str(event.thread_id or "")
+        intro_threads = {
+            str(value)
+            for value in (livechat_menu.get("intro_sent_threads") or [])
+            if str(value or "").strip()
+        }
+        legacy_intro_thread_id = str(livechat_menu.get("intro_thread_id") or "")
+        if thread_id and (thread_id in intro_threads or thread_id == legacy_intro_thread_id):
             return outbound_messages
         if conversation.get("active_workflow"):
             return outbound_messages
-        if graph_state.get("recent_messages"):
+        if self._has_recent_message_in_thread(graph_state, thread_id):
             return outbound_messages
-        livechat_menu.update({"context": "main", "intro_sent": True})
+        if thread_id:
+            intro_threads.add(thread_id)
+        livechat_menu.update(
+            {
+                "context": "main",
+                "intro_sent": True,
+                "intro_thread_id": thread_id or livechat_menu.get("intro_thread_id"),
+                "intro_sent_threads": sorted(intro_threads),
+            }
+        )
         slot_memory["livechat_menu"] = livechat_menu
-        outbound_messages = list(outbound_messages)
+        outbound_messages = [] if self._should_replace_text_with_intro_menu(graph_state) else list(outbound_messages)
         outbound_messages.append(
             self._buttons_outbox(
                 chat_id=event.chat_id,
@@ -971,6 +1584,29 @@ class GatewayService:
             )
         )
         return outbound_messages
+
+    def _should_replace_text_with_intro_menu(self, graph_state: dict) -> bool:
+        return self._should_show_intro_menu(graph_state)
+
+    def _should_show_intro_menu(self, graph_state: dict) -> bool:
+        intent = (graph_state.get("intent_result") or {}).get("intent")
+        route = graph_state.get("route")
+        if route != "final_reply":
+            return False
+        if graph_state.get("active_workflow"):
+            return False
+        return intent in {"casual_chat", "clarification_needed"}
+
+    def _has_buttons_outbound(self, outbound_messages: list[dict]) -> bool:
+        return any(str(message.get("message_type") or "") == "buttons" for message in outbound_messages)
+
+    def _has_recent_message_in_thread(self, graph_state: dict, thread_id: str) -> bool:
+        if not thread_id:
+            return bool(graph_state.get("recent_messages"))
+        for message in graph_state.get("recent_messages") or []:
+            if str(message.get("thread_id") or "") == thread_id:
+                return True
+        return False
 
     def _buttons_outbox(
         self,
@@ -998,8 +1634,27 @@ class GatewayService:
         )
 
     async def _finalize_faq_text_rows(self, rows: list[dict], graph_state: dict) -> list[dict]:
-        if not self.llm_final_reply_enabled or not self.llm_final_reply_service:
+        final_text = normalize_text(graph_state.get("final_response_text"))
+        text_row_indexes = [
+            index
+            for index, row in enumerate(rows)
+            if row.get("message_type") == "text" and normalize_text((row.get("payload_json") or {}).get("text"))
+        ]
+        if final_text and len(text_row_indexes) == 1:
+            index = text_row_indexes[0]
+            row = rows[index]
+            payload = dict(row.get("payload_json") or {})
+            reply_language = graph_state.get("reply_language") or self._default_reply_language()
+            rows = list(rows)
+            rows[index] = {
+                **row,
+                "payload_json": {
+                    **payload,
+                    "text": normalize_text(adapt_chinese_script(final_text, reply_language)) or final_text,
+                },
+            }
             return rows
+
         finalized_rows = []
         for row in rows:
             if row.get("message_type") != "text":
@@ -1015,15 +1670,19 @@ class GatewayService:
         return finalized_rows
 
     async def _finalize_faq_text_block(self, text: str, graph_state: dict, row: dict) -> str:
+        reply_language = graph_state.get("reply_language") or self._default_reply_language()
+        fallback_text = normalize_text(adapt_chinese_script(text, reply_language))
+        if not self.llm_final_reply_enabled or not self.llm_final_reply_service:
+            return fallback_text
         block_state = {
             **graph_state,
-            "response_text": text,
-            "response_text_fallback": text,
+            "response_text": fallback_text,
+            "response_text_fallback": fallback_text,
             "final_response_text": None,
             "final_reply_result": None,
             "node_reply_template": "faq_answer",
             "node_facts": {
-                "answer": text,
+                "answer": fallback_text,
                 "matched": True,
                 "source": "faq_answer_blocks",
                 "faq_block_index": row.get("block_index"),
@@ -1031,8 +1690,8 @@ class GatewayService:
             },
             "reply_plan": build_reply_plan(
                 kind="faq_answer",
-                fallback_text=text,
-                allowed_facts=[text],
+                fallback_text=fallback_text,
+                allowed_facts=[fallback_text],
                 must_not_say=["已到账", "已完成", "已退款", "保证到账", "手续费全免"],
                 metadata={
                     "faq_block_index": row.get("block_index"),
@@ -1044,8 +1703,9 @@ class GatewayService:
         try:
             result = await self.llm_final_reply_service.compose(block_state)
         except Exception:
-            return text
-        return normalize_text((result or {}).get("final_response_text")) or text
+            return fallback_text
+        final_text = normalize_text((result or {}).get("final_response_text")) or fallback_text
+        return normalize_text(adapt_chinese_script(final_text, reply_language)) or fallback_text
 
     def _has_handoff_ack_command(self, graph_state: dict | None) -> bool:
         if not graph_state:
@@ -1078,6 +1738,8 @@ class GatewayService:
         graph_state: dict | None,
     ) -> list[dict]:
         if not graph_state:
+            return []
+        if graph_state.get("image_candidate_only") or graph_state.get("route_source") == "image_analysis_candidate":
             return []
         conversation_id = conversation["conversation_id"]
         tenant_id = graph_state.get("tenant_id") or conversation.get("tenant_id") or "default"

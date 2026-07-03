@@ -102,6 +102,45 @@ def test_sop_node_drops_unknown_and_protected_planner_slots():
     assert set(result["llm_sop_dialogue_plan"]["dropped_slots"]) == {"unknown_slot", "telegram_message_id"}
 
 
+def test_sop_node_marks_matching_image_analysis_receipt_verified_for_planner():
+    service = PlannerOnlyService(
+        {
+            "intent_relation": "current_sop_supplement",
+            "slot_updates": {"phone": "13800138000"},
+            "slot_confidence": {"phone": 0.97},
+            "missing_slots": ["receipt_screenshot"],
+            "should_ask_confirmation": False,
+            "reply_draft": "",
+            "reason": "phone supplied",
+        }
+    )
+    node = make_sop_node(service, llm_sop_slot_enabled=True)
+
+    result = asyncio.run(
+        node(
+            _sop_state(
+                attachments=[
+                    {
+                        "url": "https://cdn.example/deposit.png",
+                        "content_type": "image/png",
+                        "image_analysis_status": "analyzed",
+                        "image_analysis": {
+                            "is_receipt_like": True,
+                            "receipt_kind": "deposit",
+                            "confidence": 0.91,
+                        },
+                    }
+                ]
+            )
+        )
+    )
+
+    attachment_summary = service.plan_calls[0]["attachments_summary"][0]
+    assert attachment_summary["verified_receipt_attachment"] is True
+    assert attachment_summary["receipt_kind"] == "deposit"
+    assert result["slot_memory"]["deposit_screenshot"] == "https://cdn.example/deposit.png"
+
+
 def test_sop_node_falls_back_when_planner_confidence_is_low():
     service = PlannerOnlyService(
         {

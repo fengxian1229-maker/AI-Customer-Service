@@ -131,6 +131,48 @@ def test_extract_polling_events_from_chat_detail_filters_agent_messages():
     assert payloads[0]["thread_id"] == "thread-1"
 
 
+def test_extract_polling_events_from_empty_thread_adds_thread_started_intro_event():
+    from app.channels.livechat.polling_receiver import extract_polling_events_from_chat_detail
+
+    chat = {
+        "id": "chat-1",
+        "users": [{"id": "customer-1", "type": "customer"}],
+        "threads": [
+            {
+                "id": "thread-1",
+                "created_at": "2026-06-24T00:00:00Z",
+                "events": [],
+            }
+        ],
+    }
+
+    payloads = extract_polling_events_from_chat_detail(chat)
+
+    assert len(payloads) == 1
+    assert payloads[0]["event"]["type"] == "thread_started"
+    assert payloads[0]["event"]["id"] == "intro:chat-1:thread-1"
+
+
+def test_normalize_polling_thread_started_event():
+    payload = {
+        "chat_id": "chat-1",
+        "thread_id": "thread-1",
+        "event": {
+            "id": "intro:chat-1:thread-1",
+            "type": "thread_started",
+            "author_id": None,
+            "created_at": "2026-06-24T00:00:00Z",
+        },
+    }
+
+    result = normalize_polling_event(payload, self_author_ids=set())
+
+    assert result.standard_event_type == "THREAD_STARTED"
+    assert result.sender_role == "system"
+    assert result.dedup_key == "livechat_polling:chat-1:thread-1:intro:chat-1:thread-1"
+    assert result.ignored is False
+
+
 def test_extract_polling_events_from_chat_summary_uses_last_message():
     from app.channels.livechat.polling_receiver import extract_polling_events_from_chat_summary
 

@@ -62,6 +62,106 @@ def test_build_graph_state_from_event_extracts_text_context_and_attachments():
     assert state["rewrite_source"] == "deterministic"
 
 
+def test_build_graph_state_preserves_image_attachment_metadata_and_candidates():
+    event = make_event(
+        event_type="FILE_RECEIVED",
+        payload={
+            "event": {
+                "type": "file",
+                "url": "https://cdn.example/deposit-receipt.png",
+                "name": "deposit-receipt.png",
+                "mime_type": "image/png",
+                "image_analysis": {
+                    "candidate_intents": ["deposit_missing_candidate"],
+                    "receipt_kind": "deposit",
+                    "is_receipt_like": True,
+                    "confidence": 0.91,
+                },
+            }
+        },
+    )
+
+    state = build_graph_state_from_event(event, {"conversation_id": "livechat:chat-1", "slot_memory": {}})
+
+    assert state["attachments"][0]["mime_type"] == "image/png"
+    assert state["attachments"][0]["content_type"] == "image/png"
+    assert state["image_analysis"]["candidate_intents"] == ["deposit_missing_candidate"]
+    assert state["image_candidate_only"] is True
+
+
+def test_image_only_deposit_candidate_asks_confirmation_without_entering_sop():
+    result = intent_router_node(
+        {
+            "event_type": "FILE_RECEIVED",
+            "raw_user_input": "",
+            "rewritten_question": "",
+            "attachments": [{"url": "https://cdn.example/deposit.png", "mime_type": "image/png"}],
+            "image_analysis": {
+                "candidate_intents": ["deposit_missing_candidate"],
+                "receipt_kind": "deposit",
+                "is_receipt_like": True,
+                "confidence": 0.9,
+            },
+            "slot_memory": {},
+        }
+    )
+
+    assert result["route"] == "final_reply"
+    assert result["intent_result"]["intent"] == "image_deposit_candidate"
+    assert result["active_workflow"] is None
+    assert result["image_candidate_only"] is True
+    assert "存款" in result["response_text"]
+    assert result["commands"][0]["type"] == CommandType.LIVECHAT_SEND_TEXT
+
+
+def test_image_only_unknown_candidate_asks_user_to_describe_issue():
+    result = intent_router_node(
+        {
+            "event_type": "FILE_RECEIVED",
+            "raw_user_input": "",
+            "rewritten_question": "",
+            "attachments": [{"url": "https://cdn.example/landscape.png", "mime_type": "image/png"}],
+            "image_analysis": {
+                "candidate_intents": ["unknown_image"],
+                "receipt_kind": "unknown",
+                "is_receipt_like": False,
+                "confidence": 0.2,
+            },
+            "slot_memory": {},
+        }
+    )
+
+    assert result["route"] == "final_reply"
+    assert result["intent_result"]["intent"] == "image_unknown"
+    assert result["active_workflow"] is None
+    assert "补充" in result["response_text"]
+
+
+def test_confirmed_deposit_image_candidate_enters_sop():
+    result = intent_router_node(
+        {
+            "event_type": "MESSAGE_CREATED",
+            "raw_user_input": "是，帮我查存款",
+            "rewritten_question": "是，帮我查存款",
+            "slot_memory": {
+                "pending_image_candidates": [
+                    {
+                        "attachment_url": "https://cdn.example/deposit.png",
+                        "candidate_intents": ["deposit_missing_candidate"],
+                        "receipt_kind": "deposit",
+                        "is_receipt_like": True,
+                        "confidence": 0.9,
+                    }
+                ]
+            },
+        }
+    )
+
+    assert result["route"] == "sop"
+    assert result["intent_result"]["intent"] == "deposit_missing"
+    assert result["slot_memory"]["verified_receipt_attachments"][0]["url"] == "https://cdn.example/deposit.png"
+
+
 def test_rewrite_question_node_keeps_user_facts():
     result = rewrite_question_node({"raw_user_input": "mi usuario es andy123, deposito 50000 no llegó"})
 
@@ -86,7 +186,7 @@ def test_intent_router_node_routes_bot66tornado_samples():
         ("Tengo un caso anterior", "pending_reply_lookup", "sop"),
         ("no veo ningun menu", "clarification_needed", "final_reply"),
         ("Todo el tiempo lo mismo", "service_frustration", "emotion_care"),
-        ("Problemas técnicos del juego", "unsupported_concrete_issue", "human_handoff"),
+        ("Problemas técnicos del juego", "game_technical_issue", "human_handoff"),
     ]
 
     for text, expected_intent, expected_route in cases:
@@ -94,6 +194,60 @@ def test_intent_router_node_routes_bot66tornado_samples():
 
         assert result["intent_result"]["intent"] == expected_intent
         assert result["route"] == expected_route
+
+
+def test_auto_handoff_p0_risk_scenarios():
+    cases = [
+        ("截图上传不了，一直失败", "screenshot_upload_failed"),
+        ("我的提款银行卡身份资料异常", "wallet_identity_risk"),
+        ("验证码收不到，SIM 验证不了", "account_verification_issue"),
+        ("优惠码 bonus 注册退款问题", "promo_refund_unsupported"),
+        ("游戏技术问题打不开", "game_technical_issue"),
+        ("你们是不是诈骗，资金安全有问题", "abuse_or_fraud_risk"),
+        ("我按照教程做了还是不行", "tutorial_failed_aftercare"),
+    ]
+
+    for text, expected_intent in cases:
+        result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
+
+        assert result["route"] == "human_handoff"
+        assert result["intent_result"]["intent"] == expected_intent
+
+
+def test_menu_stuck_repeated_handoffs_on_second_attempt():
+    first = intent_router_node(
+        {
+            "rewritten_question": "no veo ningun menu",
+            "raw_user_input": "no veo ningun menu",
+            "slot_memory": {},
+        }
+    )
+    second = intent_router_node(
+        {
+            "rewritten_question": "no veo ningun menu",
+            "raw_user_input": "no veo ningun menu",
+            "slot_memory": first["slot_memory"],
+        }
+    )
+
+    assert first["route"] == "final_reply"
+    assert second["route"] == "human_handoff"
+    assert second["intent_result"]["intent"] == "menu_stuck_repeated"
+
+
+def test_active_workflow_conflict_with_existing_data_handoffs():
+    result = intent_router_node(
+        {
+            "raw_user_input": "我还有一笔提款没到账",
+            "rewritten_question": "我还有一笔提款没到账",
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "collecting_slots",
+            "slot_memory": {"account_or_phone": "abc123", "amount": "1000"},
+        }
+    )
+
+    assert result["route"] == "human_handoff"
+    assert result["intent_result"]["intent"] == "active_workflow_conflict_with_data"
 
 
 def test_intent_router_node_does_not_emit_sop_slots():
@@ -127,16 +281,16 @@ def test_emotional_withdrawal_missing_routes_to_sop():
     text = "scam, my withdrawal did not arrive"
     result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
 
-    assert result["route"] == "sop"
-    assert result["intent_result"]["intent"] == "withdrawal_missing"
+    assert result["route"] == "human_handoff"
+    assert result["intent_result"]["intent"] == "abuse_or_fraud_risk"
 
 
 def test_emotional_withdrawal_blocked_routes_to_sop():
     text = "你们是骗子，我无法提款，说我流水不够"
     result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
 
-    assert result["route"] == "sop"
-    assert result["intent_result"]["intent"] == "withdrawal_blocked_or_rollover"
+    assert result["route"] == "human_handoff"
+    assert result["intent_result"]["intent"] == "abuse_or_fraud_risk"
 
 
 def test_pure_emotional_message_routes_to_emotion_care():
@@ -320,6 +474,85 @@ def test_conversation_memory_lookup_uses_recent_customer_message():
     assert result["intent_result"]["intent"] == "conversation_memory_lookup"
     assert result["node_reply_template"] == "contextual_followup"
     assert result["response_text"] == "你上一句说的是：我忘记我的密码了"
+
+
+def test_withdrawal_reason_recall_uses_recent_backend_reply_not_pending_case_lookup():
+    result = intent_router_node(
+        {
+            "raw_user_input": "刚刚是说我因为什么原因导致无法提款来着？",
+            "rewritten_question": "刚刚是说我因为什么原因导致无法提款来着？",
+            "active_workflow": "pending_reply_lookup",
+            "workflow_stage": "lookup_pending_reply",
+            "slot_memory": {
+                "account_or_phone": "3239413629",
+                "backend_query_status": "success",
+                "pending_reply_identity": "3239413629",
+            },
+            "recent_messages": [
+                {"sender_role": "assistant", "text_content": "您好，一般无法提款通常与流水要求或风控限制有关。"},
+                {"sender_role": "assistant", "text_content": "您好，经查询您的账号 3239413629，目前尚有未完成的流水要求。系统显示您当前的剩余流水为 1375.09。请您在满足该流水要求后再次尝试操作提款。"},
+                {"sender_role": "customer", "text_content": "好的，谢谢您"},
+                {"sender_role": "assistant", "text_content": "不用客气。如果后续有存款、提款、流水相关的问题，或需要真人客服协助，请随时告知我。"},
+            ],
+        }
+    )
+
+    assert result["route"] == "final_reply"
+    assert result["intent_result"]["intent"] == "conversation_memory_lookup"
+    assert result["intent_result"]["preserve_active_workflow"] is True
+    assert result["node_reply_template"] == "contextual_followup"
+    assert "剩余流水为 1375.09" in result["response_text"]
+    assert result["commands"] == []
+
+
+def test_explicit_previous_case_still_routes_to_pending_reply_lookup():
+    result = intent_router_node({"raw_user_input": "上一笔案件", "rewritten_question": "上一笔案件"})
+
+    assert result["route"] == "sop"
+    assert result["intent_result"]["intent"] == "pending_reply_lookup"
+
+
+def test_llm_router_memory_guard_prevents_pending_case_misroute():
+    import asyncio
+
+    class PendingCaseService:
+        def __init__(self):
+            self.calls = []
+
+        async def route(self, payload):
+            self.calls.append(payload)
+            return {
+                "intent": "pending_reply_lookup",
+                "route": "sop",
+                "confidence": 0.95,
+                "sop_name": "pending_reply_lookup",
+                "requires_backend": True,
+                "reason": "bad previous case classification",
+                "provider": "fake",
+                "mode": "guarded_authoritative",
+            }
+
+    service = PendingCaseService()
+    node = make_intent_router_node(service)
+    result = asyncio.run(
+        node(
+            {
+                "raw_user_input": "刚刚是说我因为什么原因导致无法提款来着？",
+                "rewritten_question": "刚刚是说我因为什么原因导致无法提款来着？",
+                "active_workflow": "pending_reply_lookup",
+                "workflow_stage": "lookup_pending_reply",
+                "recent_messages": [
+                    {"sender_role": "assistant", "text_content": "您好，经查询您的账号 3239413629，目前尚有未完成的流水要求。系统显示您当前的剩余流水为 1375.09。"},
+                ],
+            }
+        )
+    )
+
+    assert service.calls == []
+    assert result["route"] == "final_reply"
+    assert result["intent_result"]["intent"] == "conversation_memory_lookup"
+    assert "1375.09" in result["response_text"]
+    assert result["llm_router_result"]["fallback_reason"] == "conversation_memory_guard"
 
 
 def test_llm_intent_invalid_active_workflow_switch_falls_back_to_deterministic_faq():

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     livechat_handoff_ignore_agents_availability: bool = True
     livechat_handoff_ignore_requester_presence: bool = True
     livechat_handoff_enabled: bool = False
+    livechat_image_text_fallback: bool = False
     telegram_bot_token: str | None = None
     telegram_api_base: str = "https://api.telegram.org"
     telegram_sop_enabled: bool = False
@@ -67,6 +68,14 @@ class Settings(BaseSettings):
     llm_final_reply_enabled: bool = True
     llm_final_reply_min_confidence: float = 0.70
     llm_final_reply_fallback_enabled: bool = True
+    llm_final_reply_streaming_enabled: bool = True
+    llm_final_reply_preview_enabled: bool = True
+    llm_final_reply_preview_min_chars: int = 80
+    llm_final_reply_preview_interval_ms: int = 700
+    llm_final_reply_preview_min_delta_chars: int = 24
+    llm_final_reply_preview_max_updates: int = 12
+    livechat_typing_indicator_enabled: bool = True
+    livechat_thinking_indicator_enabled: bool = False
     language_detection_enabled: bool = True
     language_detection_min_confidence: float = 0.70
     tenant_persona_default_language: str = "zh-Hans"

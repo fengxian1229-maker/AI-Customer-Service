@@ -21,7 +21,13 @@ def test_deposit_missing_generates_case_card_when_identity_and_screenshot_comple
             "intent_result": {"intent": "deposit_missing"},
             "rewritten_question": "mi usuario es andy123",
             "slot_memory": {},
-            "attachments": [{"url": "https://cdn.example/deposit.png"}],
+            "attachments": [
+                {
+                    "url": "https://cdn.example/deposit.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "deposit",
+                }
+            ],
         }
     )
 
@@ -72,7 +78,13 @@ def test_withdrawal_missing_with_screenshot_only_asks_for_identity():
         {
             "intent_result": {"intent": "withdrawal_missing"},
             "slot_memory": {},
-            "attachments": [{"url": "https://cdn.example/withdrawal.png"}],
+            "attachments": [
+                {
+                    "url": "https://cdn.example/withdrawal.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "withdrawal",
+                }
+            ],
         }
     )
 
@@ -86,7 +98,13 @@ def test_withdrawal_missing_generates_case_card_when_complete():
             "intent_result": {"intent": "withdrawal_missing"},
             "rewritten_question": "mi usuario es andy123",
             "slot_memory": {},
-            "attachments": [{"url": "https://cdn.example/withdrawal.png"}],
+            "attachments": [
+                {
+                    "url": "https://cdn.example/withdrawal.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "withdrawal",
+                }
+            ],
         }
     )
 
@@ -269,7 +287,7 @@ def test_llm_username_and_phone_preserves_username_account_slot():
     assert state["slot_memory"]["phone"] == "12335"
 
 
-def test_attachment_without_text_is_receipt_screenshot():
+def test_unverified_attachment_without_text_is_not_receipt_screenshot():
     state = run_sop(
         {
             "intent_result": {"intent": "deposit_missing"},
@@ -278,8 +296,128 @@ def test_attachment_without_text_is_receipt_screenshot():
         }
     )
 
-    assert state["slot_memory"]["receipt_screenshot"] == "https://cdn.example/receipt.png"
-    assert state["slot_memory"]["deposit_screenshot"] == "https://cdn.example/receipt.png"
+    assert "receipt_screenshot" not in state["slot_memory"]
+    assert "deposit_screenshot" not in state["slot_memory"]
+    assert state["commands"] == []
+
+
+def test_deposit_missing_accepts_matching_image_analysis_receipt_and_asks_phone_only():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "deposit_missing"},
+            "slot_memory": {},
+            "attachments": [
+                {
+                    "url": "https://cdn.example/deposit.png",
+                    "content_type": "image/png",
+                    "image_analysis_status": "analyzed",
+                    "image_analysis": {
+                        "is_receipt_like": True,
+                        "receipt_kind": "deposit",
+                        "confidence": 0.91,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert state["slot_memory"]["deposit_screenshot"] == "https://cdn.example/deposit.png"
+    assert state["slot_memory"]["receipt_screenshot"] == "https://cdn.example/deposit.png"
+    assert state["missing_slots"] == ["phone"]
+    assert state["commands"] == []
+    assert state["response_text"] == "已收到截图，请再提供用户名或注册手机号。"
+
+
+def test_deposit_missing_sends_case_when_phone_then_image_analysis_receipt():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "deposit_missing"},
+            "slot_memory": {"phone": "13800138000"},
+            "attachments": [
+                {
+                    "url": "https://cdn.example/deposit.png",
+                    "content_type": "image/png",
+                    "image_analysis_status": "analyzed",
+                    "image_analysis": {
+                        "is_receipt_like": True,
+                        "receipt_kind": "deposit",
+                        "confidence": 0.91,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert state["missing_slots"] == []
+    assert state["slot_memory"]["deposit_screenshot"] == "https://cdn.example/deposit.png"
+    assert state["commands"][0]["type"] == CommandType.TELEGRAM_SEND_CASE_CARD
+
+
+def test_deposit_missing_sends_case_when_image_analysis_receipt_then_phone():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "deposit_missing"},
+            "raw_user_input": "13800138000",
+            "slot_memory": {
+                "receipt_screenshot": "https://cdn.example/deposit.png",
+                "deposit_screenshot": "https://cdn.example/deposit.png",
+            },
+            "attachments": [],
+        }
+    )
+
+    assert state["missing_slots"] == []
+    assert state["slot_memory"]["phone"] == "13800138000"
+    assert state["commands"][0]["type"] == CommandType.TELEGRAM_SEND_CASE_CARD
+
+
+def test_deposit_missing_rejects_unknown_low_confidence_and_wrong_kind_image_analysis():
+    cases = [
+        {"is_receipt_like": False, "receipt_kind": "deposit", "confidence": 0.95},
+        {"is_receipt_like": True, "receipt_kind": "unknown", "confidence": 0.95},
+        {"is_receipt_like": True, "receipt_kind": "deposit", "confidence": 0.2},
+        {"is_receipt_like": True, "receipt_kind": "withdrawal", "confidence": 0.95},
+    ]
+
+    for analysis in cases:
+        state = run_sop(
+            {
+                "intent_result": {"intent": "deposit_missing"},
+                "slot_memory": {"phone": "13800138000"},
+                "attachments": [
+                    {
+                        "url": "https://cdn.example/image.png",
+                        "content_type": "image/png",
+                        "image_analysis_status": "analyzed",
+                        "image_analysis": analysis,
+                    }
+                ],
+            }
+        )
+
+        assert "receipt_screenshot" not in state["slot_memory"]
+        assert "deposit_screenshot" not in state["slot_memory"]
+        assert state["commands"] == []
+
+
+def test_mismatched_verified_attachment_is_not_receipt_screenshot():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "withdrawal_missing"},
+            "slot_memory": {"phone": "13800138000"},
+            "attachments": [
+                {
+                    "url": "https://cdn.example/deposit.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "deposit",
+                }
+            ],
+        }
+    )
+
+    assert "receipt_screenshot" not in state["slot_memory"]
+    assert "withdrawal_screenshot" not in state["slot_memory"]
+    assert state["commands"] == []
 
 
 def test_llm_corrects_previous_phone():
@@ -307,7 +445,13 @@ def test_llm_complete_slots_generate_telegram_case_card():
         {
             "intent_result": {"intent": "deposit_missing"},
             "slot_memory": {"phone": "13800138000"},
-            "attachments": [{"url": "https://cdn.example/receipt.png"}],
+            "attachments": [
+                {
+                    "url": "https://cdn.example/receipt.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "deposit",
+                }
+            ],
             "llm_sop_dialogue_plan": {
                 "status": "accepted",
                 "intent_relation": "current_sop_supplement",

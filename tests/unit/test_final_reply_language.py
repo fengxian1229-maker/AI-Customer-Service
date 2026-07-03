@@ -139,9 +139,9 @@ def test_final_reply_zh_hans_rejects_traditional_script_and_simplifies_fallback(
     assert result["final_reply_result"]["status"] == "fallback"
     assert "language_script_mismatch" in result["final_reply_result"]["violations"]
     payload = provider.calls[0]
-    assert payload["response_text_fallback"] == "请上传能清楚看到付款凭证的截图。"
-    assert payload["rag_result"]["answer"] == "请上传能清楚看到付款凭证的截图。"
-    assert payload["reply_plan"]["allowed_facts"] == ["请上传能清楚看到付款凭证的截图。"]
+    assert payload["response_text_fallback"] == "請上傳能清楚看到付款憑證的截圖。"
+    assert payload["rag_result"]["answer"] == "請上傳能清楚看到付款憑證的截圖。"
+    assert payload["reply_plan"]["allowed_facts"] == ["請上傳能清楚看到付款憑證的截圖。"]
 
 
 def test_final_reply_zh_hant_rejects_simplified_script_and_traditionalizes_fallback():
@@ -184,9 +184,9 @@ def test_final_reply_zh_hant_rejects_simplified_script_and_traditionalizes_fallb
     assert result["final_reply_result"]["status"] == "fallback"
     assert "language_script_mismatch" in result["final_reply_result"]["violations"]
     payload = provider.calls[0]
-    assert payload["response_text_fallback"] == "請上傳能清楚看到付款憑證的截圖。"
-    assert payload["rag_result"]["answer"] == "請上傳能清楚看到付款憑證的截圖。"
-    assert payload["reply_plan"]["allowed_facts"] == ["請上傳能清楚看到付款憑證的截圖。"]
+    assert payload["response_text_fallback"] == "请上传能清楚看到付款凭证的截图。"
+    assert payload["rag_result"]["answer"] == "请上传能清楚看到付款凭证的截图。"
+    assert payload["reply_plan"]["allowed_facts"] == ["请上传能清楚看到付款凭证的截图。"]
 
 
 def test_final_reply_accepts_zh_hant_when_script_matches():

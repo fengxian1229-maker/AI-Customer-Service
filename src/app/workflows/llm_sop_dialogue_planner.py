@@ -35,7 +35,7 @@ def build_llm_sop_dialogue_input(state: dict[str, Any], intent: str, definition:
         "current_slot_memory": dict(state.get("slot_memory") or {}),
         "sop_definition": definition.as_llm_schema(),
         "latest_user_text": str(state.get("rewritten_question") or state.get("raw_user_input") or ""),
-        "attachments_summary": _attachments_summary(state),
+        "attachments_summary": _attachments_summary(state, intent),
         "recent_messages": list(state.get("recent_messages") or []),
         "reply_language": state.get("reply_language") or "unknown",
     }
@@ -69,7 +69,7 @@ def apply_llm_sop_plan(state: dict[str, Any], intent: str, llm_plan: dict[str, A
     slot_updates: dict[str, Any] = {}
     dropped_slots: list[str] = list(dict.fromkeys(str(key) for key in llm_plan.get("dropped_slots") or []))
     allowed_keys = set(definition.slot_keys) | _legacy_schema_keys(intent)
-    allowed_attachment_urls = _allowed_attachment_urls(state, slot_memory)
+    allowed_attachment_urls = _allowed_attachment_urls(state, intent, slot_memory)
 
     for key, value in dict(llm_plan.get("slot_updates") or llm_plan.get("extracted_slots") or {}).items():
         key = str(key)
@@ -175,7 +175,8 @@ def _slot_type(definition: SopDefinition, key: str) -> str:
 
 
 def _merge_attachment_slots(intent: str, slot_memory: dict[str, Any], attachments: list[dict[str, Any]]) -> None:
-    urls = attachment_urls(attachments)
+    verified = _verified_receipt_attachments(intent, attachments)
+    urls = attachment_urls(verified)
     if not urls:
         return
     forwarded = list(dict.fromkeys([*slot_memory.get("forwarded_attachment_urls", []), *urls]))
@@ -183,6 +184,45 @@ def _merge_attachment_slots(intent: str, slot_memory: dict[str, Any], attachment
     screenshot_key = "deposit_screenshot" if intent == "deposit_missing" else "withdrawal_screenshot"
     slot_memory.setdefault("receipt_screenshot", urls[0])
     slot_memory.setdefault(screenshot_key, urls[0])
+
+
+def _verified_receipt_attachments(intent: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    expected_kind = "deposit" if intent == "deposit_missing" else "withdrawal" if intent == "withdrawal_missing" else None
+    if expected_kind is None:
+        return []
+    result = []
+    for attachment in attachments or []:
+        verified = _verified_receipt_attachment(intent, attachment)
+        if verified:
+            result.append(verified)
+    return result
+
+
+def _verified_receipt_attachment(intent: str, attachment: dict[str, Any]) -> dict[str, Any] | None:
+    expected_kind = "deposit" if intent == "deposit_missing" else "withdrawal" if intent == "withdrawal_missing" else None
+    if expected_kind is None or not attachment.get("url"):
+        return None
+    if attachment.get("verified_receipt_attachment") and str(attachment.get("receipt_kind") or "").lower() == expected_kind:
+        return attachment
+
+    analysis = attachment.get("image_analysis")
+    if not isinstance(analysis, dict):
+        return None
+    if not analysis.get("is_receipt_like"):
+        return None
+    if str(analysis.get("receipt_kind") or "").lower() != expected_kind:
+        return None
+    try:
+        confidence = float(analysis.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence < LOW_CONFIDENCE_THRESHOLD:
+        return None
+
+    verified = dict(attachment)
+    verified["verified_receipt_attachment"] = True
+    verified["receipt_kind"] = expected_kind
+    return verified
 
 
 def _sync_legacy_aliases(intent: str, slot_memory: dict[str, Any]) -> None:
@@ -216,9 +256,11 @@ def _intent_relation(plan: dict[str, Any]) -> str:
     return relation if relation in INTENT_RELATIONS else "unclear"
 
 
-def _allowed_attachment_urls(state: dict[str, Any], slot_memory: dict[str, Any]) -> set[str]:
-    urls = set(attachment_urls(state.get("attachments") or []))
-    for item in state.get("attachments_summary") or []:
+def _allowed_attachment_urls(state: dict[str, Any], intent: str, slot_memory: dict[str, Any]) -> set[str]:
+    urls = {
+        str(item["url"]) for item in _verified_receipt_attachments(intent, state.get("attachments") or []) if item.get("url")
+    }
+    for item in _verified_receipt_attachments(intent, state.get("attachments_summary") or []):
         if item.get("url"):
             urls.add(str(item["url"]))
     for key in ("receipt_screenshot", "deposit_screenshot", "withdrawal_screenshot"):
@@ -227,5 +269,24 @@ def _allowed_attachment_urls(state: dict[str, Any], slot_memory: dict[str, Any])
     return urls
 
 
-def _attachments_summary(state: dict[str, Any]) -> list[dict[str, Any]]:
-    return [{"url": item.get("url"), "name": item.get("name")} for item in state.get("attachments") or []]
+def _attachments_summary(state: dict[str, Any], intent: str | None = None) -> list[dict[str, Any]]:
+    attachments = []
+    for item in state.get("attachments") or []:
+        normalized = _verified_receipt_attachment(intent or "", item) if intent else None
+        source = normalized or item
+        attachments.append(
+            {
+                "url": source.get("url"),
+                "name": source.get("name"),
+                "mime_type": source.get("mime_type"),
+                "content_type": source.get("content_type"),
+                "image_analysis_status": source.get("image_analysis_status"),
+                "image_candidate_id": source.get("image_candidate_id"),
+                "verified_receipt_attachment": source.get("verified_receipt_attachment"),
+                "receipt_kind": source.get("receipt_kind"),
+            }
+        )
+    return [
+        {key: value for key, value in item.items() if value is not None}
+        for item in attachments
+    ]

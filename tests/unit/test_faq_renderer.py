@@ -42,20 +42,20 @@ def test_renderer_preview_selects_platform_asset_ref():
     ]
 
 
-def test_renderer_preview_defaults_to_jue999_platform_asset_ref():
+def test_renderer_preview_defaults_to_con777_platform_asset_ref():
     preview = render_answer_blocks_preview(
         [
             {
                 "type": "image",
                 "asset_key": "deposit_howto",
                 "platform_asset_map": {
-                    "JUE999": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+                    "CON777": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
                 },
             }
         ]
     )
 
-    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/JUE999/deposit.jpg"
+    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/CON777/deposit.jpg"
 
 
 def test_renderer_preview_falls_back_to_default_asset_ref():
@@ -115,13 +115,13 @@ def test_renderer_preview_uses_default_multimodal_seed_deposit_howto():
     seed_rows = json.loads(seed_path.read_text(encoding="utf-8"))
     deposit = next(row for row in seed_rows if row["metadata_json"]["intent_id"] == "deposit_howto")
 
-    preview = render_answer_blocks_preview(deposit["answer_blocks"], platform="JUE999")
+    preview = render_answer_blocks_preview(deposit["answer_blocks"])
 
     assert preview[0]["kind"] == "image"
     assert preview[0]["asset_key"] == "deposit_howto"
-    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/JUE999/deposit.jpg"
+    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/CON777/deposit.jpg"
     assert preview[1]["kind"] == "text"
-    assert preview[2] == {"kind": "buttons", "menu_key": "deposit_recovery"}
+    assert len(preview) == 2
 
 
 @pytest.mark.parametrize(

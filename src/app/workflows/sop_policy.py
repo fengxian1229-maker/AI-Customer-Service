@@ -3,7 +3,6 @@ from typing import Any
 from app.workflows.sop_definitions import get_sop_definition
 from app.workflows.llm_sop_dialogue_planner import compute_missing_slots
 from app.workflows.slot_extractors import (
-    attachment_urls,
     extract_identity,
     extract_order_id,
     extract_transaction_signal,
@@ -31,7 +30,7 @@ def evaluate_sop_policy(
     if stage == "waiting_backend":
         text = str(latest_text or "")
         has_supplement = bool(
-            attachment_urls(attachments or [])
+            _has_verified_receipt_supplement(str(intent or ""), attachments or [])
             or extract_identity(text)
             or extract_order_id(text)
             or extract_transaction_signal(text)
@@ -59,3 +58,15 @@ def evaluate_sop_policy(
     if active_workflow and active_workflow != intent:
         return {"action": "blocked", "missing_slots": [], "reason": "active_workflow_mismatch", "allowed": False}
     return {"action": "send_telegram_case", "missing_slots": [], "reason": "required_slots_complete", "allowed": True}
+
+
+def _has_verified_receipt_supplement(intent: str, attachments: list[dict[str, Any]]) -> bool:
+    expected_kind = "deposit" if intent == "deposit_missing" else "withdrawal" if intent == "withdrawal_missing" else None
+    if expected_kind is None:
+        return False
+    return any(
+        attachment.get("url")
+        and attachment.get("verified_receipt_attachment")
+        and str(attachment.get("receipt_kind") or "").lower() == expected_kind
+        for attachment in attachments
+    )

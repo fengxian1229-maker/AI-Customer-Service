@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 
+from app.channels.livechat.sender_client import LiveChatSenderClient
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import (
@@ -15,7 +16,9 @@ from app.graph.checkpointing import build_checkpointer
 from app.llm.provider import build_llm_provider
 from app.schemas.events import InboundEvent
 from app.services.final_reply_factory import build_final_reply_service_from_settings
+from app.services.final_reply_streaming_service import FinalReplyStreamingService
 from app.services.gateway import GatewayService
+from app.services.image_analysis import ImageAttachmentAnalyzer
 from app.services.rag import RagService
 
 
@@ -74,6 +77,9 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
     rag_service = RagService(knowledge_repository=knowledge_repository)
     llm_provider = build_llm_provider(getattr(settings, "llm_provider", "off"), settings=settings) if settings else None
     final_reply_service = _build_final_reply_service(settings)
+    final_reply_streaming_service = _build_final_reply_streaming_service(settings)
+    livechat_sender_client = _build_livechat_sender_client(settings) if final_reply_streaming_service else None
+    image_attachment_analyzer = ImageAttachmentAnalyzer(llm_provider) if llm_provider is not None else None
     managed_checkpointer = build_checkpointer(checkpoint_mode, settings=settings)
     service_kwargs = {
         "transactional_repository": transactional_repository,
@@ -122,6 +128,17 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
                 "llm_final_reply_enabled": getattr(settings, "llm_final_reply_enabled", False),
                 "llm_final_reply_min_confidence": getattr(settings, "llm_final_reply_min_confidence", 0.70),
                 "llm_final_reply_fallback_enabled": getattr(settings, "llm_final_reply_fallback_enabled", True),
+                "livechat_sender_client": livechat_sender_client,
+                "final_reply_streaming_service": final_reply_streaming_service,
+                "image_attachment_analyzer": image_attachment_analyzer,
+                "llm_final_reply_streaming_enabled": getattr(settings, "llm_final_reply_streaming_enabled", False),
+                "llm_final_reply_preview_enabled": getattr(settings, "llm_final_reply_preview_enabled", False),
+                "llm_final_reply_preview_min_chars": getattr(settings, "llm_final_reply_preview_min_chars", 80),
+                "llm_final_reply_preview_interval_ms": getattr(settings, "llm_final_reply_preview_interval_ms", 700),
+                "llm_final_reply_preview_min_delta_chars": getattr(settings, "llm_final_reply_preview_min_delta_chars", 24),
+                "llm_final_reply_preview_max_updates": getattr(settings, "llm_final_reply_preview_max_updates", 12),
+                "livechat_typing_indicator_enabled": getattr(settings, "livechat_typing_indicator_enabled", True),
+                "livechat_thinking_indicator_enabled": getattr(settings, "livechat_thinking_indicator_enabled", False),
             }
         )
     service = GatewayService(**service_kwargs)
@@ -130,6 +147,27 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
 
 def _build_final_reply_service(settings):
     return build_final_reply_service_from_settings(settings)
+
+
+def _build_final_reply_streaming_service(settings):
+    if not settings or not (
+        getattr(settings, "llm_final_reply_streaming_enabled", False)
+        or getattr(settings, "llm_final_reply_preview_enabled", False)
+    ):
+        return None
+    if str(getattr(settings, "llm_provider", "off") or "off").lower() != "gemini":
+        return None
+    return FinalReplyStreamingService(settings)
+
+
+def _build_livechat_sender_client(settings):
+    if not settings:
+        return None
+    return LiveChatSenderClient(
+        settings.livechat_api_base,
+        settings.livechat_account_id,
+        settings.livechat_agent_access_token,
+    )
 
 
 async def _process_rows(service, rows: list[dict]) -> dict:

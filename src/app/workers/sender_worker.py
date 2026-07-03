@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import os
 from urllib import error as url_error
 
 from app.channels.livechat.sender_client import LiveChatApiError, LiveChatSenderClient
@@ -142,19 +143,48 @@ async def process_pending_message(
     try:
         outbound_for_history = message
         if message_type == "image":
-            text = _image_mvp_fallback_text(payload)
-            outbound_for_history = {**message, "payload_json": {"text": text}}
-            response = await sender_client.send_text(
+            response = await sender_client.send_image(
                 chat_id=message["chat_id"],
                 thread_id=message.get("thread_id"),
-                text=text,
+                asset_ref=_image_asset_ref(payload),
             )
+            caption_result = await _send_image_caption_if_present(sender_client, message, payload)
+            outbound_for_history = {**message, "payload_json": {"text": str(payload.get("caption") or "")}}
         else:
             response = await sender_client.send_text(
                 chat_id=message["chat_id"],
                 thread_id=message.get("thread_id"),
                 text=payload["text"],
             )
+            caption_result = None
+    except Exception as exc:
+        if message_type == "image" and _image_text_fallback_enabled():
+            fallback_result = await _send_image_text_fallback(sender_client, message, payload)
+            if fallback_result.get("fallback_response") is not None:
+                response = fallback_result["fallback_response"]
+                outbound_for_history = {**message, "payload_json": {"text": _image_mvp_fallback_text(payload)}}
+                caption_result = None
+            else:
+                result = classify_send_error(exc)
+                await outbound_repository.mark_failed(
+                    message["id"],
+                    result["status"],
+                    result["last_error"],
+                    retryable=result["retryable"],
+                )
+                return result
+        else:
+            result = classify_send_error(exc)
+            await outbound_repository.mark_failed(
+                message["id"],
+                result["status"],
+                result["last_error"],
+                retryable=result["retryable"],
+            )
+            return result
+
+    try:
+        result = classify_send_result(response)
     except Exception as exc:
         result = classify_send_error(exc)
         await outbound_repository.mark_failed(
@@ -165,9 +195,10 @@ async def process_pending_message(
         )
         return result
 
-    result = classify_send_result(response)
     if message_type == "image" and result["status"] == "SENT":
-        result["delivery_mode"] = "mvp_text_fallback"
+        result["delivery_mode"] = "mvp_text_fallback" if _is_image_text_fallback_response(response) else "livechat_file"
+        if caption_result is not None:
+            result["caption_result"] = caption_result
     if result["status"] == "SENT":
         assistant_message = build_assistant_message_from_outbound(outbound_for_history)
         if transaction_repository:
@@ -201,6 +232,49 @@ def _image_mvp_fallback_text(payload: dict) -> str:
     if caption:
         text = f"{text}\n{caption}"
     return text
+
+
+def _image_asset_ref(payload: dict) -> str:
+    asset_ref = str(payload.get("asset_ref") or "").strip()
+    if asset_ref:
+        return asset_ref
+    return str(payload.get("asset_key") or "").strip()
+
+
+async def _send_image_caption_if_present(sender_client, message: dict, payload: dict) -> dict | None:
+    caption = str(payload.get("caption") or "").strip()
+    if not caption:
+        return None
+    try:
+        response = await sender_client.send_text(
+            chat_id=message["chat_id"],
+            thread_id=message.get("thread_id"),
+            text=caption,
+        )
+    except Exception as exc:
+        return {"status": "FAILED_CAPTION", "error": str(exc)}
+    result = classify_send_result(response)
+    return {"status": result["status"], "last_error": result["last_error"]}
+
+
+async def _send_image_text_fallback(sender_client, message: dict, payload: dict) -> dict:
+    try:
+        response = await sender_client.send_text(
+            chat_id=message["chat_id"],
+            thread_id=message.get("thread_id"),
+            text=_image_mvp_fallback_text(payload),
+        )
+    except Exception:
+        return {"fallback_response": None}
+    return {"fallback_response": {**response, "_delivery_mode": "mvp_text_fallback"}}
+
+
+def _image_text_fallback_enabled() -> bool:
+    return str(os.getenv("LIVECHAT_IMAGE_TEXT_FALLBACK") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_image_text_fallback_response(response: dict) -> bool:
+    return response.get("_delivery_mode") == "mvp_text_fallback"
 
 
 def _menu_for_payload(payload: dict) -> dict:

@@ -9,6 +9,9 @@ from app.llm.contracts import (
     LLMIntentClassificationOutput,
     LLMIntentClassificationInput,
     LLMIntentClassificationSchema,
+    LLMImageAttachmentAnalysisInput,
+    LLMImageAttachmentAnalysisOutput,
+    LLMImageAttachmentAnalysisSchema,
     LLMSopDialoguePlannerInput,
     LLMSopDialoguePlannerOutput,
     LLMSopDialoguePlannerSchema,
@@ -85,6 +88,16 @@ ALLOWED_INTENT_CONTRACT = """Allowed intents. The intent field must be exactly o
 - pending_reply_lookup
 - account_access_issue
 - account_profile_or_wallet_change
+- screenshot_upload_failed
+- wallet_identity_risk
+- account_verification_issue
+- promo_refund_unsupported
+- game_technical_issue
+- abuse_or_fraud_risk
+- tutorial_failed_aftercare
+- active_workflow_conflict_with_data
+- menu_stuck_repeated
+- waiting_backend_repeat_dispute
 - explicit_human_request
 - service_frustration
 - abusive_or_emotional
@@ -135,8 +148,14 @@ Routing rules:
 - For account, order, payment, balance, deposit status, withdrawal status, or other backend fact-like requests, prefer SOP/human/backend-safe handling and set requires_backend: true when backend facts are needed.
 - For escalation, take-over requests, specialist review requests, or cases where automated replies are not helping, use route: human_handoff, intent: explicit_human_request, requires_human: true.
 - If the customer explicitly asks for a human, route must be human_handoff.
+- For screenshot/attachment upload failure, use route: human_handoff, intent: screenshot_upload_failed, requires_human: true.
+- For wallet, bank card, receiving account, identity profile, or KYC abnormalities, use route: human_handoff, intent: wallet_identity_risk, requires_human: true.
+- For verification code, SIM, phone verification, or email verification issues, use route: human_handoff, intent: account_verification_issue, requires_human: true.
+- For promotion code, bonus, registration, refund, or unsupported game technical issues, use route: human_handoff and the closest allowed unsupported intent.
+- For fraud, scam, account safety, fund safety, or severe abuse concerns, use route: human_handoff, intent: abuse_or_fraud_risk, requires_human: true.
+- If the customer says they followed an FAQ/tutorial but it still failed, use route: human_handoff, intent: tutorial_failed_aftercare, requires_human: true.
 - emotion_care is only for emotion/frustration/abusive language as the primary issue when there is no concrete FAQ, SOP, or human-handoff request.
-- If emotional or abusive language appears together with a concrete business request, choose the business route first:
+- If ordinary emotional language appears together with a concrete business request, choose the business route first. This does not apply to fraud, scam, fund-safety, account-safety, or severe abuse concerns, which must use human_handoff:
   - deposit not arrived -> route: sop, intent: deposit_missing.
   - withdrawal not arrived -> route: sop, intent: withdrawal_missing.
   - unable to withdraw / rollover requirement -> route: sop, intent: withdrawal_blocked_or_rollover.
@@ -206,6 +225,30 @@ Attachment slots must use URLs from attachments_summary or current_slot_memory o
 Classify intent_relation as one of current_sop_supplement, faq_interrupt, new_issue, human_request, unclear.
 The program owns slot merging, missing slot calculation, Telegram commands, safety validation, and idempotency.
 Do not promise credited, completed, successful, failed, guaranteed, processed, or handled outcomes.
+Return only structured JSON matching the schema."""
+
+IMAGE_ATTACHMENT_ANALYSIS_SYSTEM_PROMPT = """You are an image attachment classifier for a customer service routing system.
+
+Your only job is to inspect the supplied image attachment reference and return candidate-only routing hints.
+Do not reply to the customer.
+Do not generate final customer replies.
+Do not generate tool calls or external commands.
+Do not decide real backend/account/payment/order facts.
+Do not claim a payment, withdrawal, deposit, refund, or account state is complete or successful.
+
+Classify only whether the image appears receipt-like and whether it is more likely related to deposit or withdrawal support.
+Allowed candidate_intents values:
+- deposit_missing_candidate
+- withdrawal_missing_candidate
+- unknown_image
+
+Allowed receipt_kind values:
+- deposit
+- withdrawal
+- unknown
+
+If the attachment cannot be confidently understood as a deposit or withdrawal receipt/proof, return candidate_intents ["unknown_image"], receipt_kind "unknown", is_receipt_like false, and low confidence.
+Always include safety_flags with "candidate_only".
 Return only structured JSON matching the schema."""
 
 
@@ -302,6 +345,26 @@ class GeminiLLMProvider:
             **result,
             "provider": self.provider_name,
             "mode": "sop_dialogue_planner",
+        }
+
+    async def analyze_image_attachment(self, payload: LLMImageAttachmentAnalysisInput) -> LLMImageAttachmentAnalysisOutput:
+        structured_model = self.model.with_structured_output(
+            schema=LLMImageAttachmentAnalysisSchema,
+            method="json_schema",
+        )
+        response = await structured_model.ainvoke(_build_chat_messages(IMAGE_ATTACHMENT_ANALYSIS_SYSTEM_PROMPT, payload))
+        raw = _model_dump(response)
+        safety_flags = list(dict.fromkeys([*list(raw.get("safety_flags") or []), "candidate_only"]))
+        return {
+            "candidate_intents": list(raw.get("candidate_intents") or ["unknown_image"]),
+            "candidate_slots": dict(raw.get("candidate_slots") or {}),
+            "receipt_kind": str(raw.get("receipt_kind") or "unknown"),
+            "is_receipt_like": bool(raw.get("is_receipt_like")),
+            "confidence": float(raw.get("confidence") or 0.0),
+            "evidence_summary": str(raw.get("evidence_summary") or ""),
+            "safety_flags": safety_flags,
+            "provider": self.provider_name,
+            "mode": "image_analysis_candidate",
         }
 
 

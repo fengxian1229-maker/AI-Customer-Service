@@ -12,7 +12,7 @@ def build_faq_outbound_plan(
     tenant_id: str = "default",
     conversation_id: str,
     inbound_event_id: str | int,
-    platform: str = "JUE999",
+    platform: str = "CON777",
     channel_type: str = "livechat",
     language: str = "zh",
 ) -> dict[str, Any]:
@@ -29,6 +29,7 @@ def build_faq_outbound_plan(
             tenant_id=tenant_id,
             conversation_id=conversation_id,
             inbound_event_id=inbound_event_id,
+            language=language,
         )
         for index, block in enumerate(preview_blocks)
     ]
@@ -46,7 +47,7 @@ def build_faq_outbound_plan_from_rag_context(
     tenant_id: str = "default",
     conversation_id: str,
     inbound_event_id: str | int,
-    platform: str = "JUE999",
+    platform: str = "CON777",
     channel_type: str = "livechat",
     language: str = "zh",
 ) -> dict[str, Any]:
@@ -103,6 +104,7 @@ def _message_plan(
     tenant_id: str,
     conversation_id: str,
     inbound_event_id: str | int,
+    language: str,
 ) -> dict[str, Any]:
     message_kind = block["kind"]
     warnings: list[str] = []
@@ -122,7 +124,7 @@ def _message_plan(
         if payload["asset_ref"] is None:
             warnings.append("missing_asset_ref")
     elif message_kind == "buttons":
-        payload = {"menu_key": block["menu_key"]}
+        payload = {"menu_key": block["menu_key"], "language": language}
         command_type = "livechat.send_buttons"
         stable_identity = block["menu_key"]
     else:

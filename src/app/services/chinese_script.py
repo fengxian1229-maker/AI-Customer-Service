@@ -8,6 +8,17 @@ from app.services.language_policy import normalize_language_code
 TRADITIONAL_TO_SIMPLIFIED = str.maketrans(
     {
         "傳": "传",
+        "進": "进",
+        "驟": "骤",
+        "遊": "游",
+        "戲": "戏",
+        "頁": "页",
+        "輸": "输",
+        "實": "实",
+        "際": "际",
+        "經": "经",
+        "並": "并",
+        "單": "单",
         "圖": "图",
         "請": "请",
         "點": "点",
@@ -80,6 +91,17 @@ TRADITIONAL_TO_SIMPLIFIED = str.maketrans(
 SIMPLIFIED_TO_TRADITIONAL = str.maketrans(
     {
         "传": "傳",
+        "进": "進",
+        "骤": "驟",
+        "游": "遊",
+        "戏": "戲",
+        "页": "頁",
+        "输": "輸",
+        "实": "實",
+        "际": "際",
+        "经": "經",
+        "并": "並",
+        "单": "單",
         "图": "圖",
         "请": "請",
         "点": "點",
@@ -139,8 +161,12 @@ SIMPLIFIED_TO_TRADITIONAL = str.maketrans(
     }
 )
 
-TRADITIONAL_MARKERS = frozenset("傳圖請點裡鈕從選擇這個憑證錯誤畫協確認註冊號帳戶後詢轉儲關於無當態數據資與電話聯絡郵機簡體歡幫處發現顯額費時間內")
-SIMPLIFIED_MARKERS = frozenset("传图请点里钮从选择这个凭证错误画协确认注册号账户后询转储关于无当态数据资与电话联络邮机简体欢帮处发现显额费时间内")
+TRADITIONAL_MARKERS = frozenset(
+    "傳進驟遊戲頁輸實際經並單圖請點裡鈕從選擇這個憑證錯誤畫協確認註冊號帳戶後詢轉儲關於無當態數據資與電話聯絡郵機簡體歡幫處發現顯額費時間內"
+)
+SIMPLIFIED_MARKERS = frozenset(
+    "传进骤游戏页输实际经并单图请点里钮从选择这个凭证错误画协确认注册号账户后询转储关于无当态数据资与电话联络邮机简体欢帮处发现显额费时间内"
+)
 
 
 def adapt_chinese_script(value: str | None, reply_language: str | None) -> str:

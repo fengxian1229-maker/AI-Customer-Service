@@ -285,6 +285,40 @@ def test_validate_router_decision_normalizes_handoff_intent_when_model_omits_req
     assert decision["requires_human"] is True
 
 
+@pytest.mark.parametrize(
+    "intent",
+    [
+        "screenshot_upload_failed",
+        "wallet_identity_risk",
+        "account_verification_issue",
+        "promo_refund_unsupported",
+        "game_technical_issue",
+        "abuse_or_fraud_risk",
+        "tutorial_failed_aftercare",
+        "active_workflow_conflict_with_data",
+        "menu_stuck_repeated",
+        "waiting_backend_repeat_dispute",
+    ],
+)
+def test_validate_router_decision_allows_auto_handoff_intents(intent):
+    from app.llm.guardrails import validate_router_decision_output
+
+    decision = validate_router_decision_output(
+        {},
+        _router_output(
+            intent=intent,
+            route="human_handoff",
+            requires_human=True,
+            workflow_relation="none",
+            reason="Automatically escalated because the issue is outside safe self-service scope.",
+        ),
+    )
+
+    assert decision["intent"] == intent
+    assert decision["route"] == "human_handoff"
+    assert decision["requires_human"] is True
+
+
 def test_validate_router_decision_normalizes_invalid_intent_for_clarification_and_unsupported_routes():
     from app.llm.guardrails import validate_router_decision_output
 
@@ -416,7 +450,13 @@ def test_validate_sop_slot_extraction_rejects_protected_fields_and_forged_attach
             "intent": "deposit_missing",
             "latest_user_text": "mi usuario es andy123 monto 500",
             "current_slot_memory": {},
-            "attachments_summary": [{"url": "https://cdn.example/allowed.png"}],
+            "attachments_summary": [
+                {
+                    "url": "https://cdn.example/allowed.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "deposit",
+                }
+            ],
         },
         {
             "intent": "deposit_missing",
@@ -448,7 +488,13 @@ def test_validate_sop_slot_extraction_rejects_text_values_not_visible_to_model()
             "intent": "deposit_missing",
             "latest_user_text": "mi deposito no llego",
             "recent_messages": [],
-            "attachments_summary": [{"url": "https://cdn.example/allowed.png"}],
+            "attachments_summary": [
+                {
+                    "url": "https://cdn.example/allowed.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "deposit",
+                }
+            ],
         },
         {
             "intent": "deposit_missing",

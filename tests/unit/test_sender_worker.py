@@ -247,10 +247,111 @@ def test_process_pending_for_inbound_event_only_fetches_target_inbound(monkeypat
     assert result[0]["inbound_event_id"] == 11
 
 
-def test_process_pending_message_image_uses_mvp_url_text_fallback():
+def test_process_pending_message_image_sends_livechat_file():
+    class SenderClient:
+        def __init__(self) -> None:
+            self.sent_images = []
+            self.sent_texts = []
+
+        async def send_image(self, chat_id: str, thread_id: str | None, asset_ref: str) -> dict:
+            self.sent_images.append((chat_id, thread_id, asset_ref))
+            return {"event_id": "event-image"}
+
+    repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository()
+    client = SenderClient()
+    message = make_message_of_type(
+        "image",
+        {
+            "asset_key": "deposit_step_1",
+            "asset_ref": "https://cdn.example/deposit_step_1.png",
+            "caption": "",
+            "position": "after",
+        },
+    )
+
+    result = asyncio.run(process_pending_message(repository, client, message, message_repository=message_repository))
+
+    assert result["status"] == "SENT"
+    assert result["delivery_mode"] == "livechat_file"
+    assert client.sent_images == [("chat-1", "thread-1", "https://cdn.example/deposit_step_1.png")]
+    assert client.sent_texts == []
+    assert repository.sent == [7]
+    assert message_repository.inserted[0]["message_type"] == "image"
+    assert message_repository.inserted[0]["text_content"] == ""
+
+
+def test_process_pending_message_image_sends_caption_after_file():
+    class SenderClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_image(self, chat_id: str, thread_id: str | None, asset_ref: str) -> dict:
+            self.calls.append(("image", chat_id, thread_id, asset_ref))
+            return {"event_id": "event-image"}
+
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            self.calls.append(("text", chat_id, thread_id, text))
+            return {"event_id": "event-caption"}
+
+    repository = FakeOutboundRepository()
+    client = SenderClient()
+    message = make_message_of_type(
+        "image",
+        {
+            "asset_key": "deposit_step_1",
+            "asset_ref": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+            "caption": "第一步：进入充值页面",
+        },
+    )
+
+    result = asyncio.run(process_pending_message(repository, client, message))
+
+    assert result["status"] == "SENT"
+    assert result["delivery_mode"] == "livechat_file"
+    assert result["caption_result"] == {"status": "SENT", "last_error": None}
+    assert client.calls == [
+        ("image", "chat-1", "thread-1", "bot66tornado/assets/tutorials/JUE999/deposit.jpg"),
+        ("text", "chat-1", "thread-1", "第一步：进入充值页面"),
+    ]
+    assert repository.sent == [7]
+
+
+def test_process_pending_message_image_upload_failure_marks_failed_without_fallback(monkeypatch):
+    monkeypatch.delenv("LIVECHAT_IMAGE_TEXT_FALLBACK", raising=False)
+
     class SenderClient:
         def __init__(self) -> None:
             self.sent_texts = []
+
+        async def send_image(self, chat_id: str, thread_id: str | None, asset_ref: str) -> dict:
+            raise TimeoutError("upload timed out")
+
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            self.sent_texts.append(text)
+            return {"event_id": "must-not-send"}
+
+    repository = FakeOutboundRepository()
+    client = SenderClient()
+    message = make_message_of_type("image", {"asset_key": "deposit_step_1", "asset_ref": "missing.jpg"})
+
+    result = asyncio.run(process_pending_message(repository, client, message))
+
+    assert result["status"] == "RETRYABLE"
+    assert repository.sent == []
+    assert repository.failures == [(7, "RETRYABLE", "upload timed out", True)]
+    assert client.sent_texts == []
+
+
+def test_process_pending_message_image_can_use_text_fallback_when_enabled(monkeypatch):
+    monkeypatch.setenv("LIVECHAT_IMAGE_TEXT_FALLBACK", "true")
+
+    class SenderClient:
+        def __init__(self) -> None:
+            self.sent_texts = []
+
+        async def send_image(self, chat_id: str, thread_id: str | None, asset_ref: str) -> dict:
+            raise RuntimeError("upload failed")
 
         async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
             self.sent_texts.append(text)
@@ -264,7 +365,6 @@ def test_process_pending_message_image_uses_mvp_url_text_fallback():
             "asset_key": "deposit_step_1",
             "asset_ref": "https://cdn.example/deposit_step_1.png",
             "caption": "第一步：进入充值页面",
-            "position": "after",
         },
     )
 
@@ -439,3 +539,182 @@ def test_livechat_transfer_chat_to_group_posts_expected_payload_and_accepts_empt
             "Basic YWNjb3VudC0xOnRva2VuLTE=",
         )
     ]
+
+
+def test_livechat_send_event_preview_posts_expected_payload():
+    from app.channels.livechat.sender_client import LiveChatSenderClient
+
+    calls = []
+
+    class Client(LiveChatSenderClient):
+        async def _post_json(self, path: str, body: dict) -> dict:
+            calls.append((path, body))
+            return {"event_id": "preview-1"}
+
+    client = Client(
+        base_url="https://api.livechatinc.com/v3.6",
+        account_id="account-1",
+        access_token="token-1",
+    )
+
+    result = asyncio.run(client.send_event_preview("chat-1", "partial reply", custom_id="preview:event-1"))
+
+    assert result == {"event_id": "preview-1"}
+    assert calls == [
+        (
+            "/agent/action/send_event_preview",
+            {
+                "chat_id": "chat-1",
+                "event": {
+                    "type": "message",
+                    "text": "partial reply",
+                    "visibility": "all",
+                    "custom_id": "preview:event-1",
+                },
+            },
+        )
+    ]
+
+
+def test_livechat_send_event_preview_omits_empty_custom_id():
+    from app.channels.livechat.sender_client import LiveChatSenderClient
+
+    calls = []
+
+    class Client(LiveChatSenderClient):
+        async def _post_json(self, path: str, body: dict) -> dict:
+            calls.append((path, body))
+            return {}
+
+    client = Client(
+        base_url="https://api.livechatinc.com/v3.6",
+        account_id="account-1",
+        access_token="token-1",
+    )
+
+    asyncio.run(client.send_event_preview("chat-1", "partial reply"))
+
+    assert "custom_id" not in calls[0][1]["event"]
+
+
+def test_livechat_typing_and_thinking_indicators_post_expected_payloads():
+    from app.channels.livechat.sender_client import LiveChatSenderClient
+
+    calls = []
+
+    class Client(LiveChatSenderClient):
+        async def _post_json(self, path: str, body: dict) -> dict:
+            calls.append((path, body))
+            return {}
+
+    client = Client(
+        base_url="https://api.livechatinc.com/v3.6",
+        account_id="account-1",
+        access_token="token-1",
+    )
+
+    asyncio.run(client.send_typing_indicator("chat-1", is_typing=True))
+    asyncio.run(client.send_thinking_indicator("chat-1", title="处理中", description="请稍等", custom_id="think-1"))
+
+    assert calls == [
+        (
+            "/agent/action/send_typing_indicator",
+            {"chat_id": "chat-1", "is_typing": True, "visibility": "all"},
+        ),
+        (
+            "/agent/action/send_thinking_indicator",
+            {
+                "chat_id": "chat-1",
+                "title": "处理中",
+                "description": "请稍等",
+                "visibility": "all",
+                "custom_id": "think-1",
+            },
+        ),
+    ]
+
+
+def test_livechat_send_image_uploads_local_file_and_sends_file_event(tmp_path):
+    from app.channels.livechat.sender_client import LiveChatSenderClient
+
+    image_path = tmp_path / "deposit.jpg"
+    image_path.write_bytes(b"fake-jpeg")
+    calls = []
+
+    class Client(LiveChatSenderClient):
+        async def upload_file(self, content: bytes, content_type: str, filename: str) -> dict:
+            calls.append(("upload", content, content_type, filename))
+            return {"url": "https://files.example/deposit.jpg"}
+
+        async def _post_json(self, path: str, body: dict) -> dict:
+            calls.append(("post", path, body))
+            return {"event_id": "event-image"}
+
+    client = Client(
+        base_url="https://api.livechatinc.com/v3.6",
+        account_id="account-1",
+        access_token="token-1",
+    )
+
+    result = asyncio.run(client.send_image("chat-1", "thread-1", str(image_path)))
+
+    assert result == {"event_id": "event-image"}
+    assert calls == [
+        ("upload", b"fake-jpeg", "image/jpeg", "deposit.jpg"),
+        (
+            "post",
+            "/agent/action/send_event",
+            {
+                "chat_id": "chat-1",
+                "event": {
+                    "type": "file",
+                    "url": "https://files.example/deposit.jpg",
+                    "name": "deposit.jpg",
+                    "content_type": "image/jpeg",
+                    "visibility": "all",
+                },
+            },
+        ),
+    ]
+
+
+def test_livechat_upload_file_posts_multipart(monkeypatch):
+    from app.channels.livechat import sender_client as sender_client_module
+    from app.channels.livechat.sender_client import LiveChatSenderClient
+
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"url":"https://files.example/reply.png"}'
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = req.data
+        return Response()
+
+    monkeypatch.setattr(sender_client_module.request, "urlopen", fake_urlopen)
+    client = LiveChatSenderClient(
+        base_url="https://api.livechatinc.com/v3.6",
+        account_id="account-1",
+        access_token="token-1",
+    )
+
+    result = client._upload_file_sync(b"png-bytes", "image/png", "reply.png")
+
+    assert result == {"url": "https://files.example/reply.png"}
+    assert captured["url"] == "https://api.livechatinc.com/v3.6/agent/action/upload_file"
+    assert captured["timeout"] == 30
+    assert captured["headers"]["Authorization"] == "Basic YWNjb3VudC0xOnRva2VuLTE="
+    assert captured["headers"]["Content-type"].startswith("multipart/form-data; boundary=LiveChatBoundary")
+    assert b'Content-Disposition: form-data; name="file"; filename="reply.png"' in captured["body"]
+    assert b"Content-Type: image/png" in captured["body"]
+    assert b"png-bytes" in captured["body"]

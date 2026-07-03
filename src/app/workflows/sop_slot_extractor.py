@@ -34,7 +34,7 @@ def extract_sop_slots(
     extracted_slots["payment_channel"] = extract_channel(text)
     extracted_slots["order_id"] = extract_order_id(text)
 
-    urls = attachment_urls(attachments or [])
+    urls = attachment_urls(_verified_receipt_attachments(intent, attachments or []))
     screenshot_key = "deposit_screenshot" if intent == "deposit_missing" else "withdrawal_screenshot"
     if urls and intent in {"deposit_missing", "withdrawal_missing"}:
         extracted_slots[screenshot_key] = urls[0]
@@ -65,3 +65,15 @@ def extract_sop_slots(
         "confidence": {key: 0.8 if value else 0.0 for key, value in extracted_slots.items()},
         "reason": "deterministic fallback extractor; LLM extractor can replace this contract later",
     }
+
+
+def _verified_receipt_attachments(intent: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    expected_kind = "deposit" if intent == "deposit_missing" else "withdrawal" if intent == "withdrawal_missing" else None
+    if expected_kind is None:
+        return []
+    return [
+        attachment
+        for attachment in attachments
+        if attachment.get("verified_receipt_attachment")
+        and str(attachment.get("receipt_kind") or "").lower() == expected_kind
+    ]

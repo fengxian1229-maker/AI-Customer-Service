@@ -44,6 +44,15 @@ def build_graph_state_from_event(
 ) -> GraphState:
     payload = event.payload_json or {}
     raw_input = _extract_text(payload)
+    attachments = _extract_attachments(payload, event.standard_event_type)
+    image_analysis = _extract_image_analysis(payload, attachments)
+    active_workflow = conversation.get("active_workflow")
+    image_candidate_only = bool(
+        event.standard_event_type == "FILE_RECEIVED"
+        and not raw_input
+        and not active_workflow
+        and image_analysis
+    )
     return {
         "tenant_id": conversation.get("tenant_id") or event.organization_id or "default",
         "channel_type": conversation.get("channel_type") or "livechat",
@@ -61,9 +70,13 @@ def build_graph_state_from_event(
         "supported_languages": [],
         "language_result": None,
         "event_type": event.standard_event_type,
-        "attachments": _extract_attachments(payload, event.standard_event_type),
+        "attachments": attachments,
+        "image_analysis": image_analysis,
+        "image_candidate_only": image_candidate_only,
+        "pending_image_confirmation": image_analysis if image_candidate_only else None,
+        "verified_receipt_attachments": [],
         "status": conversation.get("status") or "AI_ACTIVE",
-        "active_workflow": conversation.get("active_workflow"),
+        "active_workflow": active_workflow,
         "workflow_stage": conversation.get("workflow_stage"),
         "slot_memory": dict(conversation.get("slot_memory") or {}),
         "llm_rewrite_result": None,
@@ -253,6 +266,25 @@ def intent_router_node(state: GraphState) -> GraphState:
 
     if hints["has_explicit_human_request"]:
         return _with_route(state, "explicit_human_request", "human_handoff", "Customer explicitly requested a human agent.")
+    promoted_image = _promote_pending_image_candidate_route(state, text)
+    if promoted_image:
+        return promoted_image
+    image_candidate = _image_candidate_only_route(state)
+    if image_candidate:
+        return image_candidate
+    auto_handoff = _auto_handoff_route(state, lower, hints)
+    if auto_handoff:
+        return auto_handoff
+    if _is_conversation_memory_lookup(state):
+        return _final_reply_route(
+            state,
+            "conversation_memory_lookup",
+            "Customer asks to recall current conversation context.",
+            confidence=0.9,
+            workflow_relation="contextual_followup",
+            preserve_active_workflow=bool(active),
+            kind="contextual_followup",
+        )
     if active and stage in ACTIVE_WORKFLOW_GUARD_STAGES:
         return _active_workflow_deterministic_route(state, str(active))
     emotion_info = _emotion_context(lower)
@@ -336,15 +368,6 @@ def intent_router_node(state: GraphState) -> GraphState:
             emotion=emotion_info["emotion"],
             risk_level=emotion_info["risk_level"],
         )
-    if _is_unsupported_concrete_issue(lower):
-        return _with_route(
-            state,
-            "unsupported_concrete_issue",
-            "human_handoff",
-            "Technical/game-specific issues are out of FAQ/SOP scope.",
-            emotion=emotion_info["emotion"],
-            risk_level=emotion_info["risk_level"],
-        )
     if _is_account_access_issue(lower):
         return _with_route(
             state,
@@ -382,7 +405,16 @@ def intent_router_node(state: GraphState) -> GraphState:
             risk_level="high",
         )
     if _is_menu_help(lower, hints):
-        return _final_reply_route(state, "clarification_needed", "Menu recovery is outside canonical FAQ.", kind="clarification")
+        menu_state = _increment_slot_counter(state, "menu_stuck_count")
+        if _slot_counter(menu_state, "menu_stuck_count") >= 2:
+            return _with_route(
+                menu_state,
+                "menu_stuck_repeated",
+                "human_handoff",
+                "Customer cannot see or use the menu after repeated attempts.",
+                confidence=0.88,
+            )
+        return _final_reply_route(menu_state, "clarification_needed", "Menu recovery is outside canonical FAQ.", kind="clarification")
     if state.get("event_type") == "FILE_RECEIVED":
         return _final_reply_route(state, "clarification_needed", "File upload without a clear issue needs clarification.", kind="clarification")
     if _is_casual_chat(state):
@@ -430,6 +462,23 @@ def make_intent_router_node(
             return next_state
         if state.get("event_type") == "FILE_RECEIVED" and not state.get("active_workflow") and not raw:
             return intent_router_node(state)
+        if _is_conversation_memory_lookup(state):
+            next_state = _final_reply_route(
+                state,
+                "conversation_memory_lookup",
+                "Customer asks to recall current conversation context.",
+                confidence=0.9,
+                workflow_relation="contextual_followup",
+                preserve_active_workflow=bool(state.get("active_workflow")),
+                kind="contextual_followup",
+            )
+            next_state["llm_router_result"] = _router_result_summary(
+                "fallback",
+                mode="guarded_authoritative",
+                fallback_reason="conversation_memory_guard",
+                fallback_to_deterministic=True,
+            )
+            return next_state
         if not llm_intent_service or not hasattr(llm_intent_service, "route"):
             return _router_fallback_state(state, "missing_provider", "guarded_authoritative", fallback_to_deterministic)
 
@@ -746,6 +795,247 @@ def _with_route(
     }
 
 
+def _image_candidate_only_route(state: GraphState) -> GraphState | None:
+    if state.get("active_workflow"):
+        return None
+    if state.get("event_type") != "FILE_RECEIVED":
+        return None
+    if normalize_text(state.get("rewritten_question") or state.get("raw_user_input")):
+        return None
+    analysis = _image_analysis_from_state(state)
+    if not analysis:
+        return None
+    candidate = _candidate_from_image_analysis(analysis)
+    if candidate == "deposit":
+        text = "我看到这张图片可能是存款凭证。请问你要查询存款未到账或存款相关问题吗？"
+        intent = "image_deposit_candidate"
+    elif candidate == "withdrawal":
+        text = "我看到这张图片可能是提款凭证。请问你要查询提款未到账或提款相关问题吗？"
+        intent = "image_withdrawal_candidate"
+    else:
+        text = "我已收到图片。请补充你要咨询的问题，我会继续协助。"
+        intent = "image_unknown"
+    slot_memory = dict(state.get("slot_memory") or {})
+    if candidate in {"deposit", "withdrawal"}:
+        slot_memory["pending_image_candidates"] = [_pending_image_candidate_record(state, analysis, candidate)]
+    return _prepare_image_final_reply_state(state, slot_memory, intent, text, analysis)
+
+
+def _promote_pending_image_candidate_route(state: GraphState, text: str) -> GraphState | None:
+    if state.get("active_workflow"):
+        return None
+    slot_memory = dict(state.get("slot_memory") or {})
+    candidates = [
+        candidate
+        for candidate in (slot_memory.get("pending_image_candidates") or [])
+        if isinstance(candidate, dict)
+    ]
+    if not candidates:
+        return None
+    candidate = candidates[-1]
+    kind = _candidate_from_image_analysis(candidate)
+    if kind not in {"deposit", "withdrawal"}:
+        return None
+    if not (_confirms_image_candidate(text, kind) or _has_sop_key_material(text)):
+        return None
+    intent = "deposit_missing" if kind == "deposit" else "withdrawal_missing"
+    url = candidate.get("attachment_url") or candidate.get("url")
+    verified = {
+        "url": url,
+        "receipt_kind": kind,
+        "verified_receipt_attachment": True,
+        "source": "image_candidate_confirmation",
+    }
+    slot_memory["verified_receipt_attachments"] = [verified] if url else []
+    if url:
+        screenshot_key = "deposit_screenshot" if kind == "deposit" else "withdrawal_screenshot"
+        slot_memory["receipt_screenshot"] = url
+        slot_memory[screenshot_key] = url
+    return _with_route(
+        {**state, "slot_memory": slot_memory, "verified_receipt_attachments": slot_memory["verified_receipt_attachments"]},
+        intent,
+        "sop",
+        "Customer confirmed an image candidate or supplied SOP key material after image analysis.",
+        sop_name=intent,
+        workflow_relation="current_workflow_supplement",
+        preserve_active_workflow=True,
+    )
+
+
+def _prepare_image_final_reply_state(
+    state: GraphState,
+    slot_memory: dict[str, Any],
+    intent: str,
+    text: str,
+    analysis: dict[str, Any],
+) -> GraphState:
+    return {
+        **state,
+        "slot_memory": slot_memory,
+        "route": "final_reply",
+        "route_source": "image_analysis_candidate",
+        "image_candidate_only": True,
+        "pending_image_confirmation": analysis,
+        "active_workflow": None,
+        "workflow_stage": state.get("workflow_stage"),
+        "intent_result": {
+            "intent": intent,
+            "route": "final_reply",
+            "confidence": float(analysis.get("confidence") or 0.0),
+            "reason": "Image analysis can only create a candidate and must ask for confirmation.",
+        },
+        "response_text": text,
+        "response_text_fallback": text,
+        "node_reply_template": "image_candidate_confirmation",
+        "node_facts": {
+            "image_analysis": analysis,
+            "allowed_facts": ["图片解析结果仅作为候选意图，需要客户确认"],
+            "fallback_text": text,
+        },
+        "reply_plan": build_reply_plan(
+            kind="clarification",
+            fallback_text=text,
+            must_say=[],
+            must_not_say=["已到账", "已完成", "已处理", "已提交", "已转接"],
+            allowed_facts=["图片解析结果仅作为候选意图，需要客户确认"],
+        ),
+        "commands": [{"type": CommandType.LIVECHAT_SEND_TEXT, "payload": {"text": text}}],
+    }
+
+
+def _candidate_from_image_analysis(analysis: dict[str, Any]) -> str:
+    intents = {str(item) for item in analysis.get("candidate_intents") or []}
+    receipt_kind = str(analysis.get("receipt_kind") or "").lower()
+    if analysis.get("is_receipt_like") and (receipt_kind == "deposit" or "deposit_missing_candidate" in intents):
+        return "deposit"
+    if analysis.get("is_receipt_like") and (receipt_kind == "withdrawal" or "withdrawal_missing_candidate" in intents):
+        return "withdrawal"
+    return "unknown"
+
+
+def _pending_image_candidate_record(state: GraphState, analysis: dict[str, Any], kind: str) -> dict[str, Any]:
+    attachment = _first_image_attachment(state)
+    return {
+        "attachment_url": analysis.get("attachment_url") or (attachment or {}).get("url"),
+        "content_type": analysis.get("content_type") or (attachment or {}).get("content_type") or (attachment or {}).get("mime_type"),
+        "candidate_intents": list(analysis.get("candidate_intents") or []),
+        "candidate_slots": dict(analysis.get("candidate_slots") or {}),
+        "confidence": float(analysis.get("confidence") or 0.0),
+        "evidence_summary": analysis.get("evidence_summary"),
+        "is_receipt_like": bool(analysis.get("is_receipt_like")),
+        "receipt_kind": kind,
+    }
+
+
+def _first_image_attachment(state: GraphState) -> dict[str, Any] | None:
+    for attachment in state.get("attachments") or []:
+        content_type = str(attachment.get("content_type") or attachment.get("mime_type") or "")
+        if content_type.startswith("image/") or attachment.get("url"):
+            return attachment
+    return None
+
+
+def _image_analysis_from_state(state: GraphState) -> dict[str, Any] | None:
+    analysis = state.get("image_analysis")
+    if isinstance(analysis, dict) and analysis:
+        return analysis
+    for attachment in state.get("attachments") or []:
+        item = attachment.get("image_analysis")
+        if isinstance(item, dict) and item:
+            return item
+    return None
+
+
+def _confirms_image_candidate(text: str, kind: str) -> bool:
+    lower = normalize_text(text).lower()
+    if not lower:
+        return False
+    yes = _contains_any(lower, ("是", "对", "對", "确认", "確認", "帮我查", "查", "yes", "correct", "sí", "si"))
+    if not yes:
+        return False
+    if kind == "deposit":
+        return _contains_any(lower, ("存款", "充值", "deposit", "depósito", "deposito", "recarga")) or len(lower) <= 16
+    return _contains_any(lower, ("提款", "提现", "withdraw", "withdrawal", "retiro")) or len(lower) <= 16
+
+
+def _has_sop_key_material(text: str) -> bool:
+    return bool(extract_identity(text) or extract_order_id(text) or extract_amount(text))
+
+
+def _auto_handoff_route(state: GraphState, lower: str, hints: dict[str, Any]) -> GraphState | None:
+    active = str(state.get("active_workflow") or "")
+    stage = str(state.get("workflow_stage") or "")
+    if active and stage in ACTIVE_WORKFLOW_GUARD_STAGES and _active_workflow_conflict_has_data(state, active):
+        return _with_route(
+            state,
+            "active_workflow_conflict_with_data",
+            "human_handoff",
+            "Message conflicts with the active SOP after customer data was already collected.",
+            confidence=0.88,
+            workflow_relation="human_escalation",
+            preserve_active_workflow=True,
+        )
+    if _is_screenshot_upload_failed(lower, hints):
+        return _with_route(
+            state,
+            "screenshot_upload_failed",
+            "human_handoff",
+            "Customer cannot upload or continue with a required screenshot or attachment.",
+            confidence=0.9,
+        )
+    if _is_wallet_identity_risk(lower):
+        return _with_route(
+            state,
+            "wallet_identity_risk",
+            "human_handoff",
+            "Wallet, bank card, receiving account, identity, or KYC issue requires manual support.",
+            confidence=0.9,
+        )
+    if _is_account_verification_issue(lower):
+        return _with_route(
+            state,
+            "account_verification_issue",
+            "human_handoff",
+            "Verification code, SIM, phone, or email verification issue requires manual support.",
+            confidence=0.9,
+        )
+    if _is_promo_refund_unsupported(lower):
+        return _with_route(
+            state,
+            "promo_refund_unsupported",
+            "human_handoff",
+            "Promotion, bonus, registration, refund, or unsupported commercial issue is outside FAQ/SOP scope.",
+            confidence=0.88,
+        )
+    if _is_unsupported_concrete_issue(lower):
+        return _with_route(
+            state,
+            "game_technical_issue",
+            "human_handoff",
+            "Technical/game-specific issues are out of FAQ/SOP scope.",
+            confidence=0.88,
+        )
+    if _is_abuse_or_fraud_risk(lower):
+        return _with_route(
+            state,
+            "abuse_or_fraud_risk",
+            "human_handoff",
+            "Fraud, fund-safety, or severe abuse concern requires manual support.",
+            confidence=0.9,
+            emotion="distressed",
+            risk_level="high",
+        )
+    if _is_tutorial_failed_aftercare(lower):
+        return _with_route(
+            state,
+            "tutorial_failed_aftercare",
+            "human_handoff",
+            "Customer reports the FAQ/tutorial was followed but still failed.",
+            confidence=0.86,
+        )
+    return None
+
+
 def _final_reply_route(
     state: GraphState,
     intent: str,
@@ -950,6 +1240,7 @@ def _is_conversation_memory_lookup(state: GraphState) -> bool:
         for pattern in (
             r"(刚刚|剛剛|上一句|上句|前一句|刚才|剛才).*(说|說|回复|回覆|讲|講|问|問|提到)",
             r"(我|你).*(刚刚|剛剛|上一句|上句|前一句|刚才|剛才).*(说|說|回复|回覆|讲|講|问|問|提到)",
+            r"(刚刚|剛剛|刚才|剛才|之前).*(原因|为什么|為什麼|为何|為何|导致|導致).*(无法提款|無法提款|提款|提现|提現|流水)",
             r"\bwhat did i just say\b",
             r"\bwhat was my previous message\b",
             r"\bwhat did you just say\b",
@@ -1019,6 +1310,10 @@ def _conversation_memory_reply_text(state: GraphState) -> str | None:
     if not _is_conversation_memory_lookup(state):
         return None
     text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    if _is_withdrawal_reason_recall(text):
+        reason_text = _recent_withdrawal_reason_reply_text(state)
+        if reason_text:
+            return f"刚才查询结果显示：{reason_text}"
     wants_assistant = _contains_any(text, ("你刚", "你剛", "你上", "你回复", "你回覆", "what did you", "you reply"))
     target_role = "assistant" if wants_assistant else "customer"
     previous = _previous_message_text(state, target_role)
@@ -1027,6 +1322,31 @@ def _conversation_memory_reply_text(state: GraphState) -> str | None:
             return f"我刚才回复的是：{previous}"
         return f"你上一句说的是：{previous}"
     return "我这里暂时没有可确认的上一句聊天内容。请你再说明一次需要处理的问题，我会继续协助。"
+
+
+def _is_withdrawal_reason_recall(text: str) -> bool:
+    return _contains_any(text, ("无法提款", "無法提款", "提款", "提现", "提現", "withdraw")) and _contains_any(
+        text,
+        ("原因", "为什么", "為什麼", "为何", "為何", "导致", "導致", "流水", "reason", "why"),
+    )
+
+
+def _recent_withdrawal_reason_reply_text(state: GraphState) -> str | None:
+    for message in reversed(list(state.get("recent_messages") or [])):
+        role = str(message.get("sender_role") or "")
+        if role not in {"assistant", "backend"}:
+            continue
+        text = normalize_text(message.get("text_content") or message.get("text") or message.get("content"))
+        if not text:
+            continue
+        if _contains_any(text, ("剩余流水", "剩餘流水", "未完成的流水", "流水要求", "提款限制", "无法提款", "無法提款")):
+            return _strip_customer_greeting(text)
+    return None
+
+
+def _strip_customer_greeting(text: str) -> str:
+    stripped = normalize_text(text)
+    return re.sub(r"^(您好|你好|您好！|你好！)[，,。!！\s]*", "", stripped).strip()
 
 
 def _previous_message_text(state: GraphState, sender_role: str) -> str | None:
@@ -1460,7 +1780,19 @@ def _sop_slot_fallback_state(
 
 
 def _attachments_summary(state: GraphState) -> list[dict[str, Any]]:
-    return [{"url": item.get("url"), "name": item.get("name")} for item in state.get("attachments") or []]
+    return [
+        {
+            "url": item.get("url"),
+            "name": item.get("name"),
+            "mime_type": item.get("mime_type"),
+            "content_type": item.get("content_type"),
+            "image_analysis_status": item.get("image_analysis_status"),
+            "image_candidate_id": item.get("image_candidate_id"),
+            "verified_receipt_attachment": item.get("verified_receipt_attachment"),
+            "receipt_kind": item.get("receipt_kind"),
+        }
+        for item in state.get("attachments") or []
+    ]
 
 
 def _default_reply_language(tenant_default: str, fallback: str, supported: list[str]) -> str:
@@ -1581,7 +1913,7 @@ def _apply_menu_button_route(state: GraphState) -> GraphState | None:
             "commands": [
                 {
                     "type": CommandType.LIVECHAT_SEND_BUTTONS,
-                    "payload": {"menu_key": menu_key},
+                    "payload": {"menu_key": menu_key, "language": _menu_language_for_state(base)},
                 }
             ],
         }
@@ -1615,26 +1947,81 @@ def _navigation_menu_key(button_id: str, livechat_menu: dict[str, Any]) -> str |
     return None
 
 
+def _menu_language_for_state(state: GraphState) -> str:
+    slot_memory = state.get("slot_memory") or {}
+    for value in (
+        state.get("reply_language"),
+        slot_memory.get("last_reply_language"),
+        state.get("conversation_language"),
+        state.get("detected_language"),
+    ):
+        normalized = normalize_language_code(value)
+        if normalized != "unknown":
+            return normalized
+    return "zh-Hans"
+
+
 def _next_menu_memory(livechat_menu: dict[str, Any], context: str, button_id: str) -> dict[str, Any]:
+    preserved_intro = {
+        key: livechat_menu[key]
+        for key in ("intro_sent", "intro_thread_id", "intro_sent_threads")
+        if key in livechat_menu
+    }
     if button_id in MENU_BY_NAV_BUTTON:
-        return {"context": MENU_BY_NAV_BUTTON[button_id], "previous_context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
+        return {**preserved_intro, "context": MENU_BY_NAV_BUTTON[button_id], "previous_context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
     if button_id == "route_main":
-        return {"context": "main", "previous_context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
+        return {**preserved_intro, "context": "main", "previous_context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
     if button_id == "route_previous":
         previous = str(livechat_menu.get("previous_context") or "main")
-        return {"context": previous, "previous_context": "main", "intro_sent": livechat_menu.get("intro_sent", True)}
+        return {**preserved_intro, "context": previous, "previous_context": "main", "intro_sent": livechat_menu.get("intro_sent", True)}
     return {**livechat_menu, "context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
 
 
 def _extract_attachments(payload: dict[str, Any], event_type: str) -> list[dict[str, Any]]:
-    attachments = list(payload.get("attachments") or [])
+    attachments = [_sanitize_attachment(item) for item in (payload.get("attachments") or []) if isinstance(item, dict)]
     event = payload.get("event") or {}
     if event_type == "FILE_RECEIVED":
         file_payload = event.get("file") if isinstance(event.get("file"), dict) else event
-        url = file_payload.get("url") or file_payload.get("content_url") or file_payload.get("thumbnail_url")
-        if url:
-            attachments.append({"url": url, "name": file_payload.get("name") or file_payload.get("filename")})
-    return attachments
+        attachment = _sanitize_attachment(file_payload)
+        if attachment:
+            attachments.append(attachment)
+    return [attachment for attachment in attachments if attachment]
+
+
+def _sanitize_attachment(item: dict[str, Any]) -> dict[str, Any] | None:
+    url = item.get("url") or item.get("content_url") or item.get("thumbnail_url")
+    if not url:
+        return None
+    content_type = item.get("content_type") or item.get("mime_type")
+    attachment = {
+        "url": url,
+        "name": item.get("name") or item.get("filename"),
+        "mime_type": item.get("mime_type") or content_type,
+        "content_type": content_type or item.get("mime_type"),
+        "image_analysis_status": item.get("image_analysis_status"),
+        "image_candidate_id": item.get("image_candidate_id"),
+        "image_analysis": item.get("image_analysis"),
+        "verified_receipt_attachment": item.get("verified_receipt_attachment"),
+        "receipt_kind": item.get("receipt_kind"),
+    }
+    return {key: value for key, value in attachment.items() if value is not None}
+
+
+def _extract_image_analysis(payload: dict[str, Any], attachments: list[dict[str, Any]]) -> dict[str, Any] | None:
+    event = payload.get("event") or {}
+    candidates = (
+        payload.get("image_analysis"),
+        event.get("image_analysis") if isinstance(event, dict) else None,
+        *((attachment.get("image_analysis") for attachment in attachments),),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            attachment = attachments[0] if attachments else {}
+            result = dict(candidate)
+            result.setdefault("attachment_url", attachment.get("url"))
+            result.setdefault("content_type", attachment.get("content_type") or attachment.get("mime_type"))
+            return result
+    return None
 
 
 def _detect_language(text: str) -> str:
@@ -1677,6 +2064,34 @@ def _is_screenshot_upload_howto(text: str, hints: dict[str, Any]) -> bool:
     return hints.get("has_screenshot_signal") and _contains_any(text, ("subir", "upload", "enviar", "上传"))
 
 
+def _is_screenshot_upload_failed(text: str, hints: dict[str, Any]) -> bool:
+    if not (hints.get("has_screenshot_signal") or _contains_any(text, ("attachment", "file", "附件", "图片", "照片", "imagen", "archivo"))):
+        return False
+    return _contains_any(
+        text,
+        (
+            "失败",
+            "失敗",
+            "传不了",
+            "傳不了",
+            "上传不了",
+            "上傳不了",
+            "发不了",
+            "發不了",
+            "无法上传",
+            "無法上傳",
+            "不能上传",
+            "不能上傳",
+            "upload failed",
+            "can't upload",
+            "cannot upload",
+            "no puedo subir",
+            "no me deja subir",
+            "no puedo enviar",
+        ),
+    )
+
+
 def _is_rollover_explanation(text: str) -> bool:
     return _contains_any(text, ("qué es rollover", "que es rollover", "what is rollover", "流水是什么", "rollover explanation"))
 
@@ -1698,7 +2113,10 @@ def _emotion_context(lower: str) -> dict[str, str | None]:
 
 
 def _is_unsupported_concrete_issue(text: str) -> bool:
-    return _contains_any(text, ("problemas técnicos", "problemas tecnicos", "technical issue", "del juego", "game issue"))
+    return _contains_any(
+        text,
+        ("problemas técnicos", "problemas tecnicos", "technical issue", "del juego", "game issue", "游戏技术", "遊戲技術", "游戏问题", "遊戲問題"),
+    )
 
 
 def _is_account_access_issue(text: str) -> bool:
@@ -1709,8 +2127,199 @@ def _is_account_profile_or_wallet_change(text: str) -> bool:
     return _contains_any(text, ("cambiar wallet", "change wallet", "cambiar perfil", "change profile", "cambiar correo", "cambiar telefono"))
 
 
+def _is_wallet_identity_risk(text: str) -> bool:
+    return _contains_any(
+        text,
+        (
+            "cambiar wallet",
+            "change wallet",
+            "cambiar perfil",
+            "change profile",
+            "cambiar correo",
+            "cambiar telefono",
+            "wallet",
+            "billetera",
+            "bank card",
+            "银行卡",
+            "銀行卡",
+            "钱包",
+            "錢包",
+            "收款账户",
+            "收款帳戶",
+            "身份资料",
+            "身份資料",
+            "实名",
+            "實名",
+            "kyc",
+            "持有人不一致",
+            "姓名不一致",
+            "资料异常",
+            "資料異常",
+        ),
+    )
+
+
+def _is_account_verification_issue(text: str) -> bool:
+    has_verification = _contains_any(
+        text,
+        (
+            "验证码",
+            "驗證碼",
+            "verification code",
+            "codigo de verificacion",
+            "código de verificación",
+            "sim",
+            "email verification",
+            "邮箱验证",
+            "郵箱驗證",
+            "手机验证",
+            "手機驗證",
+            "phone verification",
+        ),
+    )
+    has_problem = _contains_any(
+        text,
+        (
+            "收不到",
+            "没收到",
+            "未收到",
+            "無法",
+            "无法",
+            "不通过",
+            "失效",
+            "not receive",
+            "did not receive",
+            "no llega",
+            "no recibo",
+            "can't verify",
+            "cannot verify",
+        ),
+    )
+    return has_verification and has_problem
+
+
+def _is_promo_refund_unsupported(text: str) -> bool:
+    return _contains_any(
+        text,
+        (
+            "优惠码",
+            "優惠碼",
+            "promo code",
+            "codigo promocional",
+            "código promocional",
+            "bonus",
+            "bono",
+            "free spins",
+            "注册问题",
+            "註冊問題",
+            "registration issue",
+            "refund",
+            "退款",
+            "退回",
+            "devolver",
+            "reembolso",
+        ),
+    )
+
+
+def _is_abuse_or_fraud_risk(text: str) -> bool:
+    return _contains_any(
+        text,
+        (
+            "诈骗",
+            "詐騙",
+            "骗子",
+            "騙子",
+            "fraud",
+            "scam",
+            "estafa",
+            "资金安全",
+            "資金安全",
+            "fund safety",
+            "account safety",
+            "不安全",
+            "安全风险",
+            "安全風險",
+            "mierda",
+            "fuck",
+        ),
+    )
+
+
+def _is_tutorial_failed_aftercare(text: str) -> bool:
+    has_tutorial = _contains_any(
+        text,
+        (
+            "教程",
+            "教學",
+            "说明",
+            "說明",
+            "guide",
+            "tutorial",
+            "instrucciones",
+            "pasos",
+            "按照你说",
+            "照你说",
+            "按你说",
+        ),
+    )
+    still_failed = _contains_any(
+        text,
+        (
+            "还是不行",
+            "還是不行",
+            "仍然不行",
+            "还是失败",
+            "還是失敗",
+            "still not work",
+            "still doesn't work",
+            "still failed",
+            "sigue sin funcionar",
+            "no funciona",
+        ),
+    )
+    return has_tutorial and still_failed
+
+
 def _is_abusive_or_emotional(text: str) -> bool:
     return _contains_any(text, ("basura", "mierda", "estafa", "scam", "骗子", "垃圾"))
+
+
+def _active_workflow_conflict_has_data(state: GraphState, active_workflow: str) -> bool:
+    if _is_independent_faq_during_workflow(state):
+        return False
+    if not _is_cross_workflow_business_object(state, active_workflow):
+        return False
+    slot_memory = state.get("slot_memory") or {}
+    if state.get("attachments"):
+        return True
+    return any(
+        slot_memory.get(key)
+        for key in (
+            "account_or_phone",
+            "phone",
+            "amount",
+            "order_id",
+            "payment_channel",
+            "deposit_screenshot",
+            "withdrawal_screenshot",
+            "receipt_screenshot",
+            "telegram_case_id",
+            "telegram_message_id",
+        )
+    )
+
+
+def _increment_slot_counter(state: GraphState, key: str) -> GraphState:
+    slot_memory = dict(state.get("slot_memory") or {})
+    counters = dict(slot_memory.get("handoff_counters") or {})
+    counters[key] = int(counters.get(key) or 0) + 1
+    slot_memory["handoff_counters"] = counters
+    return {**state, "slot_memory": slot_memory}
+
+
+def _slot_counter(state: GraphState, key: str) -> int:
+    return int(((state.get("slot_memory") or {}).get("handoff_counters") or {}).get(key) or 0)
 
 
 def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:

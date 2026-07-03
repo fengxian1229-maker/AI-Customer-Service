@@ -5,14 +5,27 @@ def test_get_menu_returns_language_specific_buttons_and_fallback():
     zh = get_menu("main", "zh-Hans")
     fallback = get_menu("main", "tl")
 
-    assert zh["title"].startswith("你好")
+    assert zh["title"] == "您好，我是灵犀客服，我可以为您提供以下方面的协助：存款、提款、流水查询、上传截图，或为您转接真人客服。请告诉我您具体需要处理哪方面的问题，或者您可以点击下方的菜单按钮。"
+    assert "灵犀客服" in zh["title"]
+    assert "請" not in zh["title"]
     assert [button["id"] for button in zh["buttons"]] == [
         "deposit_menu",
         "withdrawal_menu",
         "main_pending_reply",
         "other_menu",
     ]
-    assert fallback["language"] == "es"
+    assert zh["buttons"][0]["label"] == "💰 存款问题"
+    assert fallback["language"] == "zh-Hans"
+
+
+def test_get_menu_distinguishes_simplified_and_traditional_chinese():
+    simplified = get_menu("deposit", "zh-Hans")
+    traditional = get_menu("deposit", "zh-Hant")
+
+    assert simplified["title"] == "请选择存款问题："
+    assert simplified["buttons"][0]["label"] == "🧾 存款未到账"
+    assert traditional["title"] == "請選擇存款問題："
+    assert traditional["buttons"][0]["label"] == "🧾 存款未到帳"
 
 
 def test_build_quick_replies_event_matches_livechat_shape():
@@ -48,3 +61,11 @@ def test_fallback_text_renders_numbered_menu():
 def test_recovery_menus_are_available():
     assert get_menu("main_recovery", "en")["buttons"][0]["id"] == "route_previous"
     assert get_menu("deposit_recovery", "en")["buttons"][1]["id"] == "route_main"
+
+
+def test_unknown_language_defaults_to_simplified_chinese():
+    menu = get_menu("deposit", None)
+
+    assert menu["language"] == "zh-Hans"
+    assert menu["title"] == "请选择存款问题："
+    assert menu["buttons"][0]["label"] == "🧾 存款未到账"

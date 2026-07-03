@@ -49,6 +49,10 @@ def standard_event_from_type(event_type: str | None) -> str:
         return "MESSAGE_CREATED"
     if event_type == "file":
         return "FILE_RECEIVED"
+    if event_type == "chat_started":
+        return "CHAT_STARTED"
+    if event_type == "thread_started":
+        return "THREAD_STARTED"
     return "UNSUPPORTED"
 
 

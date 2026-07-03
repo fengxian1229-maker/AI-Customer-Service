@@ -91,6 +91,10 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
 
     if explicit_human or policy["action"] == "human_handoff":
         return _build_handoff_state(state, slot_memory)
+    if _is_waiting_backend_dispute(text):
+        count = _increment_handoff_counter(slot_memory, "waiting_backend_dispute_count")
+        if count >= 2:
+            return _build_handoff_state(state, slot_memory, reason="waiting_backend_repeat_dispute")
 
     reply_text = plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"]
     return {
@@ -175,7 +179,7 @@ def _contextual_followup_state(state: dict[str, Any], slot_memory: dict[str, Any
     }
 
 
-def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
+def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any], reason: str = "explicit_human_request") -> dict[str, Any]:
     return {
         **state,
         "slot_memory": slot_memory,
@@ -195,7 +199,7 @@ def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> 
         "commands": [
             {
                 "type": CommandType.HUMAN_HANDOFF_REQUESTED,
-                "payload": {"reason": "explicit_human_request"},
+                "payload": {"reason": reason},
             }
         ],
     }
@@ -269,6 +273,27 @@ def _is_name_offer_followup(text: str) -> bool:
 def _has_customer_supplement_signal(text: str) -> bool:
     raw = str(text or "")
     return bool(raw.strip() and (re.search(r"\d{4,}", raw) or re.search(r"(电话|電話|手机号|手機號|phone|tel[eé]fono|name|姓名|名字|账号|帳號|账户|賬戶)", raw, re.I)))
+
+
+def _is_waiting_backend_dispute(text: str) -> bool:
+    raw = str(text or "").lower()
+    return bool(
+        raw.strip()
+        and re.search(
+            r"(多久|还要等|還要等|为什么还没|為什麼還沒|一直等|重复|爭議|争议|不对|不對|"
+            r"how long|still waiting|why.*still|again|same problem|not correct|"
+            r"cu[aá]nto.*demora|todav[ií]a|sigo esperando|otra vez|no es correcto)",
+            raw,
+            re.I,
+        )
+    )
+
+
+def _increment_handoff_counter(slot_memory: dict[str, Any], key: str) -> int:
+    counters = dict(slot_memory.get("handoff_counters") or {})
+    counters[key] = int(counters.get(key) or 0) + 1
+    slot_memory["handoff_counters"] = counters
+    return counters[key]
 
 
 def _merge_waiting_customer_supplement(slot_memory: dict[str, Any], text: str) -> None:

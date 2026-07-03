@@ -115,6 +115,59 @@ def test_gemini_provider_intent_returns_shadow_output(monkeypatch):
     assert captured["intent_payload"][1][0] == "human"
 
 
+def test_gemini_provider_analyzes_image_attachment(monkeypatch):
+    from app.core.settings import Settings
+    from app.llm.contracts import LLMImageAttachmentAnalysisSchema
+    from app.llm.gemini_provider import GeminiLLMProvider
+
+    captured = {}
+
+    class FakeStructuredModel:
+        async def ainvoke(self, payload):
+            captured["image_payload"] = payload
+            return {
+                "candidate_intents": ["withdrawal_missing_candidate"],
+                "candidate_slots": {},
+                "receipt_kind": "withdrawal",
+                "is_receipt_like": True,
+                "confidence": 0.91,
+                "evidence_summary": "The image looks like a withdrawal receipt.",
+                "safety_flags": [],
+            }
+
+    class FakeModel:
+        def with_structured_output(self, schema=None, method=None):
+            captured["image_schema"] = schema
+            captured["image_method"] = method
+            return FakeStructuredModel()
+
+    monkeypatch.setattr("app.llm.gemini_provider.build_gemini_chat_model", lambda settings: FakeModel())
+
+    provider = GeminiLLMProvider(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
+
+    result = asyncio.run(
+        provider.analyze_image_attachment(
+            {
+                "attachment_url": "https://cdn.example/withdrawal.png",
+                "mime_type": "image/png",
+                "filename": "withdrawal.png",
+                "tenant_id": "default",
+                "conversation_id": "livechat:chat-1",
+            }
+        )
+    )
+
+    assert captured["image_schema"] is LLMImageAttachmentAnalysisSchema
+    assert captured["image_method"] == "json_schema"
+    assert captured["image_payload"][0][0] == "system"
+    assert "candidate_only" in captured["image_payload"][0][1]
+    assert captured["image_payload"][1][0] == "human"
+    assert result["candidate_intents"] == ["withdrawal_missing_candidate"]
+    assert result["receipt_kind"] == "withdrawal"
+    assert result["provider"] == "gemini"
+    assert result["mode"] == "image_analysis_candidate"
+
+
 def test_gemini_provider_rejects_invalid_route(monkeypatch):
     from app.core.settings import Settings
     from app.llm.gemini_provider import GeminiLLMProvider
@@ -339,10 +392,8 @@ def test_guarded_intent_prompt_prioritizes_business_request_over_emotion_care():
     prompt = GUARDED_AUTHORITATIVE_INTENT_CLASSIFIER_SYSTEM_PROMPT
 
     assert "emotion_care is only for emotion/frustration/abusive language as the primary issue" in prompt
-    assert (
-        "If emotional or abusive language appears together with a concrete business request, "
-        "choose the business route first"
-    ) in prompt
+    assert "If ordinary emotional language appears together with a concrete business request, choose the business route first" in prompt
+    assert "fraud, scam, fund-safety, account-safety, or severe abuse concerns" in prompt
 
 
 def test_gemini_provider_guarded_prompt_allows_casual_chat_for_greetings():

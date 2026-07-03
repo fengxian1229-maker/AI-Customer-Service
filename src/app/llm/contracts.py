@@ -110,6 +110,40 @@ class LLMSopSlotExtractionInput(TypedDict, total=False):
     language: str
 
 
+class LLMImageAttachmentAnalysisInput(TypedDict, total=False):
+    attachment_url: str
+    mime_type: str | None
+    filename: str | None
+    tenant_id: str | None
+    conversation_id: str | None
+    active_workflow: str | None
+    workflow_stage: str | None
+
+
+class LLMImageAttachmentAnalysisOutput(TypedDict, total=False):
+    candidate_intents: list[str]
+    candidate_slots: dict[str, Any]
+    receipt_kind: str
+    is_receipt_like: bool
+    confidence: float
+    evidence_summary: str
+    safety_flags: list[str]
+    provider: str
+    mode: str
+
+
+class LLMImageAttachmentAnalysisSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_intents: list[str] = Field(default_factory=list)
+    candidate_slots: dict[str, Any] = Field(default_factory=dict)
+    receipt_kind: str = "unknown"
+    is_receipt_like: bool = False
+    confidence: float = 0.0
+    evidence_summary: str = ""
+    safety_flags: list[str] = Field(default_factory=list)
+
+
 class LLMSopDialoguePlannerInput(TypedDict, total=False):
     tenant_id: str
     conversation_id: str

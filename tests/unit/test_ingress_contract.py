@@ -63,6 +63,24 @@ def make_chat(
     }
 
 
+def make_empty_thread_chat(chat_id: str = "chat-1", group_id: int = 23) -> dict:
+    return {
+        "id": chat_id,
+        "access": {"group_ids": [group_id]},
+        "users": [
+            {"id": "customer-1", "type": "customer"},
+            {"id": "agent-1", "type": "agent"},
+        ],
+        "threads": [
+            {
+                "id": "thread-1",
+                "created_at": "2026-06-24T00:00:00Z",
+                "events": [],
+            }
+        ],
+    }
+
+
 def test_ingress_contract_exports_shared_types():
     from app.channels.ingress import BaseIngressReceiver, IngressEvent, IngressNormalizeResult
 
@@ -99,6 +117,32 @@ def test_polling_ingress_receiver_writes_inbound_events():
     assert result["ignored"] == 0
     assert repository.events[0].standard_event_type == "MESSAGE_CREATED"
     assert repository.events[0].payload_json["ingress_source"] == "polling"
+
+
+def test_polling_ingress_receiver_writes_intro_event_for_empty_thread_once():
+    from app.channels.livechat.polling_receiver import PollingIngressReceiver
+
+    repository = FakeInboundRepository()
+    client = FakeLiveChatClient(
+        listed=[{"id": "chat-1", "access": {"group_ids": [23]}}],
+        details={"chat-1": make_empty_thread_chat()},
+    )
+    receiver = PollingIngressReceiver(
+        client=client,
+        repository=repository,
+        allowed_group_ids={23},
+        self_author_ids=set(),
+    )
+
+    first = asyncio.run(receiver.receive_once(limit=20))
+    second = asyncio.run(receiver.receive_once(limit=20))
+
+    assert first["inserted"] == 1
+    assert second["inserted"] == 0
+    assert second["duplicates"] == 1
+    assert len(repository.events) == 1
+    assert repository.events[0].standard_event_type == "THREAD_STARTED"
+    assert repository.events[0].dedup_key == "livechat_polling:chat-1:thread-1:intro:chat-1:thread-1"
 
 
 def test_polling_ingress_receiver_does_not_insert_duplicates():

@@ -33,6 +33,22 @@ def extract_polling_events_from_chat_detail(chat: dict, include_agent_messages: 
     threads.extend(chat.get("threads") or [])
     for thread in threads:
         thread_id = thread.get("id") or thread.get("thread_id")
+        if thread_id and not _thread_has_message_or_file(thread):
+            payloads.append({
+                "ingress_source": "polling",
+                "group_ids": group_ids,
+                "chat_users": chat_users,
+                "polling_source": "get_chat",
+                "last_thread_summary": summarize_thread(thread),
+                "chat_id": chat.get("id"),
+                "thread_id": thread_id,
+                "event": {
+                    "id": f"intro:{chat.get('id')}:{thread_id}",
+                    "type": "thread_started",
+                    "author_id": None,
+                    "created_at": thread.get("created_at") or chat.get("created_at"),
+                },
+            })
         for event in thread.get("events") or []:
             author = users_by_id.get(str(event.get("author_id")))
             if author and author.get("type") == "agent" and not include_agent_messages:
@@ -50,6 +66,10 @@ def extract_polling_events_from_chat_detail(chat: dict, include_agent_messages: 
                 "event": event,
             })
     return payloads
+
+
+def _thread_has_message_or_file(thread: dict) -> bool:
+    return any((event.get("type") in {"message", "file"}) for event in (thread.get("events") or []))
 
 
 def extract_polling_events_from_chat_summary(summary: dict, include_agent_messages: bool = False) -> list[dict]:

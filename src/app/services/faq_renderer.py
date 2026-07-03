@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.knowledge_blocks import validate_answer_blocks
+from app.services.chinese_script import adapt_chinese_script
 
 PreviewBlock = dict[str, Any]
 
@@ -35,7 +36,7 @@ def _select_platform_asset_ref(block: dict[str, Any], platform: str | None) -> s
 def render_answer_blocks_preview(
     answer_blocks: list[dict[str, Any]],
     *,
-    platform: str | None = "JUE999",
+    platform: str | None = "CON777",
     channel_type: str | None = "livechat",
     language: str | None = "zh",
 ) -> list[PreviewBlock]:
@@ -46,14 +47,14 @@ def render_answer_blocks_preview(
     and does not upload or send images.
     """
 
-    del channel_type, language
+    del channel_type
 
     preview_blocks: list[PreviewBlock] = []
     for block in validate_answer_blocks(answer_blocks):
         block_type = block["type"]
 
         if block_type == "text":
-            preview_blocks.append({"kind": "text", "text": _clean_optional_text(block.get("text"))})
+            preview_blocks.append({"kind": "text", "text": adapt_chinese_script(_clean_optional_text(block.get("text")), language)})
             continue
 
         if block_type == "image":
@@ -62,7 +63,7 @@ def render_answer_blocks_preview(
                     "kind": "image",
                     "asset_key": _clean_optional_text(block.get("asset_key")),
                     "asset_ref": _select_platform_asset_ref(block, platform),
-                    "caption": _clean_optional_text(block.get("caption")),
+                    "caption": adapt_chinese_script(_clean_optional_text(block.get("caption")), language),
                     "position": _clean_optional_text(block.get("position")) or "after",
                 }
             )

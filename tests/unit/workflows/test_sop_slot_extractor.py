@@ -6,7 +6,13 @@ def test_deterministic_sop_slot_extractor_does_not_overwrite_protected_telegram_
         "deposit_missing",
         {"telegram_case_id": "tg:123", "telegram_message_id": 123},
         "mi usuario es andy123",
-        [{"url": "https://cdn.example/deposit.png"}],
+        [
+            {
+                "url": "https://cdn.example/deposit.png",
+                "verified_receipt_attachment": True,
+                "receipt_kind": "deposit",
+            }
+        ],
     )
 
     assert result["slot_memory"]["telegram_case_id"] == "tg:123"

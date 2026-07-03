@@ -68,6 +68,22 @@ def test_final_reply_prompt_requires_contextual_answer_planning():
     assert "Do not use internal organization labels" in FINAL_REPLY_SYSTEM_PROMPT
 
 
+def test_final_reply_prompt_includes_lingxi_persona_and_compliance_bounds():
+    from app.llm.final_reply_provider import FINAL_REPLY_SYSTEM_PROMPT
+
+    assert "灵犀客服" in FINAL_REPLY_SYSTEM_PROMPT
+    assert 'not a phrase to repeat in every answer' in FINAL_REPLY_SYSTEM_PROMPT
+    assert 'Do not introduce yourself again with phrases like "我是灵犀客服"' in FINAL_REPLY_SYSTEM_PROMPT
+    assert "avoid repeating the same opening phrase" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "感谢您的谅解" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "official intelligent customer service assistant for a gaming platform" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "professional, patient, restrained, trustworthy" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "Never invent backend facts" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "Never promise crediting, withdrawal approval, profit, loss recovery" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "Never encourage deposits, betting, chasing losses" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "Never ask for passwords, verification codes" in FINAL_REPLY_SYSTEM_PROMPT
+
+
 def test_final_reply_service_payload_includes_node_template_and_facts():
     provider = FakeFinalReplyProvider()
     service = FinalReplyService(provider=provider, enabled=True)

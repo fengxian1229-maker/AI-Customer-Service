@@ -24,16 +24,13 @@
         "caption": "",
         "position": "before",
         "platform_asset_map": {
-          "default": "bot66tornado/assets/tutorials/JUE999/deposit.jpg"
+          "CON777": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
+          "default": "bot66tornado/assets/tutorials/CON777/deposit.jpg"
         }
       },
       {
         "type": "text",
         "text": "若你要進行充值，請依照以下步驟操作：\n\n1. 登入你的遊戲帳號。\n2. 進入「充值 / 存款」頁面。\n3. 選擇目前可用的付款方式。\n4. 輸入你要充值的金額。\n5. 按照頁面指示完成付款。\n6. 付款完成後，請保留付款成功截圖。\n\n請先實際操作一次。若你已經完成付款，但遊戲帳號仍未到帳，請回到選單並選擇「存款未到帳」。"
-      },
-      {
-        "type": "buttons",
-        "menu_key": "deposit_recovery"
       }
     ],
     "metadata_json": {
@@ -73,16 +70,13 @@
         "caption": "",
         "position": "before",
         "platform_asset_map": {
-          "default": "bot66tornado/assets/tutorials/JUE999/withdrawal.jpg"
+          "CON777": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
+          "default": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg"
         }
       },
       {
         "type": "text",
         "text": "若你要申請提款，請依照以下步驟操作：\n\n1. 登入你的遊戲帳號。\n2. 進入「提款 / 取款」頁面。\n3. 確認你的提款資料是否正確。\n4. 如果沒有看到輸入金額的欄位，請在提款頁面內往下滑，找到金額輸入區。\n5. 輸入你要提款的金額。\n6. 確認並提交提款申請。\n7. 提交後，請保留提款申請截圖。\n\n請先實際操作一次。若你已經提交提款申請，但仍未收到款項，請回到選單並選擇「提款未到帳」。如果沒有出現金額欄位或頁面不讓你繼續，請選擇「無法提款」。"
-      },
-      {
-        "type": "buttons",
-        "menu_key": "withdrawal_recovery"
       }
     ],
     "metadata_json": {
@@ -122,16 +116,13 @@
         "caption": "",
         "position": "before",
         "platform_asset_map": {
-          "default": "bot66tornado/assets/tutorials/JUE999/forgot-password.jpg"
+          "CON777": "bot66tornado/assets/tutorials/CON777/forgot-password.jpg",
+          "default": "bot66tornado/assets/tutorials/CON777/forgot-password.jpg"
         }
       },
       {
         "type": "text",
         "text": "多數情況下，用戶名是註冊手機號。請依照圖片步驟重設密碼；若仍無法登入，請傳錯誤截圖。"
-      },
-      {
-        "type": "buttons",
-        "menu_key": "other_recovery"
       }
     ],
     "metadata_json": {

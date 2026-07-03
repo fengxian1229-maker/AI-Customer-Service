@@ -26,6 +26,10 @@ class GraphState(TypedDict, total=False):
     sop_slot_source: str | None
     event_type: str
     attachments: list[dict[str, Any]]
+    image_analysis: dict[str, Any] | None
+    image_candidate_only: bool
+    pending_image_confirmation: dict[str, Any] | None
+    verified_receipt_attachments: list[dict[str, Any]]
 
     status: str | None
     active_workflow: str | None

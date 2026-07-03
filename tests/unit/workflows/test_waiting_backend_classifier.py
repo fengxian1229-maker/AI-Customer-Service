@@ -14,8 +14,8 @@ def test_waiting_backend_attachment_without_telegram_case_does_not_append():
 
     assert state["commands"] == []
     assert state["sop_action"] == "waiting_followup"
-    assert state["response_text"] == "案件仍在建立或确认中，我们会继续跟进，请稍候。"
-    assert state["slot_memory"]["forwarded_attachment_urls"] == ["https://cdn.example/supplement.png"]
+    assert state["response_text"] == "案件仍在确认中，有更新会在这里通知你。"
+    assert "forwarded_attachment_urls" not in state["slot_memory"] or state["slot_memory"]["forwarded_attachment_urls"] == []
 
 
 def test_waiting_backend_attachment_with_telegram_case_generates_append_command():
@@ -28,7 +28,13 @@ def test_waiting_backend_attachment_with_telegram_case_generates_append_command(
                 "telegram_message_id": 123,
                 "forwarded_attachment_urls": [],
             },
-            "attachments": [{"url": "https://cdn.example/supplement.png"}],
+            "attachments": [
+                {
+                    "url": "https://cdn.example/supplement.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "deposit",
+                }
+            ],
         }
     )
 
@@ -49,7 +55,13 @@ def test_waiting_backend_attachment_and_human_with_telegram_case_appends_first()
                 "telegram_message_id": 123,
                 "forwarded_attachment_urls": [],
             },
-            "attachments": [{"url": "https://cdn.example/new.png"}],
+            "attachments": [
+                {
+                    "url": "https://cdn.example/new.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "deposit",
+                }
+            ],
             "raw_user_input": "quiero hablar con un agente humano",
         }
     )
@@ -103,6 +115,32 @@ def test_waiting_backend_followup_only_reassures():
 
     assert state["response_text"] == "案件仍在确认中，有更新会在这里通知你。"
     assert state["commands"] == []
+
+
+def test_waiting_backend_repeated_dispute_handoffs_on_second_attempt():
+    first = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {},
+            "attachments": [],
+            "raw_user_input": "还要等多久，为什么还没处理",
+        }
+    )
+    second = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "waiting_backend",
+            "slot_memory": first["slot_memory"],
+            "attachments": [],
+            "raw_user_input": "还要等多久，为什么还没处理",
+        }
+    )
+
+    assert first["commands"] == []
+    assert second["status"] == "HANDOFF_REQUESTED"
+    assert second["commands"][0]["type"] == CommandType.HUMAN_HANDOFF_REQUESTED
+    assert second["commands"][0]["payload"]["reason"] == "waiting_backend_repeat_dispute"
 
 
 def test_waiting_backend_acknowledgement_does_not_append_or_expose_case_id():
@@ -229,7 +267,13 @@ def test_waiting_backend_llm_screenshot_supplement_appends_to_existing_case():
             "intent_result": {"intent": "deposit_missing"},
             "workflow_stage": "waiting_backend",
             "slot_memory": {"telegram_case_id": "tg:123", "telegram_message_id": 123},
-            "attachments": [{"url": "https://cdn.example/supplement.png"}],
+            "attachments": [
+                {
+                    "url": "https://cdn.example/supplement.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "deposit",
+                }
+            ],
             "llm_sop_dialogue_plan": {
                 "status": "accepted",
                 "intent_relation": "current_sop_supplement",
@@ -237,6 +281,33 @@ def test_waiting_backend_llm_screenshot_supplement_appends_to_existing_case():
                 "slot_confidence": {"receipt_screenshot": 0.95},
                 "reason": "screenshot supplement",
             },
+        }
+    )
+
+    assert state["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE
+    assert state["commands"][0]["payload"]["supplement"]["attachment_urls"] == ["https://cdn.example/supplement.png"]
+
+
+def test_waiting_backend_image_analysis_receipt_supplement_appends_to_existing_case():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "intent_result": {"intent": "deposit_missing"},
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {"telegram_case_id": "tg:123", "telegram_message_id": 123},
+            "attachments": [
+                {
+                    "url": "https://cdn.example/supplement.png",
+                    "content_type": "image/png",
+                    "image_analysis_status": "analyzed",
+                    "image_analysis": {
+                        "is_receipt_like": True,
+                        "receipt_kind": "deposit",
+                        "confidence": 0.91,
+                    },
+                }
+            ],
+            "llm_sop_dialogue_plan": {"status": "fallback", "fallback_reason": "missing_provider"},
         }
     )
 

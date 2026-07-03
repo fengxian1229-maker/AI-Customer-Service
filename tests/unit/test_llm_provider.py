@@ -16,6 +16,7 @@ def test_settings_default_to_full_llm_mode():
     assert settings.llm_intent_fallback_to_deterministic is True
     assert settings.llm_sop_slot_fallback_to_deterministic is True
     assert settings.llm_final_reply_fallback_enabled is True
+    assert settings.livechat_thinking_indicator_enabled is False
 
 
 def test_build_llm_provider_supports_off_and_mock():
@@ -91,3 +92,29 @@ def test_mock_provider_has_full_llm_surface_and_composes_final_reply():
     assert final_reply["confidence"] >= 0.70
     assert final_reply["provider"] == "mock"
     assert final_reply["mode"] == "final_reply"
+
+
+def test_mock_provider_analyzes_image_attachment_as_candidate_only():
+    import asyncio
+
+    from app.llm.mock_provider import MockLLMProvider
+
+    provider = MockLLMProvider()
+
+    result = asyncio.run(
+        provider.analyze_image_attachment(
+            {
+                "attachment_url": "https://cdn.example/deposit-receipt.png",
+                "mime_type": "image/png",
+                "filename": "deposit-receipt.png",
+                "tenant_id": "default",
+                "conversation_id": "livechat:chat-1",
+            }
+        )
+    )
+
+    assert result["candidate_intents"] == ["deposit_missing_candidate"]
+    assert result["receipt_kind"] == "deposit"
+    assert result["is_receipt_like"] is True
+    assert result["provider"] == "mock"
+    assert result["mode"] == "image_analysis_candidate"

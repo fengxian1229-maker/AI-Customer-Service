@@ -10,7 +10,7 @@ BASE_KWARGS = {
     "tenant_id": "default",
     "conversation_id": "livechat:chat-1",
     "inbound_event_id": "event-1",
-    "platform": "JUE999",
+    "platform": "CON777",
     "channel_type": "livechat",
     "language": "zh",
 }
@@ -41,6 +41,42 @@ def test_build_faq_outbound_plan_maps_text_block_to_send_text():
     ]
 
 
+def test_build_faq_outbound_plan_normalizes_text_and_caption_for_zh_hans():
+    plan = build_faq_outbound_plan(
+        answer_blocks=[
+            {"type": "text", "text": "請進入遊戲頁面並依照步驟輸入金額。"},
+            {
+                "type": "image",
+                "asset_key": "deposit_howto",
+                "caption": "進入充值頁面",
+                "platform_asset_map": {"CON777": "bot66tornado/assets/tutorials/CON777/deposit.jpg"},
+            },
+        ],
+        **{**BASE_KWARGS, "language": "zh-Hans"},
+    )
+
+    assert plan["messages"][0]["payload"]["text"] == "请进入游戏页面并依照步骤输入金额。"
+    assert plan["messages"][1]["payload"]["caption"] == "进入充值页面"
+
+
+def test_build_faq_outbound_plan_normalizes_text_and_caption_for_zh_hant():
+    plan = build_faq_outbound_plan(
+        answer_blocks=[
+            {"type": "text", "text": "请进入游戏页面并依照步骤输入金额。"},
+            {
+                "type": "image",
+                "asset_key": "deposit_howto",
+                "caption": "进入充值页面",
+                "platform_asset_map": {"CON777": "bot66tornado/assets/tutorials/CON777/deposit.jpg"},
+            },
+        ],
+        **{**BASE_KWARGS, "language": "zh-Hant"},
+    )
+
+    assert plan["messages"][0]["payload"]["text"] == "請進入遊戲頁面並依照步驟輸入金額。"
+    assert plan["messages"][1]["payload"]["caption"] == "進入充值頁面"
+
+
 def test_build_faq_outbound_plan_maps_image_block_to_send_image():
     plan = build_faq_outbound_plan(
         answer_blocks=[
@@ -49,7 +85,7 @@ def test_build_faq_outbound_plan_maps_image_block_to_send_image():
                 "asset_key": "deposit_howto",
                 "caption": "",
                 "position": "before",
-                "platform_asset_map": {"JUE999": "bot66tornado/assets/tutorials/JUE999/deposit.jpg"},
+                "platform_asset_map": {"CON777": "bot66tornado/assets/tutorials/CON777/deposit.jpg"},
             }
         ],
         **BASE_KWARGS,
@@ -62,7 +98,7 @@ def test_build_faq_outbound_plan_maps_image_block_to_send_image():
     assert message["dedup_key"].endswith(":image:deposit_howto")
     assert message["payload"] == {
         "asset_key": "deposit_howto",
-        "asset_ref": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+        "asset_ref": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
         "caption": "",
         "position": "before",
     }
@@ -79,7 +115,7 @@ def test_build_faq_outbound_plan_maps_buttons_block_to_send_command():
     assert message["message_kind"] == "buttons"
     assert message["command_type"] == "livechat.send_buttons"
     assert message["dedup_key"].endswith(":buttons:deposit_recovery")
-    assert message["payload"] == {"menu_key": "deposit_recovery"}
+    assert message["payload"] == {"menu_key": "deposit_recovery", "language": "zh"}
 
 
 def test_build_faq_outbound_plan_preserves_order_and_block_index():
@@ -145,10 +181,32 @@ def test_build_faq_outbound_plan_uses_default_multimodal_seed_deposit_howto():
 
     plan = build_faq_outbound_plan(answer_blocks=deposit["answer_blocks"], **BASE_KWARGS)
 
-    assert plan["message_count"] == 3
-    assert [message["message_kind"] for message in plan["messages"]] == ["image", "text", "buttons"]
+    assert plan["message_count"] == 2
+    assert [message["message_kind"] for message in plan["messages"]] == ["image", "text"]
     assert plan["messages"][0]["payload"]["asset_key"] == "deposit_howto"
-    assert plan["messages"][2]["payload"] == {"menu_key": "deposit_recovery"}
+    assert plan["messages"][0]["payload"]["asset_ref"] == "bot66tornado/assets/tutorials/CON777/deposit.jpg"
+    assert plan["messages"][0]["warnings"] == []
+
+
+def test_build_faq_outbound_plan_default_seed_uses_con777_assets_for_all_tutorials():
+    seed_path = Path(__file__).resolve().parents[2] / "data" / "knowledge" / "default_multimodal_faq_seed.json"
+    seed_rows = json.loads(seed_path.read_text(encoding="utf-8"))
+    expected_refs = {
+        "deposit_howto": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
+        "withdrawal_howto": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
+        "forgot_password_howto": "bot66tornado/assets/tutorials/CON777/forgot-password.jpg",
+    }
+
+    for row in seed_rows:
+        intent_id = row["metadata_json"]["intent_id"]
+        if intent_id not in expected_refs:
+            continue
+        plan = build_faq_outbound_plan(answer_blocks=row["answer_blocks"], **BASE_KWARGS)
+
+        assert [message["message_kind"] for message in plan["messages"]] == ["image", "text"]
+        assert plan["messages"][0]["message_kind"] == "image"
+        assert plan["messages"][0]["payload"]["asset_ref"] == expected_refs[intent_id]
+        assert plan["messages"][0]["warnings"] == []
 
 
 def test_build_faq_outbound_plan_backend_fact_fallback_stays_text_only():

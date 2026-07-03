@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.chinese_script import adapt_chinese_script, adapt_chinese_strings
+from app.services.chinese_script import adapt_chinese_script
 from app.services.language_policy import normalize_language_code, parse_supported_languages
 from app.services.reply_renderer import render_customer_reply
 from app.workflows.final_reply_policy import accepted_result, fallback_result, validate_final_reply_output
@@ -40,12 +40,12 @@ class FinalReplyService:
 
     async def compose(self, state: dict[str, Any]) -> dict[str, Any]:
         reply_language = self._target_reply_language(state)
-        fallback_text = normalize_text(
+        fallback_text_raw = normalize_text(
             state.get("response_text_fallback")
             or state.get("response_text")
             or self._render_structured_fallback(state)
         )
-        fallback_text = normalize_text(adapt_chinese_script(fallback_text, reply_language))
+        fallback_text = normalize_text(adapt_chinese_script(fallback_text_raw, reply_language))
         if not fallback_text:
             return {
                 **state,
@@ -57,7 +57,7 @@ class FinalReplyService:
         if not self.provider or not hasattr(self.provider, "compose_final_reply"):
             return self._fallback_state(state, fallback_text, "missing_provider")
 
-        payload = self._build_payload(state, fallback_text)
+        payload = self._build_payload(state, fallback_text_raw or fallback_text)
         try:
             output = await self.provider.compose_final_reply(payload)
         except Exception as exc:
@@ -112,10 +112,10 @@ class FinalReplyService:
     def _build_payload(self, state: dict[str, Any], fallback_text: str) -> dict[str, Any]:
         node_reply_template = resolve_node_reply_template_id(state)
         reply_language = self._target_reply_language(state)
-        node_facts = adapt_chinese_strings(build_node_facts(state), reply_language)
-        reply_plan = adapt_chinese_strings(dict(state.get("reply_plan") or {}), reply_language)
-        rag_result = adapt_chinese_strings(state.get("rag_result"), reply_language)
-        backend_result = adapt_chinese_strings(state.get("backend_result"), reply_language)
+        node_facts = build_node_facts(state)
+        reply_plan = dict(state.get("reply_plan") or {})
+        rag_result = state.get("rag_result")
+        backend_result = state.get("backend_result")
         return {
             "tenant_id": state.get("tenant_id"),
             "channel_type": state.get("channel_type"),
