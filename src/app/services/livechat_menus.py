@@ -12,7 +12,7 @@ Menu = dict[str, Any]
 MENUS: dict[str, dict[str, Menu]] = {
     "main": {
         "es": {
-            "title": "Hola, soy Lingxi Atención al Cliente. Seleccione el tipo de consulta:",
+            "title": "Hola, soy Lingxi Atención al Cliente. Puedo ayudarle con depósitos, retiros, consultas de rollover, carga de capturas de pantalla o transferirle a atención humana. Indíqueme qué necesita resolver, o elija una opción del menú de abajo.",
             "buttons": [
                 {"label": "💰 Problemas de depósito", "id": "deposit_menu"},
                 {"label": "💸 Problemas de retiro", "id": "withdrawal_menu"},
@@ -21,7 +21,7 @@ MENUS: dict[str, dict[str, Menu]] = {
             ],
         },
         "zh-Hans": {
-            "title": "您好，我是灵犀客服，我可以为您提供以下方面的协助：存款、提款、流水查询、上传截图，或为您转接真人客服。请告诉我您具体需要处理哪方面的问题，或者您可以点击下方的菜单按钮。",
+            "title": "您好，我是客服灵犀，我可以为您提供以下方面的协助：存款、提款、流水查询、上传截图，或为您转接真人客服。请告诉我您具体需要处理哪方面的问题，或者您可以点击下方的菜单按钮。",
             "buttons": [
                 {"label": "💰 存款问题", "id": "deposit_menu"},
                 {"label": "💸 提款问题", "id": "withdrawal_menu"},
@@ -30,7 +30,7 @@ MENUS: dict[str, dict[str, Menu]] = {
             ],
         },
         "zh-Hant": {
-            "title": "您好，我是靈犀客服，請選擇您要諮詢的問題類型：",
+            "title": "您好，我是客服靈犀，我可以為您提供以下方面的協助：存款、提款、流水查詢、上傳截圖，或為您轉接真人客服。請告訴我您具體需要處理哪方面的問題，或者您可以點擊下方的選單按鈕。",
             "buttons": [
                 {"label": "💰 存款問題", "id": "deposit_menu"},
                 {"label": "💸 提款問題", "id": "withdrawal_menu"},
@@ -39,7 +39,7 @@ MENUS: dict[str, dict[str, Menu]] = {
             ],
         },
         "en": {
-            "title": "Hello, I am Lingxi Customer Service. Please choose the issue type:",
+            "title": "Hello, I am Lingxi Customer Service. I can help with deposits, withdrawals, rollover inquiries, screenshot uploads, or transfer you to live support. Please tell me what you need help with, or choose an option from the menu below.",
             "buttons": [
                 {"label": "💰 Deposit issues", "id": "deposit_menu"},
                 {"label": "💸 Withdrawal issues", "id": "withdrawal_menu"},

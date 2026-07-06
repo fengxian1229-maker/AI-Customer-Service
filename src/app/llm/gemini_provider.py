@@ -348,11 +348,17 @@ class GeminiLLMProvider:
         }
 
     async def analyze_image_attachment(self, payload: LLMImageAttachmentAnalysisInput) -> LLMImageAttachmentAnalysisOutput:
+        attachment_url = str(payload.get("attachment_url") or "")
+        if not attachment_url:
+            return _unknown_image_analysis_result("missing_attachment_url", provider=self.provider_name)
         structured_model = self.model.with_structured_output(
             schema=LLMImageAttachmentAnalysisSchema,
             method="json_schema",
         )
-        response = await structured_model.ainvoke(_build_chat_messages(IMAGE_ATTACHMENT_ANALYSIS_SYSTEM_PROMPT, payload))
+        try:
+            response = await structured_model.ainvoke(_build_image_analysis_messages(IMAGE_ATTACHMENT_ANALYSIS_SYSTEM_PROMPT, payload))
+        except Exception:
+            return _unknown_image_analysis_result("image_download_or_multimodal_error", provider=self.provider_name)
         raw = _model_dump(response)
         safety_flags = list(dict.fromkeys([*list(raw.get("safety_flags") or []), "candidate_only"]))
         return {
@@ -381,6 +387,42 @@ def _build_chat_messages(system_prompt: str, payload: dict) -> list[tuple[str, s
         ("system", system_prompt),
         ("human", _json_dumps_payload(payload)),
     ]
+
+
+def _build_image_analysis_messages(system_prompt: str, payload: dict) -> list[tuple[str, str | list[dict]]]:
+    metadata = {
+        "attachment_url": payload.get("attachment_url"),
+        "mime_type": payload.get("mime_type"),
+        "filename": payload.get("filename"),
+        "tenant_id": payload.get("tenant_id"),
+        "conversation_id": payload.get("conversation_id"),
+        "active_workflow": payload.get("active_workflow"),
+        "workflow_stage": payload.get("workflow_stage"),
+    }
+    return [
+        ("system", system_prompt),
+        (
+            "human",
+            [
+                {"type": "text", "text": _json_dumps_payload(metadata)},
+                {"type": "image_url", "image_url": {"url": str(payload.get("attachment_url") or "")}},
+            ],
+        ),
+    ]
+
+
+def _unknown_image_analysis_result(reason: str, *, provider: str) -> LLMImageAttachmentAnalysisOutput:
+    return {
+        "candidate_intents": ["unknown_image"],
+        "candidate_slots": {},
+        "receipt_kind": "unknown",
+        "is_receipt_like": False,
+        "confidence": 0.0,
+        "evidence_summary": "",
+        "safety_flags": [reason, "candidate_only"],
+        "provider": provider,
+        "mode": "image_analysis_candidate",
+    }
 
 
 def _json_dumps_payload(payload: dict) -> str:

@@ -139,5 +139,12 @@ def test_llm_mode_runs_llms_inside_graph_in_order_and_uses_final_text():
     assert result["slot_memory"]["last_user_language"] == "en"
     assert result["slot_memory"]["last_reply_language"] == "en"
     assert result["final_response_text"].startswith("Please send your account")
-    assert result["commands"][0]["payload"]["text"] == result["final_response_text"]
+    assert [str(command["type"]) for command in result["commands"]] == [
+        "livechat.send_image",
+        "livechat.send_text",
+        "livechat.send_text",
+    ]
+    assert result["commands"][1]["payload"]["final_reply_exempt"] is True
+    assert result["commands"][2]["payload"]["final_reply_target"] is True
+    assert result["commands"][2]["payload"]["text"] == result["final_response_text"]
     assert result.get("route_locked") is not True

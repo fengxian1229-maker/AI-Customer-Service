@@ -41,6 +41,28 @@ def test_image_attachment_analyzer_only_processes_image_mime_types():
     assert result["safety_flags"] == ["non_image_attachment"]
 
 
+def test_image_attachment_analyzer_requires_image_url():
+    analyzer = ImageAttachmentAnalyzer(FakeImageProvider())
+
+    result = asyncio.run(
+        analyzer.analyze(
+            {
+                "content_type": "image/png",
+                "name": "missing-url.png",
+            },
+            tenant_id="default",
+            conversation_id="livechat:chat-1",
+            active_workflow=None,
+            workflow_stage=None,
+        )
+    )
+
+    assert result["candidate_intents"] == ["unknown_image"]
+    assert result["receipt_kind"] == "unknown"
+    assert result["is_receipt_like"] is False
+    assert result["safety_flags"] == ["missing_attachment_url"]
+
+
 def test_image_attachment_analyzer_returns_candidate_only_provider_result():
     analyzer = ImageAttachmentAnalyzer(FakeImageProvider(), min_confidence=0.5)
 

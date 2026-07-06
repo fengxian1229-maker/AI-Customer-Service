@@ -24,6 +24,7 @@ from app.workers import (
     external_command_worker,
     external_result_consumer,
     gateway_consumer,
+    livechat_idle_timer,
     polling_receiver,
     sender_worker,
     telegram_reply_consumer,
@@ -38,6 +39,7 @@ WORKER_NAMES = [
     "external_command_worker",
     "external_result_consumer",
     "telegram_reply_consumer",
+    "livechat_idle_timer",
 ]
 logger = logging.getLogger(__name__)
 
@@ -50,12 +52,14 @@ class ServiceRunnerConfig:
     external_command_seconds: float
     external_result_seconds: float
     telegram_reply_seconds: float
+    livechat_idle_timer_seconds: float
     poll_limit: int
     gateway_limit: int
     sender_limit: int
     external_command_limit: int
     external_result_limit: int
     telegram_reply_limit: int
+    livechat_idle_timer_limit: int
     max_iterations: int | None
     stop_on_error: bool
     shutdown_timeout_seconds: float
@@ -132,6 +136,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--external-command-seconds", type=float, default=1.0)
     parser.add_argument("--external-result-seconds", type=float, default=1.0)
     parser.add_argument("--telegram-reply-seconds", type=float, default=3.0)
+    parser.add_argument("--livechat-idle-timer-seconds", type=float, default=5.0)
 
     parser.add_argument("--poll-limit", type=int, help="Maximum LiveChat chats to poll in one cycle.")
     parser.add_argument("--gateway-limit", type=int, default=20)
@@ -139,6 +144,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--external-command-limit", type=int, default=20)
     parser.add_argument("--external-result-limit", type=int, default=20)
     parser.add_argument("--telegram-reply-limit", type=int, default=20)
+    parser.add_argument("--livechat-idle-timer-limit", type=int, default=20)
     parser.add_argument(
         "--shutdown-timeout-seconds",
         type=float,
@@ -206,12 +212,14 @@ def build_config(args: argparse.Namespace, settings: Settings) -> ServiceRunnerC
         external_command_seconds=args.external_command_seconds,
         external_result_seconds=args.external_result_seconds,
         telegram_reply_seconds=args.telegram_reply_seconds,
+        livechat_idle_timer_seconds=args.livechat_idle_timer_seconds,
         poll_limit=args.poll_limit if args.poll_limit is not None else settings.poll_limit,
         gateway_limit=args.gateway_limit,
         sender_limit=args.sender_limit,
         external_command_limit=args.external_command_limit,
         external_result_limit=args.external_result_limit,
         telegram_reply_limit=args.telegram_reply_limit,
+        livechat_idle_timer_limit=args.livechat_idle_timer_limit,
         max_iterations=max_iterations,
         stop_on_error=bool(args.stop_on_error),
         shutdown_timeout_seconds=args.shutdown_timeout_seconds,
@@ -392,6 +400,15 @@ async def telegram_reply_tick(context: ServiceRunnerContext) -> dict:
     )
 
 
+async def livechat_idle_timer_tick(context: ServiceRunnerContext) -> dict:
+    results = await livechat_idle_timer.process_idle_conversations(
+        context.pool,
+        context.sender_client,
+        limit=context.config.livechat_idle_timer_limit,
+    )
+    return {"worker": "livechat_idle_timer", **livechat_idle_timer.summarize_results(results)}
+
+
 async def run_all_workers(context: ServiceRunnerContext) -> dict:
     summary = RunnerSummary()
     stop_event = asyncio.Event()
@@ -405,6 +422,7 @@ async def run_all_workers(context: ServiceRunnerContext) -> dict:
         ("external_command_worker", context.config.external_command_seconds, lambda: external_command_tick(context)),
         ("external_result_consumer", context.config.external_result_seconds, lambda: external_result_tick(context)),
         ("telegram_reply_consumer", context.config.telegram_reply_seconds, lambda: telegram_reply_tick(context)),
+        ("livechat_idle_timer", context.config.livechat_idle_timer_seconds, lambda: livechat_idle_timer_tick(context)),
     ]
     _log_event("service_runner.start", mode="all", enabled_workers=WORKER_NAMES)
     tasks = [
@@ -578,6 +596,7 @@ def _validate_usage(args: argparse.Namespace) -> dict | None:
         "external_command_seconds",
         "external_result_seconds",
         "telegram_reply_seconds",
+        "livechat_idle_timer_seconds",
     ]:
         value = getattr(args, name)
         if value is not None and value < 0:

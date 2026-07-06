@@ -143,6 +143,12 @@ class LiveChatApi {
     return transfer;
   }
 
+  async closeChat(chatId) {
+    return this.request('/v3.6/agent/action/deactivate_chat', {
+      id: chatId,
+    });
+  }
+
   async sendAttachment(chatId, attachment, caption = '') {
     if (attachment?.url) return this.sendRemoteImage(chatId, attachment.url, caption);
     if (caption) return this.sendText(chatId, caption);

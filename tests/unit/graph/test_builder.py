@@ -99,7 +99,7 @@ def test_workflow_graph_invokes_minimal_sop_path():
     )
 
     assert result["intent_result"]["intent"] == "deposit_missing"
-    assert result["response_text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
+    assert result["response_text"] == "上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
 
 
 def test_workflow_graph_rag_route_returns_knowledge_answer_without_placeholder_command():

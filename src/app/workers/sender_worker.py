@@ -151,11 +151,14 @@ async def process_pending_message(
             caption_result = await _send_image_caption_if_present(sender_client, message, payload)
             outbound_for_history = {**message, "payload_json": {"text": str(payload.get("caption") or "")}}
         else:
-            response = await sender_client.send_text(
-                chat_id=message["chat_id"],
-                thread_id=message.get("thread_id"),
-                text=payload["text"],
-            )
+            send_text_kwargs = {
+                "chat_id": message["chat_id"],
+                "thread_id": message.get("thread_id"),
+                "text": payload["text"],
+            }
+            if payload.get("custom_id"):
+                send_text_kwargs["custom_id"] = payload["custom_id"]
+            response = await sender_client.send_text(**send_text_kwargs)
             caption_result = None
     except Exception as exc:
         if message_type == "image" and _image_text_fallback_enabled():

@@ -71,9 +71,9 @@ def test_final_reply_prompt_requires_contextual_answer_planning():
 def test_final_reply_prompt_includes_lingxi_persona_and_compliance_bounds():
     from app.llm.final_reply_provider import FINAL_REPLY_SYSTEM_PROMPT
 
-    assert "灵犀客服" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "客服灵犀" in FINAL_REPLY_SYSTEM_PROMPT
     assert 'not a phrase to repeat in every answer' in FINAL_REPLY_SYSTEM_PROMPT
-    assert 'Do not introduce yourself again with phrases like "我是灵犀客服"' in FINAL_REPLY_SYSTEM_PROMPT
+    assert 'Do not introduce yourself again with phrases like "我是客服灵犀"' in FINAL_REPLY_SYSTEM_PROMPT
     assert "avoid repeating the same opening phrase" in FINAL_REPLY_SYSTEM_PROMPT
     assert "感谢您的谅解" in FINAL_REPLY_SYSTEM_PROMPT
     assert "official intelligent customer service assistant for a gaming platform" in FINAL_REPLY_SYSTEM_PROMPT

@@ -42,6 +42,7 @@ def build_workflow_graph(
     llm_sop_slot_min_confidence: float = 0.70,
     llm_sop_slot_fallback_to_deterministic: bool = True,
     llm_final_reply_enabled: bool = True,
+    llm_final_reply_streaming_enabled: bool = False,
 ):
     graph = StateGraph(GraphState)
     graph.add_node(
@@ -98,6 +99,7 @@ def build_workflow_graph(
             make_final_reply_node(
                 final_reply_service if llm_final_reply_enabled else None,
                 llm_final_reply_enabled=llm_final_reply_enabled,
+                llm_final_reply_streaming_enabled=llm_final_reply_streaming_enabled,
             ),
         ),
     )

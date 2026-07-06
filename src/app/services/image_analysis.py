@@ -25,6 +25,8 @@ class ImageAttachmentAnalyzer:
         content_type = str(attachment.get("content_type") or attachment.get("mime_type") or "")
         if not content_type.startswith("image/"):
             return _unknown_result("non_image_attachment")
+        if not attachment.get("url"):
+            return _unknown_result("missing_attachment_url")
         if not self.provider or not hasattr(self.provider, "analyze_image_attachment"):
             return _unknown_result("missing_provider")
         payload = {

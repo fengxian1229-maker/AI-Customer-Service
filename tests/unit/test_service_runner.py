@@ -69,6 +69,7 @@ def patch_runner_runtime(monkeypatch, service_runner, tick_calls=None):
     monkeypatch.setattr(service_runner, "external_command_tick", lambda context: tick_factory("external_command_worker"))
     monkeypatch.setattr(service_runner, "external_result_tick", lambda context: tick_factory("external_result_consumer"))
     monkeypatch.setattr(service_runner, "telegram_reply_tick", lambda context: tick_factory("telegram_reply_consumer"))
+    monkeypatch.setattr(service_runner, "livechat_idle_timer_tick", lambda context: tick_factory("livechat_idle_timer"))
     return created
 
 
@@ -155,6 +156,7 @@ def test_once_each_worker_executes_once(monkeypatch):
         "external_command_worker": 1,
         "external_result_consumer": 1,
         "telegram_reply_consumer": 1,
+        "livechat_idle_timer": 1,
     }
     assert created["pool_calls"] == 1
     assert created["pool"].close_calls == 1
@@ -180,6 +182,8 @@ def test_max_iterations_two_each_worker_executes_twice(monkeypatch):
         "--external-result-seconds",
         "0",
         "--telegram-reply-seconds",
+        "0",
+        "--livechat-idle-timer-seconds",
         "0",
     ])
 
@@ -243,6 +247,8 @@ def test_continue_on_error_default_keeps_worker_running(monkeypatch):
         "--external-result-seconds",
         "0",
         "--telegram-reply-seconds",
+        "0",
+        "--livechat-idle-timer-seconds",
         "0",
     ])
 
@@ -333,6 +339,7 @@ def test_run_all_workers_exits_gracefully_after_signal(monkeypatch):
     monkeypatch.setattr(service_runner, "external_command_tick", fast_tick)
     monkeypatch.setattr(service_runner, "external_result_tick", fast_tick)
     monkeypatch.setattr(service_runner, "telegram_reply_tick", fast_tick)
+    monkeypatch.setattr(service_runner, "livechat_idle_timer_tick", fast_tick)
 
     result = asyncio.run(service_runner.run_all_workers(context))
 
@@ -507,6 +514,7 @@ def make_context(
     external_command_limit=20,
     external_result_limit=20,
     telegram_reply_limit=20,
+    livechat_idle_timer_limit=20,
     shutdown_timeout_seconds=30.0,
 ):
     config = service_runner.ServiceRunnerConfig(
@@ -516,12 +524,14 @@ def make_context(
         external_command_seconds=0,
         external_result_seconds=0,
         telegram_reply_seconds=0,
+        livechat_idle_timer_seconds=0,
         poll_limit=poll_limit,
         gateway_limit=gateway_limit,
         sender_limit=sender_limit,
         external_command_limit=external_command_limit,
         external_result_limit=external_result_limit,
         telegram_reply_limit=telegram_reply_limit,
+        livechat_idle_timer_limit=livechat_idle_timer_limit,
         max_iterations=1,
         stop_on_error=False,
         shutdown_timeout_seconds=shutdown_timeout_seconds,

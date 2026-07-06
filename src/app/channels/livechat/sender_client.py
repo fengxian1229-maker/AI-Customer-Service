@@ -27,15 +27,18 @@ class LiveChatSenderClient:
             return False
         return ":" in decoded
 
-    async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+    async def send_text(self, chat_id: str, thread_id: str | None, text: str, custom_id: str | None = None) -> dict:
         del thread_id
+        event = {
+            "type": "message",
+            "text": text,
+            "visibility": "all",
+        }
+        if custom_id:
+            event["custom_id"] = custom_id
         body = {
             "chat_id": chat_id,
-            "event": {
-                "type": "message",
-                "text": text,
-                "visibility": "all",
-            },
+            "event": event,
         }
         return await self._post_json("/agent/action/send_event", body)
 
@@ -143,6 +146,9 @@ class LiveChatSenderClient:
             "ignore_requester_presence": ignore_requester_presence,
         }
         return await self._post_json("/agent/action/transfer_chat", body)
+
+    async def deactivate_chat(self, chat_id: str) -> dict:
+        return await self._post_json("/agent/action/deactivate_chat", {"id": chat_id})
 
     async def _post_json(self, path: str, body: dict) -> dict:
         return await asyncio.to_thread(self._post_json_sync, path, body)

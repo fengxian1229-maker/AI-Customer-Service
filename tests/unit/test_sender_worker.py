@@ -144,6 +144,39 @@ def test_process_pending_message_marks_success_with_event_id():
     assert message_repository.inserted[0]["text_content"] == "hello"
 
 
+def test_process_pending_message_passes_text_custom_id_to_livechat_send_event():
+    class SenderClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_text(
+            self,
+            chat_id: str,
+            thread_id: str | None,
+            text: str,
+            custom_id: str | None = None,
+        ) -> dict:
+            self.calls.append((chat_id, thread_id, text, custom_id))
+            return {"event_id": "event-1"}
+
+    repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository()
+    client = SenderClient()
+    message = {
+        **make_message(),
+        "payload_json": {"text": "streamed final", "custom_id": "preview:123"},
+        "conversation_status": "AI_ACTIVE",
+        "conversation_active_workflow": None,
+    }
+
+    result = asyncio.run(process_pending_message(repository, client, message, message_repository=message_repository))
+
+    assert result["status"] == "SENT"
+    assert client.calls == [("chat-1", "thread-1", "streamed final", "preview:123")]
+    assert repository.sent == [7]
+    assert message_repository.inserted[0]["text_content"] == "streamed final"
+
+
 def test_process_pending_message_skips_when_conversation_human_active():
     class SenderClient:
         async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
@@ -568,6 +601,41 @@ def test_livechat_send_event_preview_posts_expected_payload():
                 "event": {
                     "type": "message",
                     "text": "partial reply",
+                    "visibility": "all",
+                    "custom_id": "preview:event-1",
+                },
+            },
+        )
+    ]
+
+
+def test_livechat_send_text_posts_custom_id_when_present():
+    from app.channels.livechat.sender_client import LiveChatSenderClient
+
+    calls = []
+
+    class Client(LiveChatSenderClient):
+        async def _post_json(self, path: str, body: dict) -> dict:
+            calls.append((path, body))
+            return {"event_id": "event-1"}
+
+    client = Client(
+        base_url="https://api.livechatinc.com/v3.6",
+        account_id="account-1",
+        access_token="token-1",
+    )
+
+    result = asyncio.run(client.send_text("chat-1", "thread-1", "final reply", custom_id="preview:event-1"))
+
+    assert result == {"event_id": "event-1"}
+    assert calls == [
+        (
+            "/agent/action/send_event",
+            {
+                "chat_id": "chat-1",
+                "event": {
+                    "type": "message",
+                    "text": "final reply",
                     "visibility": "all",
                     "custom_id": "preview:event-1",
                 },

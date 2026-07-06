@@ -5,8 +5,8 @@ def test_get_menu_returns_language_specific_buttons_and_fallback():
     zh = get_menu("main", "zh-Hans")
     fallback = get_menu("main", "tl")
 
-    assert zh["title"] == "您好，我是灵犀客服，我可以为您提供以下方面的协助：存款、提款、流水查询、上传截图，或为您转接真人客服。请告诉我您具体需要处理哪方面的问题，或者您可以点击下方的菜单按钮。"
-    assert "灵犀客服" in zh["title"]
+    assert zh["title"] == "您好，我是客服灵犀，我可以为您提供以下方面的协助：存款、提款、流水查询、上传截图，或为您转接真人客服。请告诉我您具体需要处理哪方面的问题，或者您可以点击下方的菜单按钮。"
+    assert "客服灵犀" in zh["title"]
     assert "請" not in zh["title"]
     assert [button["id"] for button in zh["buttons"]] == [
         "deposit_menu",
@@ -16,6 +16,12 @@ def test_get_menu_returns_language_specific_buttons_and_fallback():
     ]
     assert zh["buttons"][0]["label"] == "💰 存款问题"
     assert fallback["language"] == "zh-Hans"
+
+
+def test_main_menu_uses_long_welcome_copy_for_supported_languages():
+    assert "I can help with deposits" in get_menu("main", "en")["title"]
+    assert "Puedo ayudarle con depósitos" in get_menu("main", "es")["title"]
+    assert "我可以為您提供以下方面的協助" in get_menu("main", "zh-Hant")["title"]
 
 
 def test_get_menu_distinguishes_simplified_and_traditional_chinese():

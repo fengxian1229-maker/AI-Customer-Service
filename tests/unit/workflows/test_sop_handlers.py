@@ -2,6 +2,14 @@ from app.workflows.command_contracts import CommandType
 from app.workflows.sop_handlers import run_sop
 
 
+def assert_deposit_missing_intro_commands(commands):
+    assert [command["type"] for command in commands] == [
+        CommandType.LIVECHAT_SEND_IMAGE,
+        CommandType.LIVECHAT_SEND_TEXT,
+        CommandType.LIVECHAT_SEND_TEXT,
+    ]
+
+
 def test_deposit_missing_asks_for_identity_and_screenshot_when_empty():
     state = run_sop(
         {
@@ -11,8 +19,37 @@ def test_deposit_missing_asks_for_identity_and_screenshot_when_empty():
         }
     )
 
-    assert state["response_text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
-    assert state["commands"] == []
+    assert state["response_text"] == "上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+    assert_deposit_missing_intro_commands(state["commands"])
+    assert state["commands"][0]["payload"]["asset_key"] == "deposit_payment_success_example"
+    assert state["commands"][0]["payload"]["asset_ref"].endswith("bot66tornado/assets/examples/deposit-payment-success-onepay.jpg")
+    assert "存款未到账通常可能" in state["commands"][1]["payload"]["text"]
+    assert state["commands"][1]["payload"]["final_reply_exempt"] is True
+    assert state["commands"][2]["payload"] == {
+        "text": "上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。",
+        "final_reply_target": True,
+    }
+    assert state["slot_memory"]["deposit_missing_example_sent"] is True
+    assert state["node_reply_template"] == "sop_missing_slots"
+
+
+def test_deposit_missing_ignores_llm_missing_slot_reply_draft_for_stable_prompt():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "deposit_missing"},
+            "slot_memory": {},
+            "attachments": [],
+            "llm_sop_dialogue_plan": {
+                "status": "accepted",
+                "slot_updates": {},
+                "slot_confidence": {},
+                "reply_draft": "了解，请问您的注册手机号是多少？同时请上传一张存款成功的付款截图，以便为您查询。",
+            },
+        }
+    )
+
+    assert state["response_text"] == "上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+    assert_deposit_missing_intro_commands(state["commands"])
 
 
 def test_deposit_missing_generates_case_card_when_identity_and_screenshot_complete():
@@ -34,10 +71,12 @@ def test_deposit_missing_generates_case_card_when_identity_and_screenshot_comple
     assert state["status"] == "WAITING_EXTERNAL"
     assert state["active_workflow"] == "deposit_missing"
     assert state["workflow_stage"] == "waiting_backend"
-    assert state["response_text"] == "感谢您提供的截图，我们现在为您查询，请稍等。"
+    assert state["response_text"] == "资料已收到，我们现在为你查询这笔存款，请稍等。"
     assert "转交后台" not in state["response_text"]
     assert "提交后台" not in state["response_text"]
     assert "同步给后台" not in state["response_text"]
+    assert "已到账" not in state["response_text"]
+    assert "保证" not in state["response_text"]
     assert state["commands"][0]["type"] == CommandType.TELEGRAM_SEND_CASE_CARD
 
 
@@ -52,11 +91,57 @@ def test_deposit_missing_does_not_generate_case_card_with_order_amount_and_chann
     )
 
     assert state["workflow_stage"] == "collecting_slots"
-    assert state["commands"] == []
+    assert_deposit_missing_intro_commands(state["commands"])
     assert state["slot_memory"]["deposit_order_id"] == "D123456"
     assert state["slot_memory"]["amount"] == "1000"
     assert state["slot_memory"]["channel"] == "GCASH"
-    assert state["response_text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
+    assert state["response_text"] == "上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+
+
+def test_deposit_missing_with_example_already_sent_only_asks_for_missing_data():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "deposit_missing"},
+            "slot_memory": {"deposit_missing_example_sent": True},
+            "attachments": [],
+        }
+    )
+
+    assert state["response_text"] == "前面那张图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+    assert state["commands"] == []
+
+
+def test_deposit_missing_with_example_already_sent_and_identity_only_explains_example_image():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "deposit_missing"},
+            "rewritten_question": "mi usuario es andy123",
+            "slot_memory": {"deposit_missing_example_sent": True},
+            "attachments": [],
+        }
+    )
+
+    assert state["response_text"] == "前面那张图片只是示例，请上传你自己的存款付款成功截图，我们会继续帮你查询。"
+    assert state["commands"] == []
+    assert "示例" in state["reply_plan"]["must_say"]
+    assert "马上到账" in state["reply_plan"]["must_not_say"]
+
+
+def test_deposit_missing_with_identity_only_sends_three_part_sop():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "deposit_missing"},
+            "rewritten_question": "mi usuario es andy123",
+            "slot_memory": {},
+            "attachments": [],
+            "reply_language": "es",
+        }
+    )
+
+    assert state["response_text"] == "上方图片只是示例，请上传你自己的存款付款成功截图，我们会继续帮你查询。"
+    assert_deposit_missing_intro_commands(state["commands"])
+    assert "Un depósito puede no acreditarse" in state["commands"][1]["payload"]["text"]
+    assert state["commands"][2]["payload"]["text"] == "上方图片只是示例，请上传你自己的存款付款成功截图，我们会继续帮你查询。"
 
 
 def test_withdrawal_missing_with_identity_only_asks_for_screenshot():
@@ -244,7 +329,7 @@ def test_llm_name_only_updates_customer_name_and_asks_phone_and_receipt():
 
     assert state["slot_memory"]["customer_name"] == "张三"
     assert state["missing_slots"] == ["phone", "receipt_screenshot"]
-    assert state["commands"] == []
+    assert_deposit_missing_intro_commands(state["commands"])
 
 
 def test_llm_phone_only_updates_phone():
@@ -298,7 +383,7 @@ def test_unverified_attachment_without_text_is_not_receipt_screenshot():
 
     assert "receipt_screenshot" not in state["slot_memory"]
     assert "deposit_screenshot" not in state["slot_memory"]
-    assert state["commands"] == []
+    assert_deposit_missing_intro_commands(state["commands"])
 
 
 def test_deposit_missing_accepts_matching_image_analysis_receipt_and_asks_phone_only():
@@ -325,7 +410,7 @@ def test_deposit_missing_accepts_matching_image_analysis_receipt_and_asks_phone_
     assert state["slot_memory"]["receipt_screenshot"] == "https://cdn.example/deposit.png"
     assert state["missing_slots"] == ["phone"]
     assert state["commands"] == []
-    assert state["response_text"] == "已收到截图，请再提供用户名或注册手机号。"
+    assert state["response_text"] == "已收到你的付款截图，请再提供用户名或注册手机号，方便我们为你查询。"
 
 
 def test_deposit_missing_sends_case_when_phone_then_image_analysis_receipt():
@@ -397,7 +482,7 @@ def test_deposit_missing_rejects_unknown_low_confidence_and_wrong_kind_image_ana
 
         assert "receipt_screenshot" not in state["slot_memory"]
         assert "deposit_screenshot" not in state["slot_memory"]
-        assert state["commands"] == []
+        assert_deposit_missing_intro_commands(state["commands"])
 
 
 def test_mismatched_verified_attachment_is_not_receipt_screenshot():
@@ -523,4 +608,4 @@ def test_llm_provider_unavailable_falls_back_without_interrupting_sop():
 
     assert state["llm_sop_dialogue_plan"]["status"] == "fallback"
     assert state["slot_memory"]["account_or_phone"] == "andy123"
-    assert state["commands"] == []
+    assert_deposit_missing_intro_commands(state["commands"])

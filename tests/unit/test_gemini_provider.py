@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pytest
 from datetime import datetime, date
 from decimal import Decimal
@@ -162,10 +163,86 @@ def test_gemini_provider_analyzes_image_attachment(monkeypatch):
     assert captured["image_payload"][0][0] == "system"
     assert "candidate_only" in captured["image_payload"][0][1]
     assert captured["image_payload"][1][0] == "human"
+    content_blocks = captured["image_payload"][1][1]
+    assert isinstance(content_blocks, list)
+    assert content_blocks[0]["type"] == "text"
+    metadata = json.loads(content_blocks[0]["text"])
+    assert metadata["tenant_id"] == "default"
+    assert metadata["conversation_id"] == "livechat:chat-1"
+    assert metadata["mime_type"] == "image/png"
+    assert metadata["active_workflow"] is None
+    assert metadata["workflow_stage"] is None
+    assert content_blocks[1] == {
+        "type": "image_url",
+        "image_url": {"url": "https://cdn.example/withdrawal.png"},
+    }
     assert result["candidate_intents"] == ["withdrawal_missing_candidate"]
     assert result["receipt_kind"] == "withdrawal"
     assert result["provider"] == "gemini"
     assert result["mode"] == "image_analysis_candidate"
+
+
+def test_gemini_provider_image_analysis_missing_url_returns_unknown(monkeypatch):
+    from app.core.settings import Settings
+    from app.llm.gemini_provider import GeminiLLMProvider
+
+    class FakeModel:
+        def with_structured_output(self, schema=None, method=None):
+            raise AssertionError("model should not be called when attachment_url is missing")
+
+    monkeypatch.setattr("app.llm.gemini_provider.build_gemini_chat_model", lambda settings: FakeModel())
+
+    provider = GeminiLLMProvider(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
+
+    result = asyncio.run(
+        provider.analyze_image_attachment(
+            {
+                "attachment_url": None,
+                "mime_type": "image/png",
+                "filename": "missing.png",
+                "tenant_id": "default",
+                "conversation_id": "livechat:chat-1",
+            }
+        )
+    )
+
+    assert result["candidate_intents"] == ["unknown_image"]
+    assert result["receipt_kind"] == "unknown"
+    assert result["is_receipt_like"] is False
+    assert result["safety_flags"] == ["missing_attachment_url", "candidate_only"]
+
+
+def test_gemini_provider_image_analysis_multimodal_error_returns_unknown(monkeypatch):
+    from app.core.settings import Settings
+    from app.llm.gemini_provider import GeminiLLMProvider
+
+    class FakeStructuredModel:
+        async def ainvoke(self, payload):
+            raise RuntimeError("download failed")
+
+    class FakeModel:
+        def with_structured_output(self, schema=None, method=None):
+            return FakeStructuredModel()
+
+    monkeypatch.setattr("app.llm.gemini_provider.build_gemini_chat_model", lambda settings: FakeModel())
+
+    provider = GeminiLLMProvider(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
+
+    result = asyncio.run(
+        provider.analyze_image_attachment(
+            {
+                "attachment_url": "https://cdn.example/broken.png",
+                "mime_type": "image/png",
+                "filename": "broken.png",
+                "tenant_id": "default",
+                "conversation_id": "livechat:chat-1",
+            }
+        )
+    )
+
+    assert result["candidate_intents"] == ["unknown_image"]
+    assert result["receipt_kind"] == "unknown"
+    assert result["safety_flags"] == ["image_download_or_multimodal_error", "candidate_only"]
 
 
 def test_gemini_provider_rejects_invalid_route(monkeypatch):

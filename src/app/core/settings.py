@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     llm_final_reply_min_confidence: float = 0.70
     llm_final_reply_fallback_enabled: bool = True
     llm_final_reply_streaming_enabled: bool = True
-    llm_final_reply_preview_enabled: bool = True
+    llm_final_reply_preview_enabled: bool = False
     llm_final_reply_preview_min_chars: int = 80
     llm_final_reply_preview_interval_ms: int = 700
     llm_final_reply_preview_min_delta_chars: int = 24

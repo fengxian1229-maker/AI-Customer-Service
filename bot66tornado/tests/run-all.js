@@ -2560,6 +2560,7 @@ test('idle followup also sends for soft parked cases', async () => {
 test('idle closing sends two minutes after followup when customer stays silent', async () => {
   const store = new MemoryCaseStore();
   const sent = [];
+  const closed = [];
   const followupAt = new Date(Date.now() - 121_000).toISOString();
   store.saveCase('T-idle-closing', {
     threadId: 'TH-idle-closing',
@@ -2589,6 +2590,10 @@ test('idle closing sends two minutes after followup when customer stays silent',
         sent.push({ chatId, text });
         return { ok: true };
       },
+      async closeChat(chatId) {
+        closed.push({ chatId });
+        return { ok: true };
+      },
     },
     telegram: { async getUpdates() { return { ok: true, result: [] }; } },
     backend: new BackendQueryAdapter({}),
@@ -2601,10 +2606,72 @@ test('idle closing sends two minutes after followup when customer stays silent',
   assert.strictEqual(first, true);
   assert.strictEqual(second, false);
   assert.strictEqual(sent.length, 1);
+  assert.deepStrictEqual(closed, [{ chatId: 'T-idle-closing' }]);
   assert.strictEqual(sent[0].text, 'Si no tiene otra consulta, cerraré este chat.');
   const saved = store.getCase('T-idle-closing', 'TH-idle-closing');
   assert.ok(saved.idleFollowup.closingSentAt);
+  assert.ok(saved.idleFollowup.closedAt);
   assert.ok(store.snapshot.audits.some(item => item.event === 'idle_closing_sent'));
+  assert.ok(store.snapshot.audits.some(item => item.event === 'idle_chat_closed'));
+});
+
+test('idle close retry does not resend closing message', async () => {
+  const store = new MemoryCaseStore();
+  const sent = [];
+  let closeAttempts = 0;
+  const closingSentAt = new Date(Date.now() - 60_000).toISOString();
+  store.saveCase('T-idle-close-retry', {
+    threadId: 'TH-idle-close-retry',
+    groupId: 23,
+    state: createCase({ lang: 'es', stage: 'menu', owner: 'customer' }),
+    lastBotCustomerMessage: {
+      commandType: 'livechat.send_text',
+      text: 'Si no tiene otra consulta, cerraré este chat.',
+      idleFollowupEligible: false,
+      at: closingSentAt,
+    },
+    idleFollowup: {
+      lastBotAt: new Date(Date.now() - 300_000).toISOString(),
+      sentAt: new Date(Date.now() - 180_000).toISOString(),
+      closingSentAt,
+      count: 1,
+    },
+    lastCustomerEventAt: new Date(Date.now() - 360_000).toISOString(),
+  });
+  const runtime = new NarrowBotRuntime({
+    mode: 'test',
+    dryRun: false,
+    store,
+    stopFile: path.join(os.tmpdir(), `bot66-no-stop-${Date.now()}-${Math.random()}`),
+    livechat: {
+      agentEmail: 'ai_jtest@goetm.com',
+      async sendText(chatId, text) {
+        sent.push({ chatId, text });
+        return { ok: true };
+      },
+      async closeChat() {
+        closeAttempts += 1;
+        return closeAttempts === 1
+          ? { ok: false, status: 500, data: { error: { message: 'temporary close failure' } } }
+          : { ok: true };
+      },
+    },
+    telegram: { async getUpdates() { return { ok: true, result: [] }; } },
+    backend: new BackendQueryAdapter({}),
+    staffReplyProcessor: new StaffReplyProcessor({ enabled: false }),
+  });
+
+  const first = await runtime.sendIdleFollowupIfNeeded({ chatId: 'T-idle-close-retry', threadId: 'TH-idle-close-retry' });
+  const second = await runtime.sendIdleFollowupIfNeeded({ chatId: 'T-idle-close-retry', threadId: 'TH-idle-close-retry' });
+
+  assert.strictEqual(first, false);
+  assert.strictEqual(second, true);
+  assert.strictEqual(sent.length, 0);
+  assert.strictEqual(closeAttempts, 2);
+  const saved = store.getCase('T-idle-close-retry', 'TH-idle-close-retry');
+  assert.ok(saved.idleFollowup.closedAt);
+  assert.ok(store.snapshot.audits.some(item => item.event === 'idle_close_failed'));
+  assert.ok(store.snapshot.audits.some(item => item.event === 'idle_chat_closed'));
 });
 
 test('idle closing is skipped when customer replied after the followup', async () => {

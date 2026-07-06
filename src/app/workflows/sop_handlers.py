@@ -11,6 +11,22 @@ from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
 
 
+DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_ASSET = "/Users/andy/ai-agent/bot66tornado/assets/examples/deposit-payment-success-onepay.jpg"
+DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_KEY = "deposit_payment_success_example"
+DEPOSIT_EXAMPLE_SENT_SLOT = "deposit_missing_example_sent"
+
+DEPOSIT_MISSING_REASON_TEXT: dict[str, str] = {
+    "zh-Hans": "存款未到账通常可能是付款还未成功、付款凭证信息与平台订单不一致、渠道处理延迟，或截图资料不足导致暂时无法核实。",
+    "zh-Hant": "存款未到帳通常可能是付款尚未成功、付款憑證資訊與平台訂單不一致、渠道處理延遲，或截圖資料不足導致暫時無法核實。",
+    "en": "A deposit may not be credited yet if the payment has not completed, the receipt details do not match the platform order, the payment channel is delayed, or the screenshot details are not enough to verify it.",
+    "es": "Un depósito puede no acreditarse todavía si el pago no se completó, los datos del comprobante no coinciden con la orden de la plataforma, el canal de pago está demorando o la captura no tiene información suficiente para verificarlo.",
+    "tl": "Maaaring hindi pa pumapasok ang deposit kung hindi pa kumpleto ang bayad, hindi tugma ang detalye ng resibo sa order sa platform, may delay sa payment channel, o kulang ang detalye sa screenshot para ma-verify ito.",
+    "th": "เงินฝากอาจยังไม่เข้าหากการชำระเงินยังไม่สำเร็จ รายละเอียดในสลิปไม่ตรงกับคำสั่งซื้อของแพลตฟอร์ม ช่องทางชำระเงินล่าช้า หรือรายละเอียดในภาพไม่เพียงพอสำหรับการตรวจสอบ",
+    "my": "ငွေသွင်းမှု မရောက်သေးခြင်းသည် ငွေပေးချေမှု မပြီးဆုံးသေးခြင်း၊ ပြေစာအချက်အလက်များသည် ပလက်ဖောင်းအော်ဒါနှင့် မကိုက်ညီခြင်း၊ ငွေပေးချေမှုချန်နယ် နှောင့်နှေးခြင်း၊ သို့မဟုတ် screenshot အချက်အလက် မလုံလောက်ခြင်းကြောင့် ဖြစ်နိုင်ပါသည်။",
+    "ms": "Deposit mungkin belum dikreditkan jika bayaran belum selesai, butiran resit tidak sepadan dengan pesanan platform, saluran pembayaran mengalami kelewatan, atau butiran tangkapan skrin tidak mencukupi untuk pengesahan.",
+}
+
+
 def run_sop(state: dict[str, Any]) -> dict[str, Any]:
     intent = (state.get("intent_result") or {}).get("intent")
     if intent == "deposit_missing":
@@ -51,12 +67,19 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
         latest_text=text,
         attachments=state.get("attachments", []),
     )
-    reply = plan_sop_reply(intent, policy)
-    if policy["action"] == "ask_missing_slots" and _safe_reply_draft(dialogue_plan.get("reply_draft")):
-        reply = {"reply_text": dialogue_plan["reply_draft"], "next_step": "wait_customer_slot"}
+    example_will_be_sent = _should_send_deposit_missing_intro(intent, policy, slot_memory)
+    policy_context = {
+        **policy,
+        "deposit_example_sent": bool(slot_memory.get(DEPOSIT_EXAMPLE_SENT_SLOT)),
+        "deposit_example_will_be_sent": example_will_be_sent,
+    }
+    reply = plan_sop_reply(intent, policy_context)
     commands: list[dict[str, Any]] = []
     if policy["action"] == "send_telegram_case":
         commands.append(build_sop_command(CommandType.TELEGRAM_SEND_CASE_CARD, state, intent, slot_memory))
+    elif example_will_be_sent:
+        commands.extend(_deposit_missing_intro_commands(state, reply["reply_text"]))
+        slot_memory[DEPOSIT_EXAMPLE_SENT_SLOT] = True
 
     next_state = {
         **state,
@@ -80,7 +103,7 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
         },
         "response_text": reply["reply_text"],
         "response_text_fallback": reply["reply_text"],
-        "node_reply_template": _sop_node_reply_template(policy["action"], has_external_command=bool(commands)),
+        "node_reply_template": _sop_node_reply_template(policy["action"], has_external_command=_has_external_sop_command(commands)),
         "node_facts": {
             "sop_name": intent,
             "sop_action": policy["action"],
@@ -88,10 +111,10 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
             "slot_memory": slot_memory,
             "fallback_text": reply["reply_text"],
         },
-        "reply_plan": _build_sop_reply_plan(intent, policy, reply["reply_text"]),
+        "reply_plan": _build_sop_reply_plan(intent, policy_context, reply["reply_text"]),
         "commands": commands,
     }
-    if commands:
+    if _has_external_sop_command(commands):
         next_state.update(
             {"status": "WAITING_EXTERNAL", "active_workflow": intent, "workflow_stage": "waiting_backend"}
         )
@@ -295,6 +318,12 @@ def _build_sop_reply_plan(intent: str, policy: dict[str, Any], fallback_text: st
             must_say.append("用户名或注册手机号")
         if "deposit_screenshot" in missing_slots or ("receipt_screenshot" in missing_slots and intent == "deposit_missing"):
             must_say.append("存款付款截图")
+        if (
+            intent == "deposit_missing"
+            and ("deposit_screenshot" in missing_slots or "receipt_screenshot" in missing_slots)
+            and (policy.get("deposit_example_sent") or policy.get("deposit_example_will_be_sent"))
+        ):
+            must_say.append("示例")
         if "withdrawal_screenshot" in missing_slots or ("receipt_screenshot" in missing_slots and intent == "withdrawal_missing"):
             must_say.append("提款")
         return build_reply_plan(
@@ -302,7 +331,7 @@ def _build_sop_reply_plan(intent: str, policy: dict[str, Any], fallback_text: st
             fallback_text=fallback_text,
             must_say=must_say,
             semantic_required_items=missing_slots,
-            must_not_say=["已到账", "已完成", "已处理", "保证"],
+            must_not_say=["已到账", "已完成", "已处理", "保证", "马上到账"],
             missing_slots=missing_slots,
             allowed_facts=["需要客户补充资料"],
             metadata={"intent": intent, "sop_action": action},
@@ -346,7 +375,57 @@ def _sop_node_reply_template(action: str, *, has_external_command: bool) -> str:
     return "acknowledgement"
 
 
-def _safe_reply_draft(reply_draft: Any) -> bool:
-    text = str(reply_draft or "")
-    forbidden = ("已到账", "到账成功", "已完成", "保证", "已处理", "credited", "completed", "guarantee")
-    return bool(text.strip()) and not any(phrase.lower() in text.lower() for phrase in forbidden)
+def _has_external_sop_command(commands: list[dict[str, Any]]) -> bool:
+    external_types = {
+        str(CommandType.TELEGRAM_SEND_CASE_CARD),
+        str(CommandType.TELEGRAM_APPEND_TO_CASE),
+        str(CommandType.BACKEND_QUERY),
+        str(CommandType.PENDING_REPLY_LOOKUP),
+        str(CommandType.HUMAN_HANDOFF_REQUESTED),
+    }
+    return any(str(command.get("type")) in external_types for command in commands)
+
+
+def _should_send_deposit_missing_intro(intent: str, policy: dict[str, Any], slot_memory: dict[str, Any]) -> bool:
+    if intent != "deposit_missing" or policy.get("action") != "ask_missing_slots":
+        return False
+    if slot_memory.get(DEPOSIT_EXAMPLE_SENT_SLOT):
+        return False
+    missing_slots = set(policy.get("missing_slots") or [])
+    return bool({"deposit_screenshot", "receipt_screenshot"} & missing_slots)
+
+
+def _deposit_missing_intro_commands(state: dict[str, Any], collection_text: str) -> list[dict[str, Any]]:
+    reason_text = _deposit_missing_reason_text(state.get("reply_language") or state.get("conversation_language") or state.get("detected_language"))
+    return [
+        {
+            "type": CommandType.LIVECHAT_SEND_IMAGE,
+            "block_index": 0,
+            "payload": {
+                "asset_key": DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_KEY,
+                "asset_ref": DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_ASSET,
+                "caption": "",
+                "position": "before",
+            },
+        },
+        {
+            "type": CommandType.LIVECHAT_SEND_TEXT,
+            "block_index": 1,
+            "payload": {
+                "text": reason_text,
+                "final_reply_exempt": True,
+            },
+        },
+        {
+            "type": CommandType.LIVECHAT_SEND_TEXT,
+            "block_index": 2,
+            "payload": {
+                "text": collection_text,
+                "final_reply_target": True,
+            },
+        },
+    ]
+
+
+def _deposit_missing_reason_text(language: str | None) -> str:
+    return DEPOSIT_MISSING_REASON_TEXT.get(str(language or ""), DEPOSIT_MISSING_REASON_TEXT["zh-Hans"])

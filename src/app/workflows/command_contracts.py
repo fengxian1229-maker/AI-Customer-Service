@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 class CommandType(StrEnum):
     LIVECHAT_SEND_TEXT = "livechat.send_text"
+    LIVECHAT_SEND_IMAGE = "livechat.send_image"
     LIVECHAT_SEND_BUTTONS = "livechat.send_buttons"
     TELEGRAM_SEND_CASE_CARD = "telegram.send_case_card"
     TELEGRAM_APPEND_TO_CASE = "telegram.append_to_case"

@@ -5,6 +5,7 @@ from app.graph.state import GraphState
 from app.llm.guardrails import validate_router_decision_output, validate_sop_dialogue_planner_output, validate_sop_slot_extraction_output
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
+from app.services.faq_delivery import LIVECHAT_BUTTON_SOURCE, prepare_faq_context_for_delivery
 from app.services.rag import answer_from_rag_context, answer_from_static_knowledge
 from app.services.livechat_menus import BUSINESS_BUTTON_ROUTES, MENU_BY_NAV_BUTTON, detect_button_id
 from app.services.language_policy import (
@@ -569,10 +570,15 @@ def sop_node(state: GraphState) -> GraphState:
 
 
 def rag_node(state: GraphState) -> GraphState:
+    state = {**state, "rag_context": prepare_faq_context_for_delivery(state.get("rag_context"), state)}
     rag_result = answer_from_rag_context(state) if state.get("rag_context") is not None else answer_from_static_knowledge(state)
     fallback_text = rag_result["answer"]
+    next_state = {**state}
+    if next_state.get("active_workflow"):
+        next_state["active_workflow"] = None
+        next_state["workflow_stage"] = None
     return {
-        **state,
+        **next_state,
         "rag_result": rag_result,
         "node_reply_template": "faq_answer",
         "node_facts": {
@@ -622,8 +628,20 @@ def make_rag_node(rag_service=None):
     return node
 
 
-def make_final_reply_node(final_reply_service=None, *, llm_final_reply_enabled: bool = False):
+def make_final_reply_node(
+    final_reply_service=None,
+    *,
+    llm_final_reply_enabled: bool = False,
+    llm_final_reply_streaming_enabled: bool = False,
+):
     async def node(state: GraphState) -> GraphState:
+        if llm_final_reply_streaming_enabled and state.get("channel_type") == "livechat":
+            return {
+                **state,
+                "response_text_fallback": state.get("response_text_fallback") or state.get("response_text"),
+                "final_response_text": None,
+                "final_reply_result": {"status": "skipped", "reason": "streaming_enabled"},
+            }
         if final_reply_service and hasattr(final_reply_service, "compose"):
             return await final_reply_service.compose(state)
         if llm_final_reply_enabled and state.get("response_text"):
@@ -703,19 +721,36 @@ def command_planner_node(state: GraphState) -> GraphState:
     commands = list(state.get("commands") or [])
     text = state.get("final_response_text") or state.get("response_text")
     if text:
-        for command in commands:
-            if str(command.get("type")) == str(CommandType.LIVECHAT_SEND_TEXT):
-                command["payload"] = {**dict(command.get("payload") or {}), "text": text}
-                break
+        target_command = _final_reply_target_text_command(commands)
+        if target_command is not None:
+            target_command["payload"] = {**dict(target_command.get("payload") or {}), "text": text}
         else:
-            commands.insert(
-                0,
-                {
-                    "type": CommandType.LIVECHAT_SEND_TEXT,
-                    "payload": {"text": text},
-                },
-            )
+            for command in commands:
+                if str(command.get("type")) == str(CommandType.LIVECHAT_SEND_TEXT) and not _final_reply_exempt(command):
+                    command["payload"] = {**dict(command.get("payload") or {}), "text": text}
+                    break
+            else:
+                commands.insert(
+                    0,
+                    {
+                        "type": CommandType.LIVECHAT_SEND_TEXT,
+                        "payload": {"text": text},
+                    },
+                )
     return {**state, "commands": commands}
+
+
+def _final_reply_target_text_command(commands: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for command in commands:
+        if str(command.get("type")) != str(CommandType.LIVECHAT_SEND_TEXT):
+            continue
+        if (command.get("payload") or {}).get("final_reply_target") is True:
+            return command
+    return None
+
+
+def _final_reply_exempt(command: dict[str, Any]) -> bool:
+    return (command.get("payload") or {}).get("final_reply_exempt") is True
 
 
 def persist_state_node(state: GraphState) -> GraphState:
@@ -1142,11 +1177,11 @@ def _active_workflow_deterministic_route(state: GraphState, active_workflow: str
             state,
             faq["intent"],
             "faq",
-            "Independent FAQ during active workflow; preserve current SOP state.",
+            "Independent FAQ during active workflow; clear the previous SOP state after answering.",
             confidence=0.86,
             faq_query=faq["faq_query"],
             workflow_relation="independent_faq",
-            preserve_active_workflow=True,
+            preserve_active_workflow=False,
         )
     if _is_cross_workflow_business_object(state, active_workflow):
         return _final_reply_route(
@@ -1566,7 +1601,7 @@ def _is_independent_faq_during_workflow(state: GraphState) -> dict[str, str] | N
     text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
     if _is_deposit_howto(text) or _contains_any(text, ("怎么存款", "如何存款", "怎么充值")):
         return {"intent": "deposit_howto", "faq_query": "怎么存款"}
-    if _is_withdrawal_howto(text) or _contains_any(text, ("怎么提款", "怎么提现", "如何提现")):
+    if _is_withdrawal_howto(text) or _contains_any(text, ("怎么提款", "怎么提现", "如何提现", "咋取钱", "怎么取钱", "如何取钱")):
         return {"intent": "withdrawal_howto", "faq_query": "如何提款"}
     if _is_forgot_password_howto(text):
         return {"intent": "forgot_password_howto", "faq_query": "忘记密码"}
@@ -1921,14 +1956,28 @@ def _apply_menu_button_route(state: GraphState) -> GraphState | None:
     route = BUSINESS_BUTTON_ROUTES.get(button_id)
     if not route:
         return None
+    is_repeat_active_sop = (
+        route.get("route") == "sop"
+        and state.get("active_workflow") == route.get("intent")
+        and state.get("workflow_stage") == "collecting_slots"
+    )
     intent_result = {
         "intent": route["intent"],
         "route": route["route"],
         "confidence": 1.0,
-        "reason": f"LiveChat button {button_id}.",
+        "reason": (
+            f"Repeated LiveChat button {button_id} for active SOP."
+            if is_repeat_active_sop
+            else f"LiveChat button {button_id}."
+        ),
         "sop_name": route.get("sop_name"),
         "faq_query": route.get("faq_query"),
     }
+    if route.get("route") == "faq":
+        intent_result["faq_trigger_source"] = LIVECHAT_BUTTON_SOURCE
+    if is_repeat_active_sop:
+        intent_result["workflow_relation"] = "current_workflow_supplement"
+        intent_result["preserve_active_workflow"] = True
     return {
         **base,
         "route": route["route"],
@@ -2053,7 +2102,7 @@ def _is_deposit_howto(text: str) -> bool:
 
 
 def _is_withdrawal_howto(text: str) -> bool:
-    return _contains_any(text, ("cómo puedo retirar", "como puedo retirar", "cómo retirar", "como retirar", "how to withdraw", "如何提款"))
+    return _contains_any(text, ("cómo puedo retirar", "como puedo retirar", "cómo retirar", "como retirar", "how to withdraw", "如何提款", "咋取钱", "怎么取钱", "如何取钱"))
 
 
 def _is_forgot_password_howto(text: str) -> bool:

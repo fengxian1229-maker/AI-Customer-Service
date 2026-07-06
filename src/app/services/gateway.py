@@ -9,6 +9,7 @@ from app.llm.guardrails import contains_backend_fact_signal, validate_router_dec
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.chinese_script import adapt_chinese_script
+from app.services.faq_delivery import prepare_faq_context_for_delivery
 from app.services.faq_outbound_plan import build_faq_outbound_plan_from_rag_context, faq_plan_to_outbound_rows
 from app.services.language_policy import normalize_language_code, parse_supported_languages, resolve_language_policy
 from app.services.livechat_preview import LiveChatPreviewPublisher
@@ -162,7 +163,12 @@ class GatewayService:
         self.preview_publisher_factory = preview_publisher_factory
         self.final_reply_streaming_service = final_reply_streaming_service
         self.image_attachment_analyzer = image_attachment_analyzer
-        self.llm_final_reply_streaming_enabled = bool(llm_final_reply_streaming_enabled)
+        self.llm_final_reply_streaming_enabled = bool(
+            llm_final_reply_streaming_enabled
+            and final_reply_streaming_service
+            and hasattr(final_reply_streaming_service, "stream_final_reply")
+            and livechat_sender_client
+        )
         self.llm_final_reply_preview_enabled = bool(llm_final_reply_preview_enabled)
         self.llm_final_reply_preview_min_chars = int(llm_final_reply_preview_min_chars)
         self.llm_final_reply_preview_interval_ms = int(llm_final_reply_preview_interval_ms)
@@ -197,6 +203,7 @@ class GatewayService:
             llm_sop_slot_min_confidence=self.llm_sop_slot_min_confidence,
             llm_sop_slot_fallback_to_deterministic=self.llm_sop_slot_fallback_to_deterministic,
             llm_final_reply_enabled=self.llm_final_reply_enabled,
+            llm_final_reply_streaming_enabled=self.llm_final_reply_streaming_enabled,
         )
 
     async def process_event(self, inbound_event_id: int, event: InboundEvent) -> dict:
@@ -757,38 +764,15 @@ class GatewayService:
         final_text = normalize_text(streamed_state.get("final_response_text"))
         if not final_text:
             return graph_state, outbound_messages, []
-        remaining_messages = [message for index, message in enumerate(outbound_messages) if index != text_index]
-        assistant_message = self._build_streamed_assistant_message(
-            inbound_event_id,
-            event,
-            conversation,
-            final_text,
-        )
-        return streamed_state, remaining_messages, [assistant_message]
-
-    def _build_streamed_assistant_message(
-        self,
-        inbound_event_id: int,
-        event: InboundEvent,
-        conversation: dict,
-        text: str,
-    ) -> dict:
-        return {
-            "conversation_id": conversation["conversation_id"],
-            "tenant_id": conversation.get("tenant_id") or "default",
-            "channel_type": conversation.get("channel_type") or "livechat",
-            "chat_id": event.chat_id,
-            "thread_id": event.thread_id,
-            "inbound_event_id": inbound_event_id,
-            "outbound_message_id": None,
-            "external_command_result_id": None,
-            "sender_role": "assistant",
-            "message_type": "text",
-            "text_content": text,
-            "attachment_refs": [],
-            "source": "livechat_stream",
-            "occurred_at": None,
+        final_custom_id = getattr(preview_publisher, "custom_id", f"preview:{inbound_event_id}")
+        updated_messages = list(outbound_messages)
+        updated_payload = {
+            **(text_message.get("payload_json") or {}),
+            "text": final_text,
+            "custom_id": final_custom_id,
         }
+        updated_messages[text_index] = {**text_message, "payload_json": updated_payload}
+        return streamed_state, updated_messages, []
 
     async def _event_with_image_analysis(self, event: InboundEvent, conversation: dict) -> InboundEvent:
         if event.standard_event_type != "FILE_RECEIVED":
@@ -1492,8 +1476,9 @@ class GatewayService:
         if graph_state.get("route") == "human_handoff" and not self._has_handoff_ack_command(graph_state):
             return []
         if graph_state.get("route") == "faq" and graph_state.get("rag_context"):
+            rag_context = prepare_faq_context_for_delivery(graph_state["rag_context"], graph_state)
             plan = build_faq_outbound_plan_from_rag_context(
-                graph_state["rag_context"],
+                rag_context,
                 tenant_id=graph_state.get("tenant_id") or "default",
                 conversation_id=conversation_id,
                 inbound_event_id=inbound_event_id,
@@ -1523,7 +1508,8 @@ class GatewayService:
                 command=self._command_with_final_text(command, graph_state),
             )
             for command in graph_state.get("commands", [])
-            if str(command["type"]) in {str(CommandType.LIVECHAT_SEND_TEXT), str(CommandType.LIVECHAT_SEND_BUTTONS)}
+            if str(command["type"])
+            in {str(CommandType.LIVECHAT_SEND_TEXT), str(CommandType.LIVECHAT_SEND_IMAGE), str(CommandType.LIVECHAT_SEND_BUTTONS)}
         ]
 
     def _append_intro_menu_if_needed(
@@ -1722,10 +1708,21 @@ class GatewayService:
         final_text = graph_state.get("final_response_text")
         if not final_text or str(command.get("type")) != str(CommandType.LIVECHAT_SEND_TEXT):
             return command
+        commands = list(graph_state.get("commands") or [])
+        has_target = any(
+            str(item.get("type")) == str(CommandType.LIVECHAT_SEND_TEXT)
+            and (item.get("payload") or {}).get("final_reply_target") is True
+            for item in commands
+        )
+        payload = dict(command.get("payload") or {})
+        if has_target and payload.get("final_reply_target") is not True:
+            return command
+        if payload.get("final_reply_exempt") is True:
+            return command
         return {
             **command,
             "payload": {
-                **dict(command.get("payload") or {}),
+                **payload,
                 "text": final_text,
             },
         }
