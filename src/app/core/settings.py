@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     livechat_handoff_ignore_requester_presence: bool = True
     livechat_handoff_enabled: bool = False
     livechat_image_text_fallback: bool = False
+    livechat_webhook_secret: str | None = None
+    livechat_webhook_enabled: bool = False
+    webhook_server_host: str = "0.0.0.0"
+    webhook_server_port: int = 8000
     telegram_bot_token: str | None = None
     telegram_api_base: str = "https://api.telegram.org"
     telegram_sop_enabled: bool = False

@@ -12,6 +12,10 @@ def test_settings_defaults():
     assert settings.poll_seconds == 5
     assert settings.mysql_port == 3306
     assert settings.langgraph_checkpoint_setup_on_start is False
+    assert settings.livechat_webhook_secret is None
+    assert settings.livechat_webhook_enabled is False
+    assert settings.webhook_server_host == "0.0.0.0"
+    assert settings.webhook_server_port == 8000
 
 
 def test_settings_livechat_handoff_target_group_id_accepts_blank_as_none():
@@ -63,8 +67,20 @@ def test_build_app_has_health_route():
 
     app = build_app()
 
-    paths = {route.path for route in app.routes}
+    def route_paths(routes):
+        paths = set()
+        for route in routes:
+            if hasattr(route, "path"):
+                paths.add(route.path)
+            if hasattr(route, "routes"):
+                paths.update(route_paths(route.routes))
+            if hasattr(route, "original_router"):
+                paths.update(route_paths(route.original_router.routes))
+        return paths
+
+    paths = route_paths(app.routes)
     assert "/healthz" in paths
+    assert "/api/v1/webhooks/livechat" in paths
 
 
 def test_load_sql_files_in_order():

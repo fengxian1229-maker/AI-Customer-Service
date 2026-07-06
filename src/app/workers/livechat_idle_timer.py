@@ -15,15 +15,20 @@ FOLLOWUP_TEXT = "请问您还在吗？如果还有问题，可以继续告诉我
 CLOSE_TEXT = "由于暂时没有收到您的回复，本次对话将先结束。如后续仍需协助，欢迎随时重新联系我们。"
 DEFAULT_FOLLOWUP_SECONDS = 120
 DEFAULT_CLOSE_SECONDS = 120
+DEFAULT_FAILURE_BACKOFF_SECONDS = 600
 
 IDLE_SLOT_KEYS = {
     "idle_followup_sent_at",
+    "idle_followup_failed_at",
+    "idle_followup_last_error",
     "idle_close_sent_at",
     "idle_closed_at",
     "idle_base_assistant_message_id",
     "idle_followup_message_id",
     "idle_close_message_id",
+    "idle_close_failed_at",
     "idle_close_last_error",
+    "idle_last_failed_at",
 }
 
 
@@ -55,13 +60,21 @@ class LiveChatIdleTimerRepository:
         ORDER BY m.created_at ASC, m.id ASC
         LIMIT %s
         """
+        query_limit = max(int(limit or 20) * 5, int(limit or 20))
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(sql, (limit,))
+                await cur.execute(sql, (query_limit,))
                 rows = list(await cur.fetchall())
+        candidates = []
+        now = datetime.now()
         for row in rows:
             row["slot_memory"] = json_loads(row.get("slot_memory") or "{}")
-        return rows
+            if _idle_failure_backoff_active(row["slot_memory"], now):
+                continue
+            candidates.append(row)
+            if len(candidates) >= limit:
+                break
+        return candidates
 
     async def fetch_latest_message(self, conversation_id: str) -> dict | None:
         sql = """
@@ -250,6 +263,19 @@ async def _send_idle_text(
             text=text,
         )
     except Exception as exc:
+        if _is_already_closed_error(exc):
+            slot_memory["idle_closed_at"] = _format_datetime(now)
+            slot_memory.pop("idle_close_last_error", None)
+            slot_memory.pop("idle_followup_last_error", None)
+            slot_memory.pop("idle_last_failed_at", None)
+            await repository.mark_closed(conversation["conversation_id"], slot_memory)
+            return _result(conversation, "CLOSED_ALREADY_IN_LIVECHAT", error=str(exc))
+        error_key = "idle_close_last_error" if sent_at_key == "idle_close_sent_at" else "idle_followup_last_error"
+        failed_at_key = "idle_close_failed_at" if sent_at_key == "idle_close_sent_at" else "idle_followup_failed_at"
+        slot_memory[error_key] = str(exc)
+        slot_memory[failed_at_key] = _format_datetime(now)
+        slot_memory["idle_last_failed_at"] = _format_datetime(now)
+        await repository.update_slot_memory(conversation["conversation_id"], slot_memory)
         return _result(conversation, "FAILED_SEND_TEXT", error=str(exc))
     message_id = await repository.insert_assistant_message(conversation, text=text, now=now)
     slot_memory[sent_at_key] = _format_datetime(now)
@@ -291,6 +317,13 @@ def _is_already_closed_error(exc: Exception) -> bool:
     return False
 
 
+def _idle_failure_backoff_active(slot_memory: dict, now: datetime) -> bool:
+    failed_at = _parse_datetime((slot_memory or {}).get("idle_last_failed_at"))
+    if failed_at is None:
+        return False
+    return now - failed_at < timedelta(seconds=DEFAULT_FAILURE_BACKOFF_SECONDS)
+
+
 def _parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
@@ -316,6 +349,7 @@ def _result(conversation: dict, status: str, **extra) -> dict:
 
 
 def summarize_results(results: list[dict]) -> dict:
+    first_error = next((result.get("error") for result in results if result.get("error")), None)
     return {
         "processed": len(results),
         "followup_sent": sum(1 for result in results if result.get("status") == "FOLLOWUP_SENT"),
@@ -323,6 +357,7 @@ def summarize_results(results: list[dict]) -> dict:
         "closed": sum(1 for result in results if result.get("status") in {"CLOSED", "CLOSED_ALREADY_IN_LIVECHAT"}),
         "failed": sum(1 for result in results if str(result.get("status") or "").startswith("FAILED")),
         "reset": sum(1 for result in results if result.get("status") == "RESET_BY_CUSTOMER"),
+        "first_error": first_error,
     }
 
 

@@ -1,11 +1,4 @@
-from fastapi import FastAPI
+from app.api.app import build_app
 
 
-def build_app() -> FastAPI:
-    app = FastAPI()
-
-    @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
-
-    return app
+__all__ = ["build_app"]

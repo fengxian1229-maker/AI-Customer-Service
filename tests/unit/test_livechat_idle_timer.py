@@ -135,6 +135,33 @@ def test_idle_timer_sends_followup_after_120_seconds():
     assert slot_memory["idle_followup_sent_at"] == "2026-07-03 09:00:00"
 
 
+def test_idle_timer_persists_followup_send_failure_for_diagnostics():
+    now = datetime(2026, 7, 3, 9, 0, 0)
+    repository = FakeIdleRepository(latest=make_latest_assistant(now - timedelta(seconds=120), message_id=9))
+
+    class FailingLiveChatClient(FakeLiveChatClient):
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            raise RuntimeError("agent not in chat")
+
+    result = asyncio.run(
+        process_idle_conversation(
+            make_conversation(),
+            repository=repository,
+            sender_client=FailingLiveChatClient(),
+            followup_seconds=120,
+            close_seconds=120,
+            now=now,
+        )
+    )
+
+    assert result["status"] == "FAILED_SEND_TEXT"
+    assert result["error"] == "agent not in chat"
+    slot_memory = repository.slot_updates[-1][1]
+    assert slot_memory["idle_followup_last_error"] == "agent not in chat"
+    assert slot_memory["idle_followup_failed_at"] == "2026-07-03 09:00:00"
+    assert slot_memory["idle_last_failed_at"] == "2026-07-03 09:00:00"
+
+
 def test_idle_timer_resets_when_customer_replies_after_followup():
     now = datetime(2026, 7, 3, 9, 3, 0)
     slot_memory = {

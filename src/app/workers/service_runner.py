@@ -63,6 +63,8 @@ class ServiceRunnerConfig:
     max_iterations: int | None
     stop_on_error: bool
     shutdown_timeout_seconds: float
+    livechat_idle_followup_seconds: int = livechat_idle_timer.DEFAULT_FOLLOWUP_SECONDS
+    livechat_idle_close_seconds: int = livechat_idle_timer.DEFAULT_CLOSE_SECONDS
 
 
 @dataclass
@@ -137,6 +139,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--external-result-seconds", type=float, default=1.0)
     parser.add_argument("--telegram-reply-seconds", type=float, default=3.0)
     parser.add_argument("--livechat-idle-timer-seconds", type=float, default=5.0)
+    parser.add_argument("--livechat-idle-followup-seconds", type=int, default=livechat_idle_timer.DEFAULT_FOLLOWUP_SECONDS)
+    parser.add_argument("--livechat-idle-close-seconds", type=int, default=livechat_idle_timer.DEFAULT_CLOSE_SECONDS)
 
     parser.add_argument("--poll-limit", type=int, help="Maximum LiveChat chats to poll in one cycle.")
     parser.add_argument("--gateway-limit", type=int, default=20)
@@ -213,6 +217,8 @@ def build_config(args: argparse.Namespace, settings: Settings) -> ServiceRunnerC
         external_result_seconds=args.external_result_seconds,
         telegram_reply_seconds=args.telegram_reply_seconds,
         livechat_idle_timer_seconds=args.livechat_idle_timer_seconds,
+        livechat_idle_followup_seconds=args.livechat_idle_followup_seconds,
+        livechat_idle_close_seconds=args.livechat_idle_close_seconds,
         poll_limit=args.poll_limit if args.poll_limit is not None else settings.poll_limit,
         gateway_limit=args.gateway_limit,
         sender_limit=args.sender_limit,
@@ -410,6 +416,8 @@ async def livechat_idle_timer_tick(context: ServiceRunnerContext) -> dict:
         context.pool,
         context.sender_client,
         limit=context.config.livechat_idle_timer_limit,
+        followup_seconds=context.config.livechat_idle_followup_seconds,
+        close_seconds=context.config.livechat_idle_close_seconds,
     )
     return {"worker": "livechat_idle_timer", **livechat_idle_timer.summarize_results(results)}
 
@@ -608,6 +616,10 @@ def _validate_usage(args: argparse.Namespace) -> dict | None:
             return _failed_usage(f"--{name.replace('_', '-')} must be greater than or equal to 0")
     if args.shutdown_timeout_seconds < 0:
         return _failed_usage("--shutdown-timeout-seconds must be greater than or equal to 0")
+    if args.livechat_idle_followup_seconds < 0:
+        return _failed_usage("--livechat-idle-followup-seconds must be greater than or equal to 0")
+    if args.livechat_idle_close_seconds < 0:
+        return _failed_usage("--livechat-idle-close-seconds must be greater than or equal to 0")
     return None
 
 
