@@ -5,3 +5,4 @@ __pycache__/
 .env
 logs/
 *.pid
+backups/knowledge_documents_delete_backup_20260703.json

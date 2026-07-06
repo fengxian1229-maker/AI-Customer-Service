@@ -227,16 +227,9 @@ def build_config(args: argparse.Namespace, settings: Settings) -> ServiceRunnerC
 
 
 def build_context(settings: Settings, pool: Any, groups: set[int], config: ServiceRunnerConfig) -> ServiceRunnerContext:
-    polling_client = LiveChatSenderClient(
-        settings.livechat_api_base,
-        settings.livechat_account_id,
-        settings.livechat_agent_access_token,
-    )
-    sender_client = LiveChatSenderClient(
-        settings.livechat_api_base,
-        settings.livechat_account_id,
-        settings.livechat_agent_access_token,
-    )
+    client_args = _livechat_client_args(settings)
+    polling_client = LiveChatSenderClient(*client_args)
+    sender_client = LiveChatSenderClient(*client_args)
     return ServiceRunnerContext(
         settings=settings,
         pool=pool,
@@ -245,6 +238,18 @@ def build_context(settings: Settings, pool: Any, groups: set[int], config: Servi
         groups=groups,
         config=config,
     )
+
+
+def _livechat_client_args(settings: Settings) -> tuple:
+    args = (
+        settings.livechat_api_base,
+        settings.livechat_account_id,
+        settings.livechat_agent_access_token,
+    )
+    agent_email = getattr(settings, "livechat_agent_email", None)
+    if agent_email:
+        return (*args, agent_email)
+    return args
 
 
 def preflight_all(settings: Settings, groups: set[int]) -> dict:

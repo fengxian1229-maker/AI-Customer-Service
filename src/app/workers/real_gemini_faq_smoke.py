@@ -129,6 +129,7 @@ async def run(argv: list[str] | None = None) -> dict:
                     settings.livechat_api_base,
                     settings.livechat_account_id,
                     settings.livechat_agent_access_token,
+                    agent_email=getattr(settings, "livechat_agent_email", None),
                 )
                 sender_results = await sender_worker.process_pending_for_inbound_event(
                     pool,

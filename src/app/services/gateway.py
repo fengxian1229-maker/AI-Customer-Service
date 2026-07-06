@@ -9,16 +9,18 @@ from app.llm.guardrails import contains_backend_fact_signal, validate_router_dec
 from app.schemas.events import InboundEvent
 from app.services.conversations import conversation_id_for_chat
 from app.services.chinese_script import adapt_chinese_script
-from app.services.faq_delivery import prepare_faq_context_for_delivery
+from app.services.faq_delivery import LIVECHAT_BUTTON_SOURCE, prepare_faq_context_for_delivery
 from app.services.faq_outbound_plan import build_faq_outbound_plan_from_rag_context, faq_plan_to_outbound_rows
 from app.services.language_policy import normalize_language_code, parse_supported_languages, resolve_language_policy
 from app.services.livechat_preview import LiveChatPreviewPublisher
-from app.services.livechat_menus import MENU_BY_NAV_BUTTON, detect_button_id, get_menu
+from app.services.livechat_menus import BUSINESS_BUTTON_ROUTES, MENU_BY_NAV_BUTTON, get_menu
 from app.services.message_history import build_customer_message_from_inbound
 from app.services.outbox import build_command_outbox, build_external_command_record, build_text_outbox
+from app.services.rag import RagService, answer_from_rag_context
 from app.workflows.command_contracts import CommandType
 from app.workflows.final_reply_policy import build_reply_plan
 from app.workflows.slot_extractors import is_explicit_human_request, normalize_text
+from app.workflows.sop_handlers import run_sop
 
 
 EXTERNAL_COMMAND_TYPES = {
@@ -212,7 +214,7 @@ class GatewayService:
             conversation = await self._load_transactional_conversation(event)
             human_active = self._is_human_active(conversation)
             event_for_graph = await self._event_with_image_analysis(event, conversation) if not human_active else event
-            fast_graph_state = self._build_pre_graph_state(event, conversation) if not human_active else None
+            fast_graph_state = await self._build_pre_graph_state(event, conversation) if not human_active else None
             recent_messages = (
                 await self._load_recent_messages(conversation)
                 if not human_active and fast_graph_state is None
@@ -230,7 +232,6 @@ class GatewayService:
                 else None
             )
             outbound_messages = await self._build_outbound_messages(inbound_event_id, event_for_graph, conversation["conversation_id"], graph_state)
-            outbound_messages = self._append_intro_menu_if_needed(outbound_messages, inbound_event_id, event_for_graph, conversation, graph_state)
             external_commands = self._build_external_commands(inbound_event_id, event, conversation, graph_state)
             graph_state, outbound_messages, assistant_messages = await self._maybe_stream_official_livechat_text(
                 inbound_event_id,
@@ -272,7 +273,7 @@ class GatewayService:
         outbound_messages = []
         assistant_messages = []
         customer_message = None
-        fast_graph_state = self._build_pre_graph_state(event, conversation) if not human_active else None
+        fast_graph_state = await self._build_pre_graph_state(event, conversation) if not human_active else None
         if fast_graph_state is not None:
             graph_state = fast_graph_state
             customer_message = (
@@ -321,13 +322,6 @@ class GatewayService:
                 conversation["conversation_id"],
                 graph_state,
             )
-            outbound_messages = self._append_intro_menu_if_needed(
-                outbound_messages,
-                inbound_event_id,
-                event_for_graph,
-                conversation,
-                graph_state,
-            )
             graph_state, outbound_messages, assistant_messages = await self._maybe_stream_official_livechat_text(
                 inbound_event_id,
                 event_for_graph,
@@ -365,7 +359,7 @@ class GatewayService:
     def _is_human_active(self, conversation: dict) -> bool:
         return str(conversation.get("status") or "").upper() == "HUMAN_ACTIVE"
 
-    def _build_pre_graph_state(self, event: InboundEvent, conversation: dict) -> dict | None:
+    async def _build_pre_graph_state(self, event: InboundEvent, conversation: dict) -> dict | None:
         if str(event.standard_event_type or "") in INTRO_EVENT_TYPES:
             return self._build_intro_menu_state(event, conversation)
         if event.standard_event_type != "MESSAGE_CREATED":
@@ -375,6 +369,8 @@ class GatewayService:
             return self._build_nav_button_state(event, conversation, button_id)
         if button_id == "global_human":
             return self._build_fast_handoff_state(event, conversation, button_id)
+        if button_id in BUSINESS_BUTTON_ROUTES:
+            return await self._build_business_button_state(event, conversation, button_id)
         return None
 
     def _build_intro_menu_state(self, event: InboundEvent, conversation: dict) -> dict:
@@ -477,6 +473,114 @@ class GatewayService:
             ],
         }
 
+    async def _build_business_button_state(self, event: InboundEvent, conversation: dict, button_id: str) -> dict | None:
+        route = BUSINESS_BUTTON_ROUTES.get(button_id)
+        if not route:
+            return None
+        if route.get("route") == "human_handoff":
+            return self._build_fast_handoff_state(event, conversation, button_id)
+
+        slot_memory = dict(conversation.get("slot_memory") or {})
+        livechat_menu = self._business_button_menu_memory(slot_memory.get("livechat_menu") or {}, button_id)
+        slot_memory["livechat_menu"] = livechat_menu
+        reply_language = self._fast_menu_language(slot_memory=slot_memory, conversation=conversation)
+        slot_memory["last_reply_language"] = reply_language
+        state = {
+            **self._base_pre_graph_state(event, conversation, slot_memory, reply_language),
+            "route": route["route"],
+            "route_source": "livechat_button_fast_path",
+            "intent_result": self._business_button_intent_result(button_id, route, conversation),
+        }
+        if route.get("route") == "sop":
+            return self._with_fast_path_text_command(run_sop(state))
+        if route.get("route") == "faq":
+            return await self._build_business_button_faq_state(state)
+        return state
+
+    def _business_button_intent_result(self, button_id: str, route: dict, conversation: dict) -> dict:
+        is_repeat_active_sop = (
+            route.get("route") == "sop"
+            and conversation.get("active_workflow") == route.get("intent")
+            and conversation.get("workflow_stage") == "collecting_slots"
+        )
+        result = {
+            "intent": route["intent"],
+            "route": route["route"],
+            "confidence": 1.0,
+            "reason": (
+                f"Repeated LiveChat button {button_id} for active SOP."
+                if is_repeat_active_sop
+                else f"LiveChat button {button_id} handled by gateway fast path."
+            ),
+            "sop_name": route.get("sop_name"),
+            "faq_query": route.get("faq_query"),
+        }
+        if route.get("route") == "faq":
+            result["faq_trigger_source"] = LIVECHAT_BUTTON_SOURCE
+        if is_repeat_active_sop:
+            result["workflow_relation"] = "current_workflow_supplement"
+            result["preserve_active_workflow"] = True
+        return result
+
+    async def _build_business_button_faq_state(self, state: dict) -> dict:
+        rag_service = self.rag_service or RagService()
+        try:
+            rag_context = await rag_service.retrieve(state)
+        except Exception:
+            rag_context = await RagService().retrieve(state)
+        state = {**state, "rag_context": prepare_faq_context_for_delivery(rag_context, state)}
+        rag_result = answer_from_rag_context(state)
+        fallback_text = rag_result["answer"]
+        next_state = {**state}
+        if next_state.get("active_workflow"):
+            next_state["active_workflow"] = None
+            next_state["workflow_stage"] = None
+        return {
+            **next_state,
+            "rag_result": rag_result,
+            "node_reply_template": "faq_answer",
+            "node_facts": {
+                "answer": rag_result.get("answer"),
+                "matched": rag_result.get("matched"),
+                "source": rag_result.get("source"),
+                "query": rag_result.get("query"),
+                "fallback_reason": rag_result.get("fallback_reason"),
+                "documents": rag_result.get("documents"),
+                "faq_intent": (state.get("intent_result") or {}).get("intent"),
+            },
+            "response_text": fallback_text,
+            "response_text_fallback": fallback_text,
+            "reply_plan": build_reply_plan(
+                kind="faq_answer",
+                fallback_text=fallback_text,
+                must_say=[],
+                must_not_say=["已到账", "已完成", "已退款", "保证到账", "手续费全免"],
+                allowed_facts=[fallback_text] if fallback_text else [],
+            ),
+            "commands": [],
+        }
+
+    def _with_fast_path_text_command(self, state: dict) -> dict:
+        commands = list(state.get("commands") or [])
+        has_livechat_command = any(
+            str(command.get("type"))
+            in {str(CommandType.LIVECHAT_SEND_TEXT), str(CommandType.LIVECHAT_SEND_IMAGE), str(CommandType.LIVECHAT_SEND_BUTTONS)}
+            for command in commands
+        )
+        text = normalize_text(state.get("response_text") or state.get("response_text_fallback"))
+        if has_livechat_command or not text:
+            return state
+        return {
+            **state,
+            "commands": [
+                *commands,
+                {
+                    "type": CommandType.LIVECHAT_SEND_TEXT,
+                    "payload": {"text": text, "final_reply_exempt": True},
+                },
+            ],
+        }
+
     def _base_pre_graph_state(self, event: InboundEvent, conversation: dict, slot_memory: dict, reply_language: str) -> dict:
         raw_text = normalize_text((event.payload_json or {}).get("text") or ((event.payload_json or {}).get("event") or {}).get("text"))
         return {
@@ -486,6 +590,7 @@ class GatewayService:
             "chat_id": event.chat_id,
             "thread_id": event.thread_id,
             "event_type": event.standard_event_type,
+            "payload_json": event.payload_json or {},
             "raw_user_input": raw_text,
             "rewritten_question": raw_text,
             "attachments": [],
@@ -539,11 +644,29 @@ class GatewayService:
         raw_text = normalize_text(event_payload.get("text") if isinstance(event_payload, dict) else None)
         if not raw_text:
             return None
-        return detect_button_id(
+        return self._detect_visible_menu_button_label(
             raw_text,
             menu_context=context,
             language=slot_memory.get("last_reply_language") or self._default_reply_language(),
         )
+
+    def _detect_visible_menu_button_label(self, raw_text: str, menu_context: str | None, language: str | None) -> str | None:
+        menu_names = [menu_context] if menu_context else ["main", "deposit", "withdrawal", "other"]
+        numeric = re.match(r"^(\d+)[\.\)\s]?$", raw_text)
+        for menu_name in menu_names:
+            try:
+                menu = get_menu(str(menu_name), language)
+            except KeyError:
+                continue
+            buttons = menu.get("buttons") or []
+            if numeric:
+                index = int(numeric.group(1)) - 1
+                if 0 <= index < len(buttons):
+                    return buttons[index]["id"]
+            for button in buttons:
+                if normalize_text(button.get("label")) == raw_text:
+                    return button["id"]
+        return None
 
     def _mark_intro_sent(self, livechat_menu: dict, thread_id: str | None) -> dict:
         result = dict(livechat_menu or {})
@@ -587,6 +710,29 @@ class GatewayService:
             previous = str(livechat_menu.get("previous_context") or "main")
             return {**preserved_intro, "context": previous, "previous_context": "main", "intro_sent": livechat_menu.get("intro_sent", True)}
         return {**livechat_menu, "context": context, "intro_sent": livechat_menu.get("intro_sent", True)}
+
+    def _business_button_menu_memory(self, livechat_menu: dict, button_id: str) -> dict:
+        current_context = str((livechat_menu or {}).get("context") or "main")
+        context = {
+            "main_deposito": "deposit",
+            "deposit_howto": "deposit",
+            "main_retiro": "withdrawal",
+            "withdrawal_blocked": "withdrawal",
+            "withdrawal_howto": "withdrawal",
+            "main_pending_reply": "main",
+            "forgot_password": "other",
+        }.get(button_id, current_context)
+        preserved_intro = {
+            key: livechat_menu[key]
+            for key in ("intro_sent", "intro_thread_id", "intro_sent_threads")
+            if key in livechat_menu
+        }
+        return {
+            **preserved_intro,
+            "context": context,
+            "previous_context": current_context,
+            "intro_sent": livechat_menu.get("intro_sent", True),
+        }
 
     def _fast_menu_language(self, *, slot_memory: dict, conversation: dict) -> str:
         for value in (
@@ -1496,7 +1642,10 @@ class GatewayService:
                 channel_type=graph_state.get("channel_type") or "livechat",
             )
             if rows:
-                if not self.llm_final_reply_streaming_enabled:
+                if (
+                    not self.llm_final_reply_streaming_enabled
+                    and graph_state.get("route_source") != "livechat_button_fast_path"
+                ):
                     rows = await self._finalize_faq_text_rows(rows, graph_state)
                 return rows
         return [
@@ -1511,88 +1660,6 @@ class GatewayService:
             if str(command["type"])
             in {str(CommandType.LIVECHAT_SEND_TEXT), str(CommandType.LIVECHAT_SEND_IMAGE), str(CommandType.LIVECHAT_SEND_BUTTONS)}
         ]
-
-    def _append_intro_menu_if_needed(
-        self,
-        outbound_messages: list[dict],
-        inbound_event_id: int,
-        event: InboundEvent,
-        conversation: dict,
-        graph_state: dict | None,
-    ) -> list[dict]:
-        if not graph_state or graph_state.get("route") == "human_handoff":
-            return outbound_messages
-        if graph_state.get("channel_type") != "livechat":
-            return outbound_messages
-        if not (event.payload_json or {}).get("ingress_source"):
-            return outbound_messages
-        if self._has_buttons_outbound(outbound_messages):
-            return outbound_messages
-        if graph_state.get("route_source") == "livechat_button":
-            return outbound_messages
-        if not self._should_show_intro_menu(graph_state):
-            return outbound_messages
-        slot_memory = graph_state.setdefault("slot_memory", {})
-        livechat_menu = dict(slot_memory.get("livechat_menu") or {})
-        thread_id = str(event.thread_id or "")
-        intro_threads = {
-            str(value)
-            for value in (livechat_menu.get("intro_sent_threads") or [])
-            if str(value or "").strip()
-        }
-        legacy_intro_thread_id = str(livechat_menu.get("intro_thread_id") or "")
-        if thread_id and (thread_id in intro_threads or thread_id == legacy_intro_thread_id):
-            return outbound_messages
-        if conversation.get("active_workflow"):
-            return outbound_messages
-        if self._has_recent_message_in_thread(graph_state, thread_id):
-            return outbound_messages
-        if thread_id:
-            intro_threads.add(thread_id)
-        livechat_menu.update(
-            {
-                "context": "main",
-                "intro_sent": True,
-                "intro_thread_id": thread_id or livechat_menu.get("intro_thread_id"),
-                "intro_sent_threads": sorted(intro_threads),
-            }
-        )
-        slot_memory["livechat_menu"] = livechat_menu
-        outbound_messages = [] if self._should_replace_text_with_intro_menu(graph_state) else list(outbound_messages)
-        outbound_messages.append(
-            self._buttons_outbox(
-                chat_id=event.chat_id,
-                thread_id=event.thread_id,
-                conversation_id=conversation["conversation_id"],
-                inbound_event_id=inbound_event_id,
-                menu_key="main",
-                graph_state=graph_state,
-            )
-        )
-        return outbound_messages
-
-    def _should_replace_text_with_intro_menu(self, graph_state: dict) -> bool:
-        return self._should_show_intro_menu(graph_state)
-
-    def _should_show_intro_menu(self, graph_state: dict) -> bool:
-        intent = (graph_state.get("intent_result") or {}).get("intent")
-        route = graph_state.get("route")
-        if route != "final_reply":
-            return False
-        if graph_state.get("active_workflow"):
-            return False
-        return intent in {"casual_chat", "clarification_needed"}
-
-    def _has_buttons_outbound(self, outbound_messages: list[dict]) -> bool:
-        return any(str(message.get("message_type") or "") == "buttons" for message in outbound_messages)
-
-    def _has_recent_message_in_thread(self, graph_state: dict, thread_id: str) -> bool:
-        if not thread_id:
-            return bool(graph_state.get("recent_messages"))
-        for message in graph_state.get("recent_messages") or []:
-            if str(message.get("thread_id") or "") == thread_id:
-                return True
-        return False
 
     def _buttons_outbox(
         self,

@@ -51,6 +51,7 @@ async def smoke_test_polling() -> dict:
             base_url=settings.livechat_api_base,
             account_id=settings.livechat_account_id,
             access_token=settings.livechat_agent_access_token,
+            agent_email=getattr(settings, "livechat_agent_email", None),
         )
         result = await run_polling_cycle(
             client=client,
@@ -104,6 +105,7 @@ async def run_once(limit: int, groups: set[int]) -> dict:
             base_url=settings.livechat_api_base,
             account_id=settings.livechat_account_id,
             access_token=settings.livechat_agent_access_token,
+            agent_email=getattr(settings, "livechat_agent_email", None),
         )
         result = await run_polling_cycle(
             client=client,

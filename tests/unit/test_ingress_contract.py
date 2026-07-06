@@ -145,6 +145,44 @@ def test_polling_ingress_receiver_writes_intro_event_for_empty_thread_once():
     assert repository.events[0].dedup_key == "livechat_polling:chat-1:thread-1:intro:chat-1:thread-1"
 
 
+def test_polling_ingress_receiver_writes_intro_event_from_summary_without_get_chat():
+    from app.channels.livechat.polling_receiver import PollingIngressReceiver
+
+    class NoGetChatClient:
+        async def list_chats(self, limit: int = 20) -> list[dict]:
+            return [
+                {
+                    "id": "chat-1",
+                    "access": {"group_ids": [23]},
+                    "users": [{"id": "customer-1", "type": "customer"}],
+                    "active_thread": {
+                        "id": "thread-1",
+                        "active": True,
+                        "created_at": "2026-06-24T00:00:00Z",
+                        "events": [],
+                    },
+                }
+            ]
+
+        async def get_chat(self, chat_id: str) -> dict:
+            raise AssertionError("summary intro path should not call get_chat")
+
+    repository = FakeInboundRepository()
+
+    result = asyncio.run(
+        PollingIngressReceiver(
+            client=NoGetChatClient(),
+            repository=repository,
+            allowed_group_ids={23},
+            self_author_ids=set(),
+        ).receive_once(limit=20)
+    )
+
+    assert result["inserted"] == 1
+    assert len(repository.events) == 1
+    assert repository.events[0].standard_event_type == "THREAD_STARTED"
+
+
 def test_polling_ingress_receiver_does_not_insert_duplicates():
     from app.channels.livechat.polling_receiver import PollingIngressReceiver
 
@@ -169,7 +207,7 @@ def test_polling_ingress_receiver_does_not_insert_duplicates():
     assert len(repository.events) == 1
 
 
-def test_polling_ingress_receiver_ignores_agent_and_self_messages_without_inserting():
+def test_polling_ingress_receiver_ignores_human_agent_and_generates_intro_for_self_greeting():
     from app.channels.livechat.polling_receiver import PollingIngressReceiver
 
     repository = FakeInboundRepository()
@@ -193,11 +231,13 @@ def test_polling_ingress_receiver_ignores_agent_and_self_messages_without_insert
         ).receive_once(limit=20)
     )
 
-    assert result["inserted"] == 0
+    assert result["inserted"] == 1
     assert result["ignored"] == 2
     assert result["ignored_agent"] == 1
     assert result["ignored_self"] == 1
-    assert repository.events == []
+    assert len(repository.events) == 1
+    assert repository.events[0].chat_id == "chat-self"
+    assert repository.events[0].standard_event_type == "THREAD_STARTED"
 
 
 def test_polling_ingress_receiver_ignores_unmatched_groups_without_get_chat():

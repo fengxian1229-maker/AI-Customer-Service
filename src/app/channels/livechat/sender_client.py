@@ -9,10 +9,11 @@ from urllib.parse import unquote, urlparse
 
 
 class LiveChatSenderClient:
-    def __init__(self, base_url: str, account_id: str, access_token: str) -> None:
+    def __init__(self, base_url: str, account_id: str, access_token: str, agent_email: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.account_id = account_id
         self.access_token = access_token
+        self.agent_email = str(agent_email or "").strip() or None
 
     def auth_header(self) -> str:
         if self._looks_like_basic_token(self.access_token):
@@ -29,6 +30,7 @@ class LiveChatSenderClient:
 
     async def send_text(self, chat_id: str, thread_id: str | None, text: str, custom_id: str | None = None) -> dict:
         del thread_id
+        await self.add_user_to_chat(chat_id)
         event = {
             "type": "message",
             "text": text,
@@ -83,6 +85,7 @@ class LiveChatSenderClient:
 
     async def send_buttons(self, chat_id: str, thread_id: str | None, menu: dict) -> dict:
         del thread_id
+        await self.add_user_to_chat(chat_id)
         body = {
             "chat_id": chat_id,
             "event": menu["rich_message"],
@@ -97,6 +100,7 @@ class LiveChatSenderClient:
         filename: str | None = None,
     ) -> dict:
         del thread_id
+        await self.add_user_to_chat(chat_id)
         file_data = await self._load_file(asset_ref, filename=filename)
         uploaded = await self.upload_file(
             file_data["content"],
@@ -131,6 +135,24 @@ class LiveChatSenderClient:
     async def get_chat(self, chat_id: str) -> dict:
         data = await self._post_json("/agent/action/get_chat", {"chat_id": chat_id})
         return data.get("chat") or data
+
+    async def add_user_to_chat(self, chat_id: str) -> dict:
+        if not self.agent_email:
+            return {"skipped": True, "reason": "livechat_agent_email_not_configured"}
+        body = {
+            "chat_id": chat_id,
+            "user_id": self.agent_email,
+            "user_type": "agent",
+            "visibility": "all",
+            "ignore_requester_presence": True,
+            "ignore_agents_availability": True,
+        }
+        try:
+            return await self._post_json("/agent/action/add_user_to_chat", body)
+        except LiveChatApiError as exc:
+            if exc.status in {400, 409, 422} and _looks_like_already_joined_error(exc.data):
+                return {"skipped": True, "reason": "already_joined"}
+            raise
 
     async def transfer_chat_to_group(
         self,
@@ -260,6 +282,18 @@ def _content_type_for_name(name: str) -> str:
     if content_type:
         return content_type
     return "application/octet-stream"
+
+
+def _looks_like_already_joined_error(data: dict) -> bool:
+    raw = json.dumps(data, ensure_ascii=False).lower()
+    markers = (
+        "already",
+        "already exists",
+        "already in chat",
+        "already a member",
+        "is already",
+    )
+    return any(marker in raw for marker in markers)
 
 
 def _filename_for_source(source: str, content_type: str) -> str:

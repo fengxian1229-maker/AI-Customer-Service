@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     livechat_agent_access_token: str
     livechat_account_id: str
+    livechat_agent_email: str | None = None
     livechat_api_base: str = "https://api.livechatinc.com/v3.6"
     livechat_self_author_ids: str = ""
     livechat_handoff_target_group_id: int | None = None

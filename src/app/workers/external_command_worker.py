@@ -700,6 +700,7 @@ def _build_sender_client(settings: Settings) -> LiveChatSenderClient:
         settings.livechat_api_base,
         settings.livechat_account_id,
         settings.livechat_agent_access_token,
+        agent_email=getattr(settings, "livechat_agent_email", None),
     )
 
 

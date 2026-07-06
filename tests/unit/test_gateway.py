@@ -743,14 +743,48 @@ def test_gateway_livechat_business_button_routes_to_deposit_sop():
         outbound_repository=FakeOutboundRepository(),
         message_repository=FakeConversationMessageRepository(),
         llm_intent_service=router_service,
+        workflow_graph=FailIfCalledWorkflowGraph(),
     )
 
     result = asyncio.run(service.process_event(42, make_event_with_button("main_deposito", "🧾 Depósito no acreditado")))
 
     assert router_service.calls == []
     assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["route_source"] == "livechat_button_fast_path"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
     assert result["graph_state"]["active_workflow"] == "deposit_missing"
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text", "text"]
+
+
+@pytest.mark.parametrize(
+    ("button_id", "text", "intent", "workflow"),
+    [
+        ("main_retiro", "🧾 Retiro no recibido", "withdrawal_missing", "withdrawal_missing"),
+        (
+            "withdrawal_blocked",
+            "🚫 No puedo retirar / rollover",
+            "withdrawal_blocked_or_rollover",
+            "withdrawal_blocked_or_rollover",
+        ),
+        ("main_pending_reply", "📨 Consultar caso anterior", "pending_reply_lookup", "pending_reply_lookup"),
+    ],
+)
+def test_gateway_livechat_sop_business_buttons_bypass_graph(button_id, text, intent, workflow):
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=FailIfCalledWorkflowGraph(),
+    )
+
+    result = asyncio.run(service.process_event(242, make_event_with_button(button_id, text)))
+
+    assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["route_source"] == "livechat_button_fast_path"
+    assert result["graph_state"]["intent_result"]["intent"] == intent
+    assert result["graph_state"]["active_workflow"] == workflow
+    assert result["outbound_messages"]
 
 
 def test_gateway_livechat_repeated_business_button_preserves_active_sop_and_fixed_slot_prompt():
@@ -767,11 +801,13 @@ def test_gateway_livechat_repeated_business_button_preserves_active_sop_and_fixe
         conversation_repository=conversation_repository,
         outbound_repository=FakeOutboundRepository(),
         message_repository=FakeConversationMessageRepository(),
+        workflow_graph=FailIfCalledWorkflowGraph(),
     )
 
     result = asyncio.run(service.process_event(142, make_event_with_text("🧾 存款未到账")))
 
     assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["route_source"] == "livechat_button_fast_path"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
     assert result["graph_state"]["intent_result"]["workflow_relation"] == "current_workflow_supplement"
     assert result["graph_state"]["active_workflow"] == "deposit_missing"
@@ -798,14 +834,54 @@ def test_gateway_livechat_faq_button_routes_to_faq():
         outbound_repository=FakeOutboundRepository(),
         message_repository=FakeConversationMessageRepository(),
         rag_service=rag_service,
+        workflow_graph=FailIfCalledWorkflowGraph(),
     )
 
     result = asyncio.run(service.process_event(43, make_event_with_button("deposit_howto", "📘 Cómo recargar")))
 
     assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["route_source"] == "livechat_button_fast_path"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
     assert result["graph_state"]["intent_result"]["faq_trigger_source"] == "livechat_button"
     assert result["outbound_messages"][0]["payload_json"]["text"] == "FAQ answer 请回到选单并选择「存款未到账」。"
+
+
+@pytest.mark.parametrize(
+    ("button_id", "text", "intent"),
+    [
+        ("deposit_howto", "📘 Cómo recargar", "deposit_howto"),
+        ("withdrawal_howto", "📘 Cómo retirar", "withdrawal_howto"),
+        ("forgot_password", "🔐 Olvidé mi contraseña", "forgot_password_howto"),
+    ],
+)
+def test_gateway_livechat_faq_buttons_bypass_graph(button_id, text, intent):
+    rag_service = FakeRagService(
+        {
+            "matched": True,
+            "answer": "FAQ button answer",
+            "answer_blocks": [{"type": "text", "text": "FAQ button answer"}],
+            "documents": [],
+            "fallback_reason": None,
+            "source": "knowledge_documents",
+        }
+    )
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=rag_service,
+        workflow_graph=FailIfCalledWorkflowGraph(),
+    )
+
+    result = asyncio.run(service.process_event(243, make_event_with_button(button_id, text)))
+
+    assert result["graph_state"]["route"] == "faq"
+    assert result["graph_state"]["route_source"] == "livechat_button_fast_path"
+    assert result["graph_state"]["intent_result"]["intent"] == intent
+    assert result["graph_state"]["intent_result"]["faq_trigger_source"] == "livechat_button"
+    assert rag_service.calls
+    assert result["outbound_messages"][0]["payload_json"]["text"] == "FAQ button answer"
 
 
 def test_gateway_natural_language_faq_strips_menu_directives():
@@ -913,7 +989,7 @@ def test_gateway_livechat_faq_interrupt_clears_active_deposit_workflow():
     assert conversation_repository.updated[0][1]["workflow_stage"] is None
 
 
-def test_gateway_livechat_new_greeting_uses_single_intro_menu():
+def test_gateway_livechat_new_greeting_does_not_append_intro_menu():
     conversation_repository = FakeConversationRepository()
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
@@ -926,12 +1002,11 @@ def test_gateway_livechat_new_greeting_uses_single_intro_menu():
 
     result = asyncio.run(service.process_event(47, event))
 
-    assert [message["message_type"] for message in result["outbound_messages"]] == ["buttons"]
-    assert result["outbound_messages"][0]["payload_json"] == {"menu_key": "main", "language": "zh-Hans"}
-    assert conversation_repository.updated[0][1]["slot_memory"]["livechat_menu"]["intro_sent"] is True
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["text"]
+    assert "livechat_menu" not in conversation_repository.updated[0][1]["slot_memory"]
 
 
-def test_gateway_livechat_new_thread_greeting_gets_intro_menu_even_when_previous_thread_had_intro():
+def test_gateway_livechat_new_thread_greeting_does_not_append_intro_menu_even_when_previous_thread_had_intro():
     conversation_repository = FakeConversationRepositoryWithState(
         slot_memory={
             "livechat_menu": {
@@ -960,11 +1035,10 @@ def test_gateway_livechat_new_thread_greeting_gets_intro_menu_even_when_previous
 
     result = asyncio.run(service.process_event(48, event))
 
-    assert [message["message_type"] for message in result["outbound_messages"]] == ["buttons"]
-    assert result["outbound_messages"][0]["payload_json"] == {"menu_key": "main", "language": "zh-Hans"}
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["text"]
     livechat_menu = conversation_repository.updated[0][1]["slot_memory"]["livechat_menu"]
-    assert livechat_menu["intro_thread_id"] == "new-thread"
-    assert set(livechat_menu["intro_sent_threads"]) == {"old-thread", "new-thread"}
+    assert livechat_menu["intro_thread_id"] == "old-thread"
+    assert livechat_menu["intro_sent_threads"] == ["old-thread"]
 
 
 def test_gateway_livechat_same_thread_greeting_does_not_repeat_intro_menu():

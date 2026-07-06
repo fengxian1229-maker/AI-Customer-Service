@@ -364,6 +364,7 @@ async def run_once(limit: int) -> dict:
             settings.livechat_api_base,
             settings.livechat_account_id,
             settings.livechat_agent_access_token,
+            agent_email=getattr(settings, "livechat_agent_email", None),
         )
         results = await process_next_batch(pool, client, limit=limit)
         return {
