@@ -163,6 +163,48 @@ def test_once_each_worker_executes_once(monkeypatch):
     assert created["pool"].wait_closed_calls == 1
 
 
+def test_webhook_only_mode_skips_polling_worker(monkeypatch):
+    from app.workers import service_runner
+
+    class WebhookOnlySettings(FakeSettings):
+        livechat_webhook_enabled = True
+        livechat_polling_enabled = False
+
+    tick_calls = {}
+    monkeypatch.setattr(service_runner, "Settings", WebhookOnlySettings)
+    patch_runner_runtime(monkeypatch, service_runner, tick_calls=tick_calls)
+    monkeypatch.setattr(service_runner, "Settings", WebhookOnlySettings)
+
+    result = service_runner.run(["--all", "--once"])
+
+    assert result["status"] == "OK"
+    assert "polling_receiver" not in tick_calls
+    assert tick_calls == {
+        "gateway_consumer": 1,
+        "sender_worker": 1,
+        "external_command_worker": 1,
+        "external_result_consumer": 1,
+        "telegram_reply_consumer": 1,
+        "livechat_idle_timer": 1,
+    }
+
+
+def test_webhook_only_mode_does_not_require_polling_groups(monkeypatch):
+    from app.workers import service_runner
+
+    class WebhookOnlySettings(FakeSettings):
+        livechat_allowed_group_ids = ""
+        livechat_webhook_enabled = True
+        livechat_polling_enabled = False
+
+    patch_runner_runtime(monkeypatch, service_runner)
+    monkeypatch.setattr(service_runner, "Settings", WebhookOnlySettings)
+
+    result = service_runner.run(["--all", "--once"])
+
+    assert result["status"] == "OK"
+
+
 def test_max_iterations_two_each_worker_executes_twice(monkeypatch):
     from app.workers import service_runner
 

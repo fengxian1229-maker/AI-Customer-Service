@@ -13,9 +13,21 @@ def test_settings_defaults():
     assert settings.mysql_port == 3306
     assert settings.langgraph_checkpoint_setup_on_start is False
     assert settings.livechat_webhook_secret is None
+    assert settings.text_com_webhook_secret is None
     assert settings.livechat_webhook_enabled is False
+    assert settings.livechat_polling_enabled is True
     assert settings.webhook_server_host == "0.0.0.0"
     assert settings.webhook_server_port == 8000
+
+
+def test_settings_accepts_text_com_webhook_secret_alias(monkeypatch):
+    monkeypatch.setenv("TEXT_COM_WEBHOOK_SECRET", "secret-from-text")
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+    )
+
+    assert settings.text_com_webhook_secret == "secret-from-text"
 
 
 def test_settings_livechat_handoff_target_group_id_accepts_blank_as_none():

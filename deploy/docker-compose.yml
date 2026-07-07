@@ -1,0 +1,46 @@
+services:
+  ai-webhook:
+    image: ai-customer-service:latest
+    restart: unless-stopped
+    env_file:
+      - ${PRODUCTION_ENV_FILE:-production.env}
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-service-account.json
+    command: ["python", "-m", "app.workers.webhook_server", "--host", "0.0.0.0", "--port", "8087"]
+    ports:
+      - "8087:8087"
+    secrets:
+      - source: google_service_account
+        target: google-service-account.json
+
+  ai-worker:
+    image: ai-customer-service:latest
+    restart: unless-stopped
+    env_file:
+      - ${PRODUCTION_ENV_FILE:-production.env}
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-service-account.json
+    command: ["python", "-m", "app.workers.service_runner", "--all"]
+    secrets:
+      - source: google_service_account
+        target: google-service-account.json
+
+  db-create:
+    image: mysql:8
+    profiles: ["tools"]
+    env_file:
+      - ${PRODUCTION_ENV_FILE:-production.env}
+    command:
+      - sh
+      - -c
+      - >
+        mysql
+        -h "$$MYSQL_HOST"
+        -P "$$MYSQL_PORT"
+        -u "$$MYSQL_USER"
+        -p"$$MYSQL_PASSWORD"
+        -e "CREATE DATABASE IF NOT EXISTS \`$$MYSQL_DATABASE\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+
+secrets:
+  google_service_account:
+    file: /opt/ai-cs/secrets/google-service-account.json

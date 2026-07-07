@@ -54,7 +54,11 @@ def _validate_body(body: Any) -> None:
 
 
 def _validate_secret(body: dict, settings) -> None:
-    expected = str(getattr(settings, "livechat_webhook_secret", None) or "")
+    expected = str(
+        getattr(settings, "livechat_webhook_secret", None)
+        or getattr(settings, "text_com_webhook_secret", None)
+        or ""
+    )
     actual = body.get("secret_key")
     if not expected:
         raise WebhookAuthError("livechat webhook secret is not configured")

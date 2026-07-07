@@ -170,7 +170,7 @@ async def run_async(args: argparse.Namespace) -> dict:
 
     settings = Settings()
     try:
-        groups = polling_receiver.parse_group_ids(args.groups, settings.livechat_allowed_group_ids)
+        groups = _parse_runner_group_ids(args, settings)
     except ValueError as exc:
         return _failed_usage(str(exc))
 
@@ -268,7 +268,8 @@ def preflight_all(settings: Settings, groups: set[int]) -> dict:
     _require_text(settings.mysql_host, "MYSQL_HOST", missing)
     _require_text(settings.mysql_user, "MYSQL_USER", missing)
     _require_text(settings.mysql_database, "MYSQL_DATABASE", missing)
-    if not groups:
+    polling_enabled = getattr(settings, "livechat_polling_enabled", True)
+    if polling_enabled and not groups:
         missing.append("LIVECHAT_ALLOWED_GROUP_IDS")
     if not settings.livechat_self_author_id_set:
         warnings.append("LIVECHAT_SELF_AUTHOR_IDS is empty; self messages may not be filtered")
@@ -295,6 +296,7 @@ def preflight_all(settings: Settings, groups: set[int]) -> dict:
         "configured": {
             "livechat": bool(settings.livechat_agent_access_token and settings.livechat_account_id and settings.livechat_api_base),
             "mysql": bool(settings.mysql_host and settings.mysql_user and settings.mysql_database),
+            "polling": bool(polling_enabled),
             "polling_groups": bool(groups),
             "telegram": bool(settings.telegram_sop_enabled and settings.telegram_bot_token and _telegram_target_configured(settings)),
             "backend": bool(settings.backend_query_enabled and settings.backend_provider_type),
@@ -429,7 +431,6 @@ async def run_all_workers(context: ServiceRunnerContext) -> dict:
     loop = asyncio.get_running_loop()
     registered_signals = install_signal_handlers(loop, stop_event, shutdown_reason)
     worker_defs = [
-        ("polling_receiver", context.config.poll_seconds, lambda: polling_tick(context)),
         ("gateway_consumer", context.config.gateway_seconds, lambda: gateway_tick(context)),
         ("sender_worker", context.config.sender_seconds, lambda: sender_tick(context)),
         ("external_command_worker", context.config.external_command_seconds, lambda: external_command_tick(context)),
@@ -437,7 +438,10 @@ async def run_all_workers(context: ServiceRunnerContext) -> dict:
         ("telegram_reply_consumer", context.config.telegram_reply_seconds, lambda: telegram_reply_tick(context)),
         ("livechat_idle_timer", context.config.livechat_idle_timer_seconds, lambda: livechat_idle_timer_tick(context)),
     ]
-    _log_event("service_runner.start", mode="all", enabled_workers=WORKER_NAMES)
+    if getattr(context.settings, "livechat_polling_enabled", True):
+        worker_defs.insert(0, ("polling_receiver", context.config.poll_seconds, lambda: polling_tick(context)))
+    enabled_workers = [name for name, _, _ in worker_defs]
+    _log_event("service_runner.start", mode="all", enabled_workers=enabled_workers)
     tasks = [
         asyncio.create_task(
             run_periodic_worker(
@@ -656,6 +660,19 @@ def _request_shutdown(stop_event: asyncio.Event, shutdown_reason: dict, reason: 
 
 def _failed_usage(error: str) -> dict:
     return {"service_runner": "service_runner", "status": "FAILED_USAGE", "mode": "all", "error": error}
+
+
+def _parse_runner_group_ids(args: argparse.Namespace, settings: Settings) -> set[int]:
+    if getattr(settings, "livechat_polling_enabled", True):
+        return polling_receiver.parse_group_ids(args.groups, settings.livechat_allowed_group_ids)
+    raw = args.groups if args.groups is not None and args.groups.strip() else settings.livechat_allowed_group_ids
+    if not raw or not raw.strip():
+        return set()
+    return {
+        int(item.strip())
+        for item in raw.split(",")
+        if item.strip()
+    }
 
 
 def _empty_worker_summary() -> dict:

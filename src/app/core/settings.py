@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     livechat_handoff_enabled: bool = False
     livechat_image_text_fallback: bool = False
     livechat_webhook_secret: str | None = None
+    text_com_webhook_secret: str | None = None
     livechat_webhook_enabled: bool = False
+    livechat_polling_enabled: bool = True
     webhook_server_host: str = "0.0.0.0"
     webhook_server_port: int = 8000
     telegram_bot_token: str | None = None
