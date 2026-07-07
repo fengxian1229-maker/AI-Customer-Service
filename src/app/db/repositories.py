@@ -212,6 +212,124 @@ class InboundEventRepository:
                 return cur.rowcount
 
 
+class LiveChatWebhookAuditRepository:
+    def __init__(self, pool) -> None:
+        self.pool = pool
+
+    async def insert_received(self, body: dict | None) -> int:
+        identifiers = _webhook_identifiers(body)
+        sql = """
+        INSERT INTO livechat_webhook_audit (
+          webhook_id, action, organization_id, chat_id, thread_id, event_id,
+          event_type, status, payload_json
+        ) VALUES (
+          %s, %s, %s, %s, %s, %s,
+          %s, 'RECEIVED', %s
+        )
+        """
+        args = (
+            identifiers["webhook_id"],
+            identifiers["action"],
+            identifiers["organization_id"],
+            identifiers["chat_id"],
+            identifiers["thread_id"],
+            identifiers["event_id"],
+            identifiers["event_type"],
+            json_dumps(_redacted_webhook_payload(body)),
+        )
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, args)
+                return cur.lastrowid
+
+    async def mark_completed(
+        self,
+        audit_id: int,
+        *,
+        http_status: int,
+        normalized_count: int,
+        inserted_count: int,
+        duplicate_count: int,
+        ignored_count: int,
+    ) -> None:
+        sql = """
+        UPDATE livechat_webhook_audit
+        SET status = 'COMPLETED',
+            http_status = %s,
+            normalized_count = %s,
+            inserted_count = %s,
+            duplicate_count = %s,
+            ignored_count = %s,
+            error_type = NULL,
+            error_message = NULL
+        WHERE id = %s
+        """
+        args = (
+            http_status,
+            normalized_count,
+            inserted_count,
+            duplicate_count,
+            ignored_count,
+            audit_id,
+        )
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, args)
+
+    async def mark_failed(self, audit_id: int, *, http_status: int, error: Exception | str) -> None:
+        sql = """
+        UPDATE livechat_webhook_audit
+        SET status = 'FAILED',
+            http_status = %s,
+            error_type = %s,
+            error_message = %s
+        WHERE id = %s
+        """
+        error_type = type(error).__name__ if isinstance(error, Exception) else "Error"
+        args = (http_status, error_type, str(error), audit_id)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, args)
+
+
+def _webhook_identifiers(body: dict | None) -> dict:
+    body = body if isinstance(body, dict) else {}
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+    chat = payload.get("chat") if isinstance(payload.get("chat"), dict) else {}
+    thread = payload.get("thread") if isinstance(payload.get("thread"), dict) else {}
+    if not thread and isinstance(chat.get("thread"), dict):
+        thread = chat["thread"]
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    return {
+        "webhook_id": _first_text(body.get("webhook_id")),
+        "action": _first_text(body.get("action")),
+        "organization_id": _first_text(body.get("organization_id")),
+        "chat_id": _first_text(payload.get("chat_id"), chat.get("id"), chat.get("chat_id")),
+        "thread_id": _first_text(payload.get("thread_id"), thread.get("id"), event.get("thread_id")),
+        "event_id": _first_text(event.get("id"), payload.get("event_id")),
+        "event_type": _first_text(event.get("type")),
+    }
+
+
+def _redacted_webhook_payload(body: dict | None) -> dict:
+    if not isinstance(body, dict):
+        return {"malformed_body": True}
+    result = dict(body)
+    if "secret_key" in result:
+        result["secret_key"] = "<redacted>"
+    return result
+
+
+def _first_text(*values) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 class ConversationRepository:
     def __init__(self, pool) -> None:
         self.pool = pool

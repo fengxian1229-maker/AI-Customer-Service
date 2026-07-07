@@ -16,6 +16,7 @@ router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 
 @router.post("/livechat", status_code=202)
 async def receive_livechat_webhook(request: Request) -> dict:
+    audit_id = None
     try:
         body = await request.json()
     except Exception as exc:
@@ -23,6 +24,8 @@ async def receive_livechat_webhook(request: Request) -> dict:
 
     settings = request.app.state.settings
     repository = request.app.state.inbound_event_repository
+    audit_repository = getattr(request.app.state, "livechat_webhook_audit_repository", None)
+    audit_id = await _audit_received(audit_repository, body)
     client = getattr(request.app.state, "livechat_client", None)
     if client is None and _needs_livechat_client(body, settings):
         client = LiveChatSenderClient(
@@ -35,13 +38,17 @@ async def receive_livechat_webhook(request: Request) -> dict:
     try:
         events = await normalize_webhook_payload_async(body, settings=settings, client=client)
     except WebhookAuthError as exc:
+        await _audit_failed(audit_repository, audit_id, 401, exc)
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except WebhookPayloadError as exc:
+        await _audit_failed(audit_repository, audit_id, 400, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
+        await _audit_failed(audit_repository, audit_id, 400, exc)
         raise HTTPException(status_code=400, detail="malformed webhook payload") from exc
     except Exception as exc:
         logger.exception("failed to normalize livechat webhook action=%s", _safe_action(body))
+        await _audit_failed(audit_repository, audit_id, 500, exc)
         raise HTTPException(status_code=500, detail="failed to process webhook") from exc
 
     inserted = 0
@@ -53,15 +60,25 @@ async def receive_livechat_webhook(request: Request) -> dict:
             duplicates += int(bool(result.get("duplicate")))
     except Exception as exc:
         logger.exception("failed to insert livechat webhook action=%s", _safe_action(body))
+        await _audit_failed(audit_repository, audit_id, 500, exc)
         raise HTTPException(status_code=500, detail="failed to process webhook") from exc
 
+    ignored = sum(1 for event in events if event.ignored)
+    await _audit_completed(
+        audit_repository,
+        audit_id,
+        normalized_count=len(events),
+        inserted_count=inserted,
+        duplicate_count=duplicates,
+        ignored_count=ignored,
+    )
     return {
         "ok": True,
         "action": body.get("action") if isinstance(body, dict) else None,
         "normalized": len(events),
         "inserted": inserted,
         "duplicates": duplicates,
-        "ignored": sum(1 for event in events if event.ignored),
+        "ignored": ignored,
     }
 
 
@@ -87,3 +104,46 @@ def _safe_action(body) -> str | None:
         return None
     action = body.get("action")
     return str(action) if action is not None else None
+
+
+async def _audit_received(audit_repository, body: dict) -> int | None:
+    if audit_repository is None or not hasattr(audit_repository, "insert_received"):
+        return None
+    try:
+        return await audit_repository.insert_received(body)
+    except Exception:
+        logger.exception("failed to insert livechat webhook audit action=%s", _safe_action(body))
+        return None
+
+
+async def _audit_completed(
+    audit_repository,
+    audit_id: int | None,
+    *,
+    normalized_count: int,
+    inserted_count: int,
+    duplicate_count: int,
+    ignored_count: int,
+) -> None:
+    if audit_repository is None or audit_id is None or not hasattr(audit_repository, "mark_completed"):
+        return
+    try:
+        await audit_repository.mark_completed(
+            audit_id,
+            http_status=202,
+            normalized_count=normalized_count,
+            inserted_count=inserted_count,
+            duplicate_count=duplicate_count,
+            ignored_count=ignored_count,
+        )
+    except Exception:
+        logger.exception("failed to complete livechat webhook audit id=%s", audit_id)
+
+
+async def _audit_failed(audit_repository, audit_id: int | None, http_status: int, error: Exception) -> None:
+    if audit_repository is None or audit_id is None or not hasattr(audit_repository, "mark_failed"):
+        return
+    try:
+        await audit_repository.mark_failed(audit_id, http_status=http_status, error=error)
+    except Exception:
+        logger.exception("failed to fail livechat webhook audit id=%s", audit_id)

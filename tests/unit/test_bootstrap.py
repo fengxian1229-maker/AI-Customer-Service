@@ -128,6 +128,7 @@ def test_load_sql_files_in_order():
         "014_telegram_cases.sql",
         "015_telegram_case_messages.sql",
         "016_telegram_update_offsets.sql",
+        "017_livechat_webhook_audit.sql",
     ]
 
 

@@ -14,6 +14,23 @@ class FakeRepository:
         return {"inserted": not self.duplicate, "duplicate": self.duplicate}
 
 
+class FakeAuditRepository:
+    def __init__(self) -> None:
+        self.received = []
+        self.completed = []
+        self.failed = []
+
+    async def insert_received(self, body):
+        self.received.append(body)
+        return len(self.received)
+
+    async def mark_completed(self, audit_id, **kwargs):
+        self.completed.append((audit_id, kwargs))
+
+    async def mark_failed(self, audit_id, **kwargs):
+        self.failed.append((audit_id, kwargs))
+
+
 def make_settings(**overrides):
     values = {
         "livechat_agent_access_token": "token",
@@ -47,7 +64,8 @@ def body(secret="secret"):
 
 def test_endpoint_inserts_and_returns_counts():
     repository = FakeRepository()
-    app = build_app(settings=make_settings(), repository=repository)
+    audit_repository = FakeAuditRepository()
+    app = build_app(settings=make_settings(), repository=repository, audit_repository=audit_repository)
 
     with TestClient(app) as client:
         response = client.post("/api/v1/webhooks/livechat", json=body())
@@ -62,6 +80,19 @@ def test_endpoint_inserts_and_returns_counts():
         "ignored": 0,
     }
     assert len(repository.events) == 1
+    assert len(audit_repository.received) == 1
+    assert audit_repository.completed == [
+        (
+            1,
+            {
+                "http_status": 202,
+                "normalized_count": 1,
+                "inserted_count": 1,
+                "duplicate_count": 0,
+                "ignored_count": 0,
+            },
+        )
+    ]
 
 
 def test_endpoint_reports_duplicate_insert():
@@ -78,13 +109,18 @@ def test_endpoint_reports_duplicate_insert():
 
 def test_endpoint_rejects_bad_secret_without_insert():
     repository = FakeRepository()
-    app = build_app(settings=make_settings(), repository=repository)
+    audit_repository = FakeAuditRepository()
+    app = build_app(settings=make_settings(), repository=repository, audit_repository=audit_repository)
 
     with TestClient(app) as client:
         response = client.post("/api/v1/webhooks/livechat", json=body(secret="bad"))
 
     assert response.status_code == 401
     assert repository.events == []
+    assert len(audit_repository.received) == 1
+    assert audit_repository.completed == []
+    assert audit_repository.failed[0][0] == 1
+    assert audit_repository.failed[0][1]["http_status"] == 401
 
 
 def test_endpoint_rejects_malformed_body_without_insert():

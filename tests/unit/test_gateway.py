@@ -65,6 +65,21 @@ def make_thread_started_event() -> InboundEvent:
     return event
 
 
+def make_chat_started_event() -> InboundEvent:
+    event = make_thread_started_event()
+    event.source = "livechat_webhook"
+    event.raw_action = "incoming_chat"
+    event.event_id = "chat_started:chat-1:thread-1"
+    event.event_type = "chat_started"
+    event.standard_event_type = "CHAT_STARTED"
+    event.dedup_key = "livechat_webhook:incoming_chat:chat-1:thread-1:chat_started:chat-1:thread-1"
+    event.payload_json = {
+        "webhook_body": {"action": "incoming_chat"},
+        "event": {"id": event.event_id, "type": "chat_started", "author_id": None},
+    }
+    return event
+
+
 def make_file_event() -> InboundEvent:
     event = make_inbound_event()
     event.event_id = "file-1"
@@ -668,6 +683,27 @@ def test_gateway_livechat_thread_started_sends_intro_menu_without_graph():
     )
 
     result = asyncio.run(service.process_event(39, make_thread_started_event()))
+
+    assert result["should_reply"] is True
+    assert result["graph_state"]["route_source"] == "livechat_intro"
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["buttons"]
+    assert result["outbound_messages"][0]["payload_json"] == {"menu_key": "main", "language": "zh-Hans"}
+    livechat_menu = conversation_repository.updated[0][1]["slot_memory"]["livechat_menu"]
+    assert livechat_menu["context"] == "main"
+    assert livechat_menu["intro_sent_threads"] == ["thread-1"]
+
+
+def test_gateway_livechat_webhook_chat_started_sends_intro_menu_without_graph():
+    conversation_repository = FakeConversationRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        workflow_graph=FailIfCalledWorkflowGraph(),
+    )
+
+    result = asyncio.run(service.process_event(390, make_chat_started_event()))
 
     assert result["should_reply"] is True
     assert result["graph_state"]["route_source"] == "livechat_intro"

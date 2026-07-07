@@ -6,14 +6,15 @@ from pydantic import ValidationError
 from app.api.livechat_webhook import router as livechat_webhook_router
 from app.core.settings import Settings
 from app.db.mysql import create_pool
-from app.db.repositories import InboundEventRepository
+from app.db.repositories import InboundEventRepository, LiveChatWebhookAuditRepository
 
 
-def build_app(settings: Settings | None = None, pool=None, repository=None, livechat_client=None) -> FastAPI:
+def build_app(settings: Settings | None = None, pool=None, repository=None, livechat_client=None, audit_repository=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.settings = settings or _load_settings_for_app()
         app.state.livechat_client = livechat_client
+        app.state.livechat_webhook_audit_repository = audit_repository
         if repository is not None:
             app.state.inbound_event_repository = repository
             app.state.mysql_pool = pool
@@ -21,6 +22,7 @@ def build_app(settings: Settings | None = None, pool=None, repository=None, live
             return
         app.state.mysql_pool = pool or await create_pool(app.state.settings)
         app.state.inbound_event_repository = InboundEventRepository(app.state.mysql_pool)
+        app.state.livechat_webhook_audit_repository = audit_repository or LiveChatWebhookAuditRepository(app.state.mysql_pool)
         try:
             yield
         finally:

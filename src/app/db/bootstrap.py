@@ -27,6 +27,7 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
             await ensure_conversation_messages_compat(cur)
             await ensure_knowledge_documents_compat(cur)
             await ensure_graph_checkpoint_runs_compat(cur)
+            await ensure_livechat_webhook_audit_compat(cur)
 
 
 async def ensure_inbound_events_compat(cur) -> None:
@@ -347,6 +348,86 @@ async def ensure_graph_checkpoint_runs_compat(cur) -> None:
             "idx_graph_checkpoint_runs_inbound_event": (
                 "CREATE INDEX idx_graph_checkpoint_runs_inbound_event "
                 "ON graph_checkpoint_runs (inbound_event_id)"
+            ),
+        },
+    )
+
+
+async def ensure_livechat_webhook_audit_compat(cur) -> None:
+    await cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS livechat_webhook_audit (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+          webhook_id VARCHAR(128) NULL,
+          action VARCHAR(128) NULL,
+          organization_id VARCHAR(128) NULL,
+          chat_id VARCHAR(128) NULL,
+          thread_id VARCHAR(128) NULL,
+          event_id VARCHAR(128) NULL,
+          event_type VARCHAR(64) NULL,
+          status VARCHAR(32) NOT NULL DEFAULT 'RECEIVED',
+          http_status INT NULL,
+          normalized_count INT NOT NULL DEFAULT 0,
+          inserted_count INT NOT NULL DEFAULT 0,
+          duplicate_count INT NOT NULL DEFAULT 0,
+          ignored_count INT NOT NULL DEFAULT 0,
+          error_type VARCHAR(128) NULL,
+          error_message TEXT NULL,
+          payload_json JSON NULL,
+          received_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          KEY idx_livechat_webhook_audit_received (received_at),
+          KEY idx_livechat_webhook_audit_action_received (action, received_at),
+          KEY idx_livechat_webhook_audit_status_received (status, received_at),
+          KEY idx_livechat_webhook_audit_chat_thread (chat_id, thread_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    await ensure_columns(
+        cur,
+        "livechat_webhook_audit",
+        {
+            "webhook_id": "ALTER TABLE livechat_webhook_audit ADD COLUMN webhook_id VARCHAR(128) NULL",
+            "action": "ALTER TABLE livechat_webhook_audit ADD COLUMN action VARCHAR(128) NULL",
+            "organization_id": "ALTER TABLE livechat_webhook_audit ADD COLUMN organization_id VARCHAR(128) NULL",
+            "chat_id": "ALTER TABLE livechat_webhook_audit ADD COLUMN chat_id VARCHAR(128) NULL",
+            "thread_id": "ALTER TABLE livechat_webhook_audit ADD COLUMN thread_id VARCHAR(128) NULL",
+            "event_id": "ALTER TABLE livechat_webhook_audit ADD COLUMN event_id VARCHAR(128) NULL",
+            "event_type": "ALTER TABLE livechat_webhook_audit ADD COLUMN event_type VARCHAR(64) NULL",
+            "status": "ALTER TABLE livechat_webhook_audit ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'RECEIVED'",
+            "http_status": "ALTER TABLE livechat_webhook_audit ADD COLUMN http_status INT NULL",
+            "normalized_count": "ALTER TABLE livechat_webhook_audit ADD COLUMN normalized_count INT NOT NULL DEFAULT 0",
+            "inserted_count": "ALTER TABLE livechat_webhook_audit ADD COLUMN inserted_count INT NOT NULL DEFAULT 0",
+            "duplicate_count": "ALTER TABLE livechat_webhook_audit ADD COLUMN duplicate_count INT NOT NULL DEFAULT 0",
+            "ignored_count": "ALTER TABLE livechat_webhook_audit ADD COLUMN ignored_count INT NOT NULL DEFAULT 0",
+            "error_type": "ALTER TABLE livechat_webhook_audit ADD COLUMN error_type VARCHAR(128) NULL",
+            "error_message": "ALTER TABLE livechat_webhook_audit ADD COLUMN error_message TEXT NULL",
+            "payload_json": "ALTER TABLE livechat_webhook_audit ADD COLUMN payload_json JSON NULL",
+            "received_at": (
+                "ALTER TABLE livechat_webhook_audit "
+                "ADD COLUMN received_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"
+            ),
+            "updated_at": (
+                "ALTER TABLE livechat_webhook_audit "
+                "ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+            ),
+        },
+    )
+    await ensure_indexes(
+        cur,
+        "livechat_webhook_audit",
+        {
+            "idx_livechat_webhook_audit_received": (
+                "CREATE INDEX idx_livechat_webhook_audit_received ON livechat_webhook_audit (received_at)"
+            ),
+            "idx_livechat_webhook_audit_action_received": (
+                "CREATE INDEX idx_livechat_webhook_audit_action_received ON livechat_webhook_audit (action, received_at)"
+            ),
+            "idx_livechat_webhook_audit_status_received": (
+                "CREATE INDEX idx_livechat_webhook_audit_status_received ON livechat_webhook_audit (status, received_at)"
+            ),
+            "idx_livechat_webhook_audit_chat_thread": (
+                "CREATE INDEX idx_livechat_webhook_audit_chat_thread ON livechat_webhook_audit (chat_id, thread_id)"
             ),
         },
     )
