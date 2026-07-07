@@ -5,13 +5,18 @@ from app.core.settings import Settings
 
 
 class FakeRepository:
-    def __init__(self, duplicate: bool = False) -> None:
+    def __init__(self, duplicate: bool = False, recent_group_ids=None) -> None:
         self.duplicate = duplicate
+        self.recent_group_ids = set(recent_group_ids or [])
         self.events = []
 
     async def insert(self, event):
         self.events.append(event)
         return {"inserted": not self.duplicate, "duplicate": self.duplicate}
+
+    async def fetch_recent_livechat_group_ids(self, chat_id):
+        assert chat_id == "chat-1"
+        return self.recent_group_ids
 
 
 class FakeAuditRepository:
@@ -105,6 +110,29 @@ def test_endpoint_reports_duplicate_insert():
     assert response.status_code == 202
     assert response.json()["inserted"] == 0
     assert response.json()["duplicates"] == 1
+
+
+def test_endpoint_uses_recent_chat_group_ids_for_incoming_event_without_access():
+    class FailingLiveChatClient:
+        async def get_chat(self, chat_id):
+            raise AssertionError("get_chat should not be called when recent group data exists")
+
+    repository = FakeRepository(recent_group_ids={23})
+    app = build_app(
+        settings=make_settings(livechat_allowed_group_ids="23"),
+        repository=repository,
+        livechat_client=FailingLiveChatClient(),
+    )
+    payload = body()
+    payload["payload"].pop("access")
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/webhooks/livechat", json=payload)
+
+    assert response.status_code == 202
+    assert response.json()["ignored"] == 0
+    assert repository.events[0].ignored is False
+    assert repository.events[0].payload_json["chat_lookup"]["access"]["group_ids"] == [23]
 
 
 def test_endpoint_rejects_bad_secret_without_insert():

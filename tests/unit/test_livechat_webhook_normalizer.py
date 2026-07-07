@@ -276,3 +276,44 @@ def test_async_normalizer_uses_get_chat_for_missing_group_data():
 
     assert events[0].ignored is False
     assert events[0].payload_json["chat_lookup"]["access"]["group_ids"] == [23]
+
+
+def test_async_normalizer_uses_resolved_chat_lookup_before_get_chat():
+    body = incoming_event_body()
+    body["payload"].pop("access")
+
+    class FakeClient:
+        async def get_chat(self, chat_id):
+            raise AssertionError("get_chat should not be called when resolver returns group data")
+
+    async def resolve(chat_id):
+        assert chat_id == "chat-1"
+        return {"id": "chat-1", "access": {"group_ids": [23]}}
+
+    events = asyncio.run(
+        normalize_webhook_payload_async(
+            body,
+            make_settings(livechat_allowed_group_ids="23"),
+            client=FakeClient(),
+            chat_lookup_resolver=resolve,
+        )
+    )
+
+    assert events[0].ignored is False
+    assert events[0].payload_json["chat_lookup"]["access"]["group_ids"] == [23]
+
+
+def test_async_normalizer_marks_missing_group_when_get_chat_fails():
+    body = incoming_event_body()
+    body["payload"].pop("access")
+
+    class FakeClient:
+        async def get_chat(self, chat_id):
+            assert chat_id == "chat-1"
+            raise RuntimeError("livechat get_chat failed")
+
+    events = asyncio.run(normalize_webhook_payload_async(body, make_settings(livechat_allowed_group_ids="23"), FakeClient()))
+
+    assert events[0].ignored is True
+    assert events[0].ignore_reason == "group_lookup_failed"
+    assert events[0].payload_json["chat_lookup_error"]["type"] == "RuntimeError"

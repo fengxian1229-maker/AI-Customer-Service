@@ -36,7 +36,12 @@ async def receive_livechat_webhook(request: Request) -> dict:
         )
 
     try:
-        events = await normalize_webhook_payload_async(body, settings=settings, client=client)
+        events = await normalize_webhook_payload_async(
+            body,
+            settings=settings,
+            client=client,
+            chat_lookup_resolver=_recent_livechat_group_lookup(repository) if _needs_livechat_client(body, settings) else None,
+        )
     except WebhookAuthError as exc:
         await _audit_failed(audit_repository, audit_id, 401, exc)
         raise HTTPException(status_code=401, detail=str(exc)) from exc
@@ -97,6 +102,19 @@ def _needs_livechat_client(body, settings) -> bool:
             ((payload.get("chat") or {}).get("access") or {}).get("group_ids") if isinstance(payload.get("chat"), dict) else None,
         ]
     )
+
+
+def _recent_livechat_group_lookup(repository):
+    if repository is None or not hasattr(repository, "fetch_recent_livechat_group_ids"):
+        return None
+
+    async def resolve(chat_id: str) -> dict | None:
+        group_ids = await repository.fetch_recent_livechat_group_ids(chat_id)
+        if not group_ids:
+            return None
+        return {"id": chat_id, "access": {"group_ids": sorted(group_ids)}, "lookup_source": "recent_inbound_events"}
+
+    return resolve
 
 
 def _safe_action(body) -> str | None:

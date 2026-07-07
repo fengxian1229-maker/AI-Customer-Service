@@ -211,6 +211,26 @@ class InboundEventRepository:
                 await cur.execute(sql)
                 return cur.rowcount
 
+    async def fetch_recent_livechat_group_ids(self, chat_id: str | None, limit: int = 20) -> set[int]:
+        if not chat_id:
+            return set()
+        sql = """
+        SELECT payload_json
+        FROM inbound_events
+        WHERE source = 'livechat_webhook'
+          AND chat_id = %s
+        ORDER BY id DESC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (chat_id, limit))
+                rows = await cur.fetchall()
+        group_ids: set[int] = set()
+        for row in rows:
+            group_ids.update(_extract_livechat_group_ids(json_loads(row.get("payload_json"))))
+        return group_ids
+
 
 class LiveChatWebhookAuditRepository:
     def __init__(self, pool) -> None:
@@ -328,6 +348,36 @@ def _first_text(*values) -> str | None:
         if text:
             return text
     return None
+
+
+def _extract_livechat_group_ids(value) -> set[int]:
+    group_ids: set[int] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"group_id", "group_ids"}:
+                group_ids.update(_coerce_group_ids(item))
+            elif isinstance(item, (dict, list)):
+                group_ids.update(_extract_livechat_group_ids(item))
+    elif isinstance(value, list):
+        for item in value:
+            group_ids.update(_extract_livechat_group_ids(item))
+    return group_ids
+
+
+def _coerce_group_ids(value) -> set[int]:
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = [value]
+    group_ids: set[int] = set()
+    for item in values:
+        try:
+            group_ids.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return group_ids
 
 
 class ConversationRepository:

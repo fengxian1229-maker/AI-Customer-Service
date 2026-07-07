@@ -30,18 +30,30 @@ def normalize_webhook_payload(body: dict, settings, client=None) -> list[Inbound
     del client
     _validate_body(body)
     _validate_secret(body, settings)
-    return _normalize(body, settings=settings, chat_lookup=None)
+    return _normalize(body, settings=settings, chat_lookup=None, chat_lookup_error=None)
 
 
-async def normalize_webhook_payload_async(body: dict, settings, client=None) -> list[InboundEvent]:
+async def normalize_webhook_payload_async(
+    body: dict,
+    settings,
+    client=None,
+    chat_lookup: dict | None = None,
+    chat_lookup_resolver=None,
+) -> list[InboundEvent]:
     _validate_body(body)
     _validate_secret(body, settings)
-    chat_lookup = None
-    if _needs_chat_lookup(body, settings) and client is not None:
+    chat_lookup_error = None
+    if _needs_chat_lookup(body, settings) and (client is not None or chat_lookup_resolver is not None):
         chat_id = _extract_chat_id(body.get("payload") or {})
         if chat_id:
-            chat_lookup = await client.get_chat(chat_id)
-    return _normalize(body, settings=settings, chat_lookup=chat_lookup)
+            if chat_lookup is None and chat_lookup_resolver is not None:
+                chat_lookup = await chat_lookup_resolver(chat_id)
+            if chat_lookup is None and client is not None:
+                try:
+                    chat_lookup = await client.get_chat(chat_id)
+                except Exception as exc:
+                    chat_lookup_error = {"type": type(exc).__name__, "message": str(exc)}
+    return _normalize(body, settings=settings, chat_lookup=chat_lookup, chat_lookup_error=chat_lookup_error)
 
 
 def _validate_body(body: Any) -> None:
@@ -77,21 +89,32 @@ def _needs_chat_lookup(body: dict, settings) -> bool:
     return _extract_group_ids_from_payload(payload) == set()
 
 
-def _normalize(body: dict, settings, chat_lookup: dict | None) -> list[InboundEvent]:
+def _normalize(
+    body: dict,
+    settings,
+    chat_lookup: dict | None,
+    chat_lookup_error: dict | None,
+) -> list[InboundEvent]:
     action = str(body.get("action") or "")
     payload = body.get("payload") or {}
     if action == "incoming_chat":
-        return _normalize_incoming_chat(body, payload, settings=settings, chat_lookup=chat_lookup)
+        return _normalize_incoming_chat(body, payload, settings=settings, chat_lookup=chat_lookup, chat_lookup_error=chat_lookup_error)
     if action == "incoming_event":
-        return [_normalize_incoming_event(body, payload, settings=settings, chat_lookup=chat_lookup)]
+        return [_normalize_incoming_event(body, payload, settings=settings, chat_lookup=chat_lookup, chat_lookup_error=chat_lookup_error)]
     if action == "incoming_rich_message_postback":
-        return [_normalize_postback(body, payload, settings=settings, chat_lookup=chat_lookup)]
+        return [_normalize_postback(body, payload, settings=settings, chat_lookup=chat_lookup, chat_lookup_error=chat_lookup_error)]
     if action in {"chat_deactivated", "chat_transferred", "user_removed_from_chat"}:
-        return [_normalize_chat_lifecycle(body, payload, settings=settings, chat_lookup=chat_lookup)]
-    return [_build_event(body, payload, settings=settings, standard_event_type="UNSUPPORTED", event_type=None, ignored=True, ignore_reason="unsupported_action", chat_lookup=chat_lookup)]
+        return [_normalize_chat_lifecycle(body, payload, settings=settings, chat_lookup=chat_lookup, chat_lookup_error=chat_lookup_error)]
+    return [_build_event(body, payload, settings=settings, standard_event_type="UNSUPPORTED", event_type=None, ignored=True, ignore_reason="unsupported_action", chat_lookup=chat_lookup, chat_lookup_error=chat_lookup_error)]
 
 
-def _normalize_incoming_chat(body: dict, payload: dict, settings, chat_lookup: dict | None) -> list[InboundEvent]:
+def _normalize_incoming_chat(
+    body: dict,
+    payload: dict,
+    settings,
+    chat_lookup: dict | None,
+    chat_lookup_error: dict | None,
+) -> list[InboundEvent]:
     chat = payload.get("chat") if isinstance(payload.get("chat"), dict) else payload
     thread = _primary_thread(chat)
     events = []
@@ -121,6 +144,7 @@ def _normalize_incoming_chat(body: dict, payload: dict, settings, chat_lookup: d
                 thread=thread,
                 event=chat_started_payload["event"],
                 chat_lookup=chat_lookup,
+                chat_lookup_error=chat_lookup_error,
             )
         )
     for item_thread in _threads(chat):
@@ -139,12 +163,19 @@ def _normalize_incoming_chat(body: dict, payload: dict, settings, chat_lookup: d
                     thread=item_thread,
                     event=event,
                     chat_lookup=chat_lookup,
+                    chat_lookup_error=chat_lookup_error,
                 )
             )
     return events
 
 
-def _normalize_incoming_event(body: dict, payload: dict, settings, chat_lookup: dict | None) -> InboundEvent:
+def _normalize_incoming_event(
+    body: dict,
+    payload: dict,
+    settings,
+    chat_lookup: dict | None,
+    chat_lookup_error: dict | None,
+) -> InboundEvent:
     event = _extract_event(payload)
     event_type = event.get("type")
     ignored = event_type not in {"message", "file"}
@@ -158,10 +189,17 @@ def _normalize_incoming_event(body: dict, payload: dict, settings, chat_lookup: 
         ignored=ignored,
         ignore_reason="unsupported_event_type" if ignored else None,
         chat_lookup=chat_lookup,
+        chat_lookup_error=chat_lookup_error,
     )
 
 
-def _normalize_postback(body: dict, payload: dict, settings, chat_lookup: dict | None) -> InboundEvent:
+def _normalize_postback(
+    body: dict,
+    payload: dict,
+    settings,
+    chat_lookup: dict | None,
+    chat_lookup_error: dict | None,
+) -> InboundEvent:
     event = _extract_event(payload)
     postback = _extract_postback(payload, event)
     button_id = _first_text(
@@ -193,16 +231,31 @@ def _normalize_postback(body: dict, payload: dict, settings, chat_lookup: dict |
         event_type="rich_message_postback",
         event=normalized_payload["event"],
         chat_lookup=chat_lookup,
+        chat_lookup_error=chat_lookup_error,
     )
 
 
-def _normalize_chat_lifecycle(body: dict, payload: dict, settings, chat_lookup: dict | None) -> InboundEvent:
+def _normalize_chat_lifecycle(
+    body: dict,
+    payload: dict,
+    settings,
+    chat_lookup: dict | None,
+    chat_lookup_error: dict | None,
+) -> InboundEvent:
     standard = {
         "chat_deactivated": "CHAT_DEACTIVATED",
         "chat_transferred": "CHAT_TRANSFERRED",
         "user_removed_from_chat": "USER_REMOVED",
     }[body["action"]]
-    return _build_event(body, payload, settings=settings, standard_event_type=standard, event_type=body["action"], chat_lookup=chat_lookup)
+    return _build_event(
+        body,
+        payload,
+        settings=settings,
+        standard_event_type=standard,
+        event_type=body["action"],
+        chat_lookup=chat_lookup,
+        chat_lookup_error=chat_lookup_error,
+    )
 
 
 def _build_event(
@@ -217,6 +270,7 @@ def _build_event(
     thread: dict | None = None,
     event: dict | None = None,
     chat_lookup: dict | None = None,
+    chat_lookup_error: dict | None = None,
 ) -> InboundEvent:
     action = str(body.get("action") or "")
     chat = chat or _extract_chat(payload) or chat_lookup or {}
@@ -234,7 +288,7 @@ def _build_event(
         reason = reason or "agent_message"
     if not _group_allowed(payload, chat, chat_lookup, settings):
         is_ignored = True
-        reason = "group_not_allowed"
+        reason = _group_ignore_reason(body, payload, chat, chat_lookup, chat_lookup_error, settings)
 
     chat_id = _first_text(payload.get("chat_id"), chat.get("id"), chat.get("chat_id"))
     thread_id = _first_text(payload.get("thread_id"), thread.get("id"), event.get("thread_id"))
@@ -252,16 +306,18 @@ def _build_event(
         sender_role=sender_role,
         occurred_at=parse_rfc3339_to_mysql(_first_text(event.get("created_at"), payload.get("created_at"), thread.get("created_at"), chat.get("created_at"))),
         dedup_key=_dedup_key(action, chat_id, thread_id, event_id, body),
-        payload_json=_payload_json(payload, body, chat_lookup),
+        payload_json=_payload_json(payload, body, chat_lookup, chat_lookup_error),
         ignored=is_ignored,
         ignore_reason=reason if is_ignored else None,
     )
 
 
-def _payload_json(payload: dict, body: dict, chat_lookup: dict | None) -> dict:
+def _payload_json(payload: dict, body: dict, chat_lookup: dict | None, chat_lookup_error: dict | None) -> dict:
     result = {**payload, "webhook_body": body}
     if chat_lookup is not None:
         result["chat_lookup"] = chat_lookup
+    if chat_lookup_error is not None:
+        result["chat_lookup_error"] = chat_lookup_error
     return result
 
 
@@ -296,11 +352,34 @@ def _group_allowed(payload: dict, chat: dict, chat_lookup: dict | None, settings
     allowed = getattr(settings, "livechat_allowed_group_id_set", set())
     if not allowed:
         return True
+    group_ids = _collect_group_ids(payload, chat, chat_lookup)
+    return bool(group_ids & allowed)
+
+
+def _group_ignore_reason(
+    body: dict,
+    payload: dict,
+    chat: dict,
+    chat_lookup: dict | None,
+    chat_lookup_error: dict | None,
+    settings,
+) -> str:
+    if (
+        body.get("action") == "incoming_event"
+        and getattr(settings, "livechat_allowed_group_id_set", set())
+        and not _collect_group_ids(payload, chat, chat_lookup)
+        and chat_lookup_error is not None
+    ):
+        return "group_lookup_failed"
+    return "group_not_allowed"
+
+
+def _collect_group_ids(payload: dict, chat: dict, chat_lookup: dict | None) -> set[int]:
     group_ids = _extract_group_ids_from_payload(payload)
     group_ids.update(chat_group_ids(chat))
     if chat_lookup:
         group_ids.update(chat_group_ids(chat_lookup))
-    return bool(group_ids & allowed)
+    return group_ids
 
 
 def _extract_group_ids_from_payload(payload: dict) -> set[int]:

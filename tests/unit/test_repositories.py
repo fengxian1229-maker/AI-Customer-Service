@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 
 from app.db.repositories import (
     ConversationRepository,
@@ -118,6 +119,23 @@ def make_inbound_event() -> InboundEvent:
         payload_json={"ingress_source": "polling"},
         ignored=False,
     )
+
+
+def test_fetch_recent_livechat_group_ids_extracts_nested_payload_groups():
+    import asyncio
+
+    cursor = FakeCursor(rowcount=1)
+    cursor.fetchall_result = [
+        {"payload_json": json.dumps({"chat": {"access": {"group_ids": [23]}}})},
+        {"payload_json": {"chat_lookup": {"access": {"group_ids": ["99"]}}}},
+        {"payload_json": {"thread": {"access": {"group_id": "23"}}}},
+    ]
+    repository = InboundEventRepository(FakePool(cursor))
+
+    result = asyncio.run(repository.fetch_recent_livechat_group_ids("chat-1"))
+
+    assert result == {23, 99}
+    assert cursor.args == ("chat-1", 20)
 
 
 def test_conversation_update_workflow_state_allows_clearing_active_workflow():
