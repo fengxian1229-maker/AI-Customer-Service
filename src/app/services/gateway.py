@@ -910,12 +910,11 @@ class GatewayService:
         final_text = normalize_text(streamed_state.get("final_response_text"))
         if not final_text:
             return graph_state, outbound_messages, []
-        final_custom_id = getattr(preview_publisher, "custom_id", f"preview:{inbound_event_id}")
         updated_messages = list(outbound_messages)
         updated_payload = {
             **(text_message.get("payload_json") or {}),
             "text": final_text,
-            "custom_id": final_custom_id,
+            "custom_id": f"final:{inbound_event_id}",
         }
         updated_messages[text_index] = {**text_message, "payload_json": updated_payload}
         return streamed_state, updated_messages, []

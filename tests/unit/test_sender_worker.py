@@ -165,6 +165,7 @@ def test_process_pending_message_passes_text_custom_id_to_livechat_send_event():
     message = {
         **make_message(),
         "payload_json": {"text": "streamed final", "custom_id": "preview:123"},
+        "inbound_event_id": 123,
         "conversation_status": "AI_ACTIVE",
         "conversation_active_workflow": None,
     }
@@ -172,9 +173,39 @@ def test_process_pending_message_passes_text_custom_id_to_livechat_send_event():
     result = asyncio.run(process_pending_message(repository, client, message, message_repository=message_repository))
 
     assert result["status"] == "SENT"
-    assert client.calls == [("chat-1", "thread-1", "streamed final", "preview:123")]
+    assert client.calls == [("chat-1", "thread-1", "streamed final", "final:123")]
     assert repository.sent == [7]
     assert message_repository.inserted[0]["text_content"] == "streamed final"
+
+
+def test_process_pending_message_passes_non_preview_custom_id_unchanged():
+    class SenderClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_text(
+            self,
+            chat_id: str,
+            thread_id: str | None,
+            text: str,
+            custom_id: str | None = None,
+        ) -> dict:
+            self.calls.append((chat_id, thread_id, text, custom_id))
+            return {"event_id": "event-1"}
+
+    repository = FakeOutboundRepository()
+    client = SenderClient()
+    message = {
+        **make_message(),
+        "payload_json": {"text": "plain final", "custom_id": "manual:123"},
+        "conversation_status": "AI_ACTIVE",
+        "conversation_active_workflow": None,
+    }
+
+    result = asyncio.run(process_pending_message(repository, client, message))
+
+    assert result["status"] == "SENT"
+    assert client.calls == [("chat-1", "thread-1", "plain final", "manual:123")]
 
 
 def test_process_pending_message_skips_when_conversation_human_active():

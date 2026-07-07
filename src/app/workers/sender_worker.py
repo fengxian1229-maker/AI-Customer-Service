@@ -161,8 +161,9 @@ async def process_pending_message(
                 "thread_id": message.get("thread_id"),
                 "text": payload["text"],
             }
-            if payload.get("custom_id"):
-                send_text_kwargs["custom_id"] = payload["custom_id"]
+            custom_id = _final_send_custom_id(message, payload)
+            if custom_id:
+                send_text_kwargs["custom_id"] = custom_id
             response = await sender_client.send_text(**send_text_kwargs)
             caption_result = None
     except Exception as exc:
@@ -279,6 +280,16 @@ async def _send_image_text_fallback(sender_client, message: dict, payload: dict)
 
 def _image_text_fallback_enabled() -> bool:
     return str(os.getenv("LIVECHAT_IMAGE_TEXT_FALLBACK") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _final_send_custom_id(message: dict, payload: dict) -> str | None:
+    custom_id = str(payload.get("custom_id") or "").strip()
+    if custom_id.startswith("preview:"):
+        inbound_event_id = message.get("inbound_event_id")
+        if inbound_event_id:
+            return f"final:{inbound_event_id}"
+        return None
+    return custom_id or None
 
 
 def _is_image_text_fallback_response(response: dict) -> bool:
