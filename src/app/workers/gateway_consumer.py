@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import socket
@@ -13,7 +14,7 @@ from app.db.repositories import (
     InboundEventRepository,
     KnowledgeDocumentRepository,
 )
-from app.graph.checkpointing import build_checkpointer
+from app.graph.checkpointing import build_async_checkpointer as build_checkpointer
 from app.llm.provider import build_llm_provider
 from app.schemas.events import InboundEvent
 from app.services.final_reply_factory import build_final_reply_service_from_settings
@@ -44,7 +45,7 @@ async def process_next_batch(
     worker_id: str | None = None,
     lease_seconds: int | None = None,
 ) -> dict:
-    inbound_repository, service, managed_checkpointer = _build_gateway_dependencies(pool, checkpoint_mode, settings)
+    inbound_repository, service, managed_checkpointer = await _build_gateway_dependencies(pool, checkpoint_mode, settings)
     try:
         worker_id = worker_id or default_worker_id()
         lease_seconds = lease_seconds or getattr(settings, "worker_lease_seconds", 300)
@@ -60,11 +61,11 @@ async def process_next_batch(
             "concurrency": concurrency,
         }
     finally:
-        managed_checkpointer.close()
+        await _close_managed_checkpointer(managed_checkpointer)
 
 
 async def process_inbound_event_id(pool, inbound_event_id: int, checkpoint_mode: str = "off", settings=None) -> dict:
-    inbound_repository, service, managed_checkpointer = _build_gateway_dependencies(pool, checkpoint_mode, settings)
+    inbound_repository, service, managed_checkpointer = await _build_gateway_dependencies(pool, checkpoint_mode, settings)
     try:
         row = await inbound_repository.fetch_unprocessed_by_id(inbound_event_id)
         if not row:
@@ -86,10 +87,10 @@ async def process_inbound_event_id(pool, inbound_event_id: int, checkpoint_mode:
             "llm": _build_llm_summary(settings),
         }
     finally:
-        managed_checkpointer.close()
+        await _close_managed_checkpointer(managed_checkpointer)
 
 
-def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
+async def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
     inbound_repository = InboundEventRepository(pool)
     transactional_repository = GatewayTransactionRepository(pool, inbound_repository=inbound_repository)
     knowledge_repository = KnowledgeDocumentRepository(pool)
@@ -101,6 +102,8 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
     livechat_sender_client = _build_livechat_sender_client(settings) if final_reply_streaming_service else None
     image_attachment_analyzer = ImageAttachmentAnalyzer(llm_provider) if llm_provider is not None else None
     managed_checkpointer = build_checkpointer(checkpoint_mode, settings=settings)
+    if inspect.isawaitable(managed_checkpointer):
+        managed_checkpointer = await managed_checkpointer
     service_kwargs = {
         "transactional_repository": transactional_repository,
         "checkpointer": managed_checkpointer.checkpointer,
@@ -163,6 +166,13 @@ def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
         )
     service = GatewayService(**service_kwargs)
     return inbound_repository, service, managed_checkpointer
+
+
+async def _close_managed_checkpointer(managed_checkpointer) -> None:
+    if hasattr(managed_checkpointer, "aclose"):
+        await managed_checkpointer.aclose()
+        return
+    managed_checkpointer.close()
 
 
 def _build_final_reply_service(settings):
