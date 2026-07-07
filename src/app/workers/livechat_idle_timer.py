@@ -132,7 +132,7 @@ class LiveChatIdleTimerRepository:
     async def update_slot_memory(self, conversation_id: str, slot_memory: dict) -> None:
         sql = """
         UPDATE conversation_states
-        SET slot_memory = CAST(%s AS JSON)
+        SET slot_memory = %s
         WHERE conversation_id = %s
         """
         async with self.pool.acquire() as conn:
@@ -143,7 +143,7 @@ class LiveChatIdleTimerRepository:
         sql = """
         UPDATE conversation_states
         SET status = 'CLOSED',
-            slot_memory = CAST(%s AS JSON)
+            slot_memory = %s
         WHERE conversation_id = %s
         """
         async with self.pool.acquire() as conn:

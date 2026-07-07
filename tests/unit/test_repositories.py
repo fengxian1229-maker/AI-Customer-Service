@@ -947,7 +947,7 @@ def test_graph_checkpoint_run_mark_succeeded_merges_shadow_metadata_json():
     )
 
     assert "JSON_MERGE_PATCH" in cursor.sql
-    assert "CAST(%s AS JSON)" in cursor.sql
+    assert "CAST(%s AS JSON)" not in cursor.sql
     assert cursor.args[0] is None
     assert cursor.args[1] == '{"llm_shadow":{"rewrite":{"provider":"mock","status":"ok"},"intent":{"provider":"mock","route":"faq"}}}'
     assert "api_key" not in cursor.args[1]

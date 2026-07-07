@@ -23,7 +23,7 @@ class InboundEventRepository:
         ) VALUES (
           %s, %s, %s, %s, %s, %s,
           %s, %s, %s, %s, %s,
-          %s, CAST(%s AS JSON), %s, %s
+          %s, %s, %s, %s
         )
         ON DUPLICATE KEY UPDATE id = id
         """
@@ -149,7 +149,7 @@ class ConversationRepository:
         SET status = COALESCE(%s, status),
             active_workflow = %s,
             workflow_stage = %s,
-            slot_memory = CAST(%s AS JSON)
+            slot_memory = %s
         WHERE conversation_id = %s
         """
         args = (
@@ -182,7 +182,7 @@ class OutboundMessageRepository:
           status, inbound_event_id, conversation_id,
           dedup_key, block_index, message_kind, command_type
         ) VALUES (
-          %s, %s, %s, %s, CAST(%s AS JSON), %s, %s, %s,
+          %s, %s, %s, %s, %s, %s, %s, %s,
           %s, %s, %s, %s
         )
         """
@@ -215,7 +215,7 @@ class OutboundMessageRepository:
           status, inbound_event_id, conversation_id,
           dedup_key, block_index, message_kind, command_type
         ) VALUES (
-          %s, %s, %s, %s, CAST(%s AS JSON), %s, %s, %s,
+          %s, %s, %s, %s, %s, %s, %s, %s,
           %s, %s, %s, %s
         )
         ON DUPLICATE KEY UPDATE id = id
@@ -374,7 +374,7 @@ class ExternalCommandRepository:
           dedup_key
         ) VALUES (
           %s, %s, %s, %s, %s,
-          %s, CAST(%s AS JSON), %s, %s, %s,
+          %s, %s, %s, %s, %s,
           %s
         )
         ON DUPLICATE KEY UPDATE id = id
@@ -563,7 +563,7 @@ class ExternalCommandRepository:
     async def merge_payload_json(self, command_id: int, patch: dict) -> None:
         sql = """
         UPDATE external_commands
-        SET payload_json = JSON_MERGE_PATCH(COALESCE(payload_json, JSON_OBJECT()), CAST(%s AS JSON)),
+        SET payload_json = JSON_MERGE_PATCH(COALESCE(payload_json, JSON_OBJECT()), %s),
             updated_at = CURRENT_TIMESTAMP
         WHERE id = %s
         """
@@ -701,7 +701,7 @@ class ExternalCommandResultRepository:
           processed_at, last_error, dedup_key
         ) VALUES (
           %s, %s, %s, %s, %s,
-          %s, %s, %s, CAST(%s AS JSON), %s,
+          %s, %s, %s, %s, %s,
           %s, %s, %s
         )
         ON DUPLICATE KEY UPDATE id = id
@@ -961,7 +961,7 @@ class ConversationMessageRepository:
         ) VALUES (
           %s, %s, %s, %s, %s,
           %s, %s, %s,
-          %s, %s, %s, CAST(%s AS JSON), %s, %s
+          %s, %s, %s, %s, %s, %s
         )
         ON DUPLICATE KEY UPDATE id = id
         """
@@ -1016,8 +1016,8 @@ class KnowledgeDocumentRepository:
           question_aliases, answer_blocks, metadata_json,
           language, priority, enabled
         ) VALUES (
-          %s, %s, %s, %s, CAST(%s AS JSON),
-          CAST(%s AS JSON), CAST(%s AS JSON), CAST(%s AS JSON),
+          %s, %s, %s, %s, %s,
+          %s, %s, %s,
           %s, %s, %s
         )
         ON DUPLICATE KEY UPDATE
@@ -1182,7 +1182,7 @@ class GraphRunErrorRepository:
         INSERT INTO graph_run_errors (
           conversation_id, inbound_event_id, graph_thread_id, node_name,
           error_type, error_message, retryable, state_snapshot
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, CAST(%s AS JSON))
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
         state_snapshot = error_record.get("state_snapshot")
         state_snapshot_json = (
@@ -1295,7 +1295,7 @@ class GraphCheckpointRunRepository:
         INSERT INTO graph_checkpoint_runs (
           conversation_id, graph_thread_id, checkpoint_mode, status,
           inbound_event_id, latest_checkpoint_id, metadata_json
-        ) VALUES (%s, %s, %s, %s, %s, %s, CAST(%s AS JSON))
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         args = (
             record["conversation_id"],
@@ -1321,7 +1321,7 @@ class GraphCheckpointRunRepository:
         args: tuple
         if metadata_json:
             metadata_sql = """,
-            metadata_json = JSON_MERGE_PATCH(COALESCE(metadata_json, JSON_OBJECT()), CAST(%s AS JSON))"""
+            metadata_json = JSON_MERGE_PATCH(COALESCE(metadata_json, JSON_OBJECT()), %s)"""
             args = (latest_checkpoint_id, json_dumps(_sanitize_checkpoint_metadata(metadata_json)), run_id)
         else:
             args = (latest_checkpoint_id, run_id)
