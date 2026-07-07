@@ -15,6 +15,7 @@ from app.services.message_history import build_assistant_message_from_outbound
 
 CONFIG_FAILURE_STATUSES = {401, 403}
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+DEFAULT_MAX_RETRIES = 12
 BUSINESS_ERROR_MARKERS = (
     "chat is closed",
     "chat closed",
@@ -41,13 +42,19 @@ def classify_send_result(response: dict) -> dict:
     }
 
 
-def classify_send_error(exc: Exception) -> dict:
+def classify_send_error(exc: Exception, retry_count: int = 0) -> dict:
     message = str(exc)
     if isinstance(exc, LiveChatApiError):
         lowered = message.lower()
         if exc.status in CONFIG_FAILURE_STATUSES:
             return {"status": "FAILED_CONFIG", "last_error": message, "retryable": False}
         if exc.status in RETRYABLE_STATUSES:
+            if _retry_limit_reached(retry_count):
+                return {
+                    "status": "FAILED_BUSINESS",
+                    "last_error": f"{message} (retry limit reached)",
+                    "retryable": False,
+                }
             return {"status": "RETRYABLE", "last_error": message, "retryable": True}
         if any(marker in lowered for marker in BUSINESS_ERROR_MARKERS):
             return {"status": "FAILED_BUSINESS", "last_error": message, "retryable": False}
@@ -55,6 +62,23 @@ def classify_send_error(exc: Exception) -> dict:
     if isinstance(exc, (TimeoutError, ConnectionError, url_error.URLError)):
         return {"status": "RETRYABLE", "last_error": message, "retryable": True}
     return {"status": "FAILED_UNKNOWN", "last_error": message, "retryable": False}
+
+
+def _retry_limit_reached(retry_count: int) -> bool:
+    max_retries = _max_retries()
+    if max_retries <= 0:
+        return False
+    return int(retry_count or 0) + 1 >= max_retries
+
+
+def _max_retries() -> int:
+    raw = str(os.getenv("LIVECHAT_SEND_MAX_RETRIES") or "").strip()
+    if not raw:
+        return DEFAULT_MAX_RETRIES
+    try:
+        return int(raw)
+    except ValueError:
+        return DEFAULT_MAX_RETRIES
 
 
 async def process_pending_message(
@@ -102,7 +126,7 @@ async def process_pending_message(
         except Exception as exc:
             fallback_result = await _send_buttons_fallback(sender_client, message, menu, exc)
             if fallback_result.get("fallback_response") is None:
-                result = classify_send_error(exc)
+                result = classify_send_error(exc, retry_count=_message_retry_count(message))
                 await outbound_repository.mark_failed(
                     message["id"],
                     result["status"],
@@ -174,7 +198,7 @@ async def process_pending_message(
                 outbound_for_history = {**message, "payload_json": {"text": _image_mvp_fallback_text(payload)}}
                 caption_result = None
             else:
-                result = classify_send_error(exc)
+                result = classify_send_error(exc, retry_count=_message_retry_count(message))
                 await outbound_repository.mark_failed(
                     message["id"],
                     result["status"],
@@ -183,7 +207,7 @@ async def process_pending_message(
                 )
                 return result
         else:
-            result = classify_send_error(exc)
+            result = classify_send_error(exc, retry_count=_message_retry_count(message))
             await outbound_repository.mark_failed(
                 message["id"],
                 result["status"],
@@ -195,7 +219,7 @@ async def process_pending_message(
     try:
         result = classify_send_result(response)
     except Exception as exc:
-        result = classify_send_error(exc)
+        result = classify_send_error(exc, retry_count=_message_retry_count(message))
         await outbound_repository.mark_failed(
             message["id"],
             result["status"],
@@ -287,6 +311,13 @@ def _final_send_custom_id(message: dict, payload: dict) -> str | None:
     if custom_id.startswith(("preview:", "preview-", "final:", "final-")):
         return None
     return custom_id or None
+
+
+def _message_retry_count(message: dict) -> int:
+    try:
+        return int(message.get("retry_count") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _is_image_text_fallback_response(response: dict) -> bool:

@@ -39,6 +39,17 @@ def test_classify_send_error_marks_429_as_retryable():
     assert "HTTP 429" in result["last_error"]
 
 
+def test_classify_send_error_stops_retrying_after_retry_limit():
+    result = sender_worker.classify_send_error(
+        LiveChatApiError(500, {"raw": "<HTML>edge error</HTML>", "path": "/agent/action/send_event"}),
+        retry_count=11,
+    )
+
+    assert result["status"] == "FAILED_BUSINESS"
+    assert result["retryable"] is False
+    assert "retry limit reached" in result["last_error"]
+
+
 def test_classify_send_error_marks_closed_chat_as_business_failure():
     result = classify_send_error(LiveChatApiError(400, {"error": {"message": "Chat is closed"}}))
 
@@ -730,7 +741,6 @@ def test_livechat_send_text_posts_custom_id_when_present():
                 "event": {
                     "type": "message",
                     "text": "final reply",
-                    "visibility": "all",
                     "custom_id": "preview:event-1",
                 },
             },
@@ -833,7 +843,6 @@ def test_livechat_send_image_uploads_local_file_and_sends_file_event(tmp_path):
                     "url": "https://files.example/deposit.jpg",
                     "name": "deposit.jpg",
                     "content_type": "image/jpeg",
-                    "visibility": "all",
                 },
             },
         ),

@@ -73,7 +73,7 @@ def test_send_text_continues_to_send_event_when_add_user_returns_500(monkeypatch
 def test_send_buttons_continues_to_send_event_when_add_user_returns_500(monkeypatch):
     client = LiveChatSenderClient("https://livechat.example/v3.6", "account-1", "token-1", agent_email="bot@example.com")
     calls = []
-    menu = {"rich_message": {"type": "rich_message", "template_id": "cards", "elements": []}}
+    menu = {"rich_message": {"type": "rich_message", "template_id": "cards", "elements": [], "visibility": "all"}}
 
     async def fake_post_json(path: str, body: dict) -> dict:
         calls.append((path, body))
@@ -101,7 +101,7 @@ def test_send_buttons_continues_to_send_event_when_add_user_returns_500(monkeypa
             "/agent/action/send_event",
             {
                 "chat_id": "chat-1",
-                "event": menu["rich_message"],
+                "event": {"type": "rich_message", "template_id": "cards", "elements": []},
             },
         ),
     ]

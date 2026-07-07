@@ -34,7 +34,6 @@ class LiveChatSenderClient:
         event = {
             "type": "message",
             "text": text,
-            "visibility": "all",
         }
         if custom_id:
             event["custom_id"] = custom_id
@@ -86,9 +85,11 @@ class LiveChatSenderClient:
     async def send_buttons(self, chat_id: str, thread_id: str | None, menu: dict) -> dict:
         del thread_id
         await self._ensure_agent_added_before_send(chat_id)
+        event = dict(menu["rich_message"])
+        event.pop("visibility", None)
         body = {
             "chat_id": chat_id,
-            "event": menu["rich_message"],
+            "event": event,
         }
         return await self._post_json("/agent/action/send_event", body)
 
@@ -123,7 +124,6 @@ class LiveChatSenderClient:
                 "url": url,
                 "name": file_data["filename"],
                 "content_type": file_data["content_type"],
-                "visibility": "all",
             },
         }
         return await self._post_json("/agent/action/send_event", body)
