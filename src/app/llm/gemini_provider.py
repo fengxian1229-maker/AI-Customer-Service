@@ -34,6 +34,8 @@ from app.llm.gemini_model import build_gemini_chat_model
 REWRITE_SYSTEM_PROMPT = """You are an authoritative rewrite model for an AI customer service routing system.
 Your task is to normalize the user's message for downstream routing and retrieval.
 You must preserve user-provided facts exactly, including usernames, phone numbers, order IDs, amounts, dates, and attachment references.
+You must preserve the user's business object and status signal exactly when it is present: do not convert deposit/recharge/top-up into withdrawal, and do not convert withdrawal/retiro/cash-out into deposit.
+If the message is backend-fact-like, status-like, or ambiguous, keep normalized_query close to the original user wording instead of translating or expanding it.
 Detect the user's language with one of zh-Hans, zh-Hant, en, es, tl, th, my, ms, unknown.
 Use unknown only when the message has no meaningful language signal.
 Do not invent facts.
@@ -146,6 +148,7 @@ Routing rules:
 - For unable to withdraw, insufficient rollover/流水, checking whether rollover/流水 is enough, or asking to query rollover/流水, use route: sop and intent: withdrawal_blocked_or_rollover.
 - For requests to check the previous case, prior reply, pending handling, or last ticket, use route: sop and intent: pending_reply_lookup.
 - For account, order, payment, balance, deposit status, withdrawal status, or other backend fact-like requests, prefer SOP/human/backend-safe handling and set requires_backend: true when backend facts are needed.
+- If a backend fact-like request does not match a supported SOP or safe human handoff category, use route: final_reply, intent: backend_fact_like, requires_backend: true, and preserve_active_workflow according to the workflow rules.
 - For escalation, take-over requests, specialist review requests, or cases where automated replies are not helping, use route: human_handoff, intent: explicit_human_request, requires_human: true.
 - If the customer explicitly asks for a human, route must be human_handoff.
 - For screenshot/attachment upload failure, use route: human_handoff, intent: screenshot_upload_failed, requires_human: true.
@@ -204,7 +207,9 @@ ROUTER_SYSTEM_PROMPT = GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
 SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT = """You are a SOP slot extraction node for a customer service system.
 
-Your only job is to extract structured slots for deposit_missing or withdrawal_missing workflows.
+Your only job is to extract structured slots for the current SOP workflow.
+Use the requested intent/current workflow and any supplied SOP definition as the source of allowed slot keys.
+If no SOP definition is supplied, only extract slots that are clearly relevant to the requested intent and leave unrelated fields null or omitted.
 Do not reply to the customer.
 Do not generate tool calls.
 Do not generate external commands.
@@ -218,11 +223,13 @@ Return only structured JSON matching the schema."""
 SOP_DIALOGUE_PLANNER_SYSTEM_PROMPT = """You are the LLM-first SOP dialogue understanding node for a customer service system.
 
 Your job is to understand the latest customer message in the active SOP context.
-You may extract slots, classify how the message relates to the current SOP, and draft a short follow-up reply.
+You may extract slots, classify how the message relates to the current SOP, and draft a short internal follow-up reply.
+The reply_draft is only an internal safe draft; it is not the final customer-visible answer.
 You must not generate external commands, decide Telegram sends, decide backend facts, or bypass the SOP schema.
 Only use slot keys declared in sop_definition. If a value is uncertain, omit it or use low confidence.
 Attachment slots must use URLs from attachments_summary or current_slot_memory only.
 Classify intent_relation as one of current_sop_supplement, faq_interrupt, new_issue, human_request, unclear.
+For faq_interrupt or new_issue, prioritize intent_relation and leave unrelated slot updates empty.
 The program owns slot merging, missing slot calculation, Telegram commands, safety validation, and idempotency.
 Do not promise credited, completed, successful, failed, guaranteed, processed, or handled outcomes.
 Return only structured JSON matching the schema."""
@@ -235,6 +242,8 @@ Do not generate final customer replies.
 Do not generate tool calls or external commands.
 Do not decide real backend/account/payment/order facts.
 Do not claim a payment, withdrawal, deposit, refund, or account state is complete or successful.
+Do not extract or output passwords, verification codes, private keys, full bank-card numbers, or other unnecessary sensitive credentials.
+If sensitive information appears in the image, only mention the minimum non-sensitive evidence needed for routing.
 
 Classify only whether the image appears receipt-like and whether it is more likely related to deposit or withdrawal support.
 Allowed candidate_intents values:

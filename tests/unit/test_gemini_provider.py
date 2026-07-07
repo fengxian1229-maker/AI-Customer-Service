@@ -501,6 +501,38 @@ def test_gemini_provider_guarded_prompt_keeps_sop_boundary_rules_out_of_faq_targ
     assert "For ordinary how-to, manual, guide, navigation, or concept explanation questions, use route: faq." not in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
 
 
+def test_rewrite_prompt_preserves_business_object_and_backend_like_wording():
+    from app.llm.gemini_provider import REWRITE_SYSTEM_PROMPT
+
+    assert "do not convert deposit/recharge/top-up into withdrawal" in REWRITE_SYSTEM_PROMPT
+    assert "do not convert withdrawal/retiro/cash-out into deposit" in REWRITE_SYSTEM_PROMPT
+    assert "keep normalized_query close to the original user wording" in REWRITE_SYSTEM_PROMPT
+
+
+def test_guarded_router_prompt_defines_backend_fact_like_fallback():
+    from app.llm.gemini_provider import GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
+    assert "intent: backend_fact_like" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    assert "requires_backend: true" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+    assert "does not match a supported SOP or safe human handoff category" in GUARDED_AUTHORITATIVE_ROUTER_SYSTEM_PROMPT
+
+
+def test_sop_prompts_keep_slot_scope_dynamic_and_reply_draft_internal():
+    from app.llm.gemini_provider import SOP_DIALOGUE_PLANNER_SYSTEM_PROMPT, SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT
+
+    assert "current SOP workflow" in SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT
+    assert "SOP definition as the source of allowed slot keys" in SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT
+    assert "reply_draft is only an internal safe draft" in SOP_DIALOGUE_PLANNER_SYSTEM_PROMPT
+    assert "For faq_interrupt or new_issue" in SOP_DIALOGUE_PLANNER_SYSTEM_PROMPT
+
+
+def test_image_prompt_limits_sensitive_credential_extraction():
+    from app.llm.gemini_provider import IMAGE_ATTACHMENT_ANALYSIS_SYSTEM_PROMPT
+
+    assert "Do not extract or output passwords, verification codes" in IMAGE_ATTACHMENT_ANALYSIS_SYSTEM_PROMPT
+    assert "minimum non-sensitive evidence needed for routing" in IMAGE_ATTACHMENT_ANALYSIS_SYSTEM_PROMPT
+
+
 def test_gemini_provider_extract_sop_slots_uses_structured_output(monkeypatch):
     from app.core.settings import Settings
     from app.llm.gemini_provider import GeminiLLMProvider, SOP_SLOT_EXTRACTOR_SYSTEM_PROMPT

@@ -62,6 +62,7 @@ def test_final_reply_prompt_requires_contextual_answer_planning():
     assert "recent_messages" in FINAL_REPLY_SYSTEM_PROMPT
     assert "backend_result" in FINAL_REPLY_SYSTEM_PROMPT
     assert "fallback text is a safe draft/fact source" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "avoiding mechanical copy-through" in FINAL_REPLY_SYSTEM_PROMPT
     assert "answer that value directly" in FINAL_REPLY_SYSTEM_PROMPT
     assert "node_facts" in FINAL_REPLY_SYSTEM_PROMPT
     assert "reply_plan.allowed_facts" in FINAL_REPLY_SYSTEM_PROMPT

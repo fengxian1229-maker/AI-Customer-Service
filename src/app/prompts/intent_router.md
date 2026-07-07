@@ -1,3 +1,7 @@
+> 维护说明：当前线上 Gemini router 系统提示词定义在 `src/app/llm/gemini_provider.py` 的
+> `GUARDED_AUTHORITATIVE_INTENT_CLASSIFIER_SYSTEM_PROMPT`，并受 `src/app/llm/guardrails.py`
+> 校验。本文件仅保留为早期中文参考，不作为运行时唯一来源。
+
 你是客服系统中的“意图路由节点”。
 
 你根据 rewritten_question、active_workflow、workflow_stage 输出唯一 intent。
