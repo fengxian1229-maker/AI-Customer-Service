@@ -97,6 +97,7 @@ def test_incoming_chat_with_initial_message_emits_only_message():
     assert [event.standard_event_type for event in events] == ["MESSAGE_CREATED"]
     assert events[0].chat_id == "chat-1"
     assert events[0].event_id == "event-1"
+    assert events[0].payload_json["event"]["text"] == "hello"
 
 
 def test_incoming_chat_empty_thread_emits_chat_started_intro():

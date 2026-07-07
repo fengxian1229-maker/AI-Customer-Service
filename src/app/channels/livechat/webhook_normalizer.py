@@ -127,10 +127,11 @@ def _normalize_incoming_chat(body: dict, payload: dict, settings, chat_lookup: d
         for event in item_thread.get("events") or []:
             if not isinstance(event, dict) or event.get("type") not in {"message", "file"}:
                 continue
+            event_payload = {**payload, "event": event}
             events.append(
                 _build_event(
                     body,
-                    payload,
+                    event_payload,
                     settings=settings,
                     standard_event_type=_standard_event_type(event.get("type")),
                     event_type=event.get("type"),
