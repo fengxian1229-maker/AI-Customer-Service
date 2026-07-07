@@ -347,7 +347,6 @@ def build_quick_replies_event(menu: Menu) -> dict[str, Any]:
                     {
                         "type": "message",
                         "text": button["label"],
-                        "value": button["label"],
                         "postback_id": button["id"],
                         "user_ids": [],
                     }

@@ -429,6 +429,7 @@ def test_process_pending_message_buttons_sends_quick_replies():
     rich = client.sent_buttons[0][2]["rich_message"]
     assert rich["template_id"] == "quick_replies"
     assert rich["elements"][0]["buttons"][0]["postback_id"] == "main_deposito"
+    assert "value" not in rich["elements"][0]["buttons"][0]
 
 
 def test_process_pending_message_buttons_falls_back_to_text_when_rich_send_fails():

@@ -52,6 +52,61 @@ def test_send_text_adds_agent_to_chat_before_send(monkeypatch):
     assert calls[1][0] == "/agent/action/send_event"
 
 
+def test_send_text_continues_to_send_event_when_add_user_returns_500(monkeypatch):
+    client = LiveChatSenderClient("https://livechat.example/v3.6", "account-1", "token-1", agent_email="bot@example.com")
+    calls = []
+
+    async def fake_post_json(path: str, body: dict) -> dict:
+        calls.append((path, body))
+        if path == "/agent/action/add_user_to_chat":
+            raise LiveChatApiError(500, {"path": path, "raw": "<HTML>edge error</HTML>"})
+        return {"event_id": "event-1"}
+
+    monkeypatch.setattr(client, "_post_json", fake_post_json)
+
+    result = asyncio.run(client.send_text("chat-1", "thread-1", "hello"))
+
+    assert result == {"event_id": "event-1"}
+    assert [call[0] for call in calls] == ["/agent/action/add_user_to_chat", "/agent/action/send_event"]
+
+
+def test_send_buttons_continues_to_send_event_when_add_user_returns_500(monkeypatch):
+    client = LiveChatSenderClient("https://livechat.example/v3.6", "account-1", "token-1", agent_email="bot@example.com")
+    calls = []
+    menu = {"rich_message": {"type": "rich_message", "template_id": "cards", "elements": []}}
+
+    async def fake_post_json(path: str, body: dict) -> dict:
+        calls.append((path, body))
+        if path == "/agent/action/add_user_to_chat":
+            raise LiveChatApiError(500, {"path": path, "raw": "<HTML>edge error</HTML>"})
+        return {"event_id": "event-1"}
+
+    monkeypatch.setattr(client, "_post_json", fake_post_json)
+
+    result = asyncio.run(client.send_buttons("chat-1", "thread-1", menu))
+
+    assert result == {"event_id": "event-1"}
+    assert calls == [
+        (
+            "/agent/action/add_user_to_chat",
+            {
+                "chat_id": "chat-1",
+                "user_id": "bot@example.com",
+                "user_type": "agent",
+                "visibility": "all",
+                "ignore_requester_presence": True,
+            },
+        ),
+        (
+            "/agent/action/send_event",
+            {
+                "chat_id": "chat-1",
+                "event": menu["rich_message"],
+            },
+        ),
+    ]
+
+
 def test_transfer_chat_to_group_keeps_ignore_agents_availability(monkeypatch):
     client = LiveChatSenderClient("https://livechat.example/v3.6", "account-1", "token-1")
     calls = []

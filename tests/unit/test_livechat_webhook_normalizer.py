@@ -63,7 +63,7 @@ def test_secret_missing_or_wrong_raises(secret):
         normalize_webhook_payload(body, make_settings())
 
 
-def test_incoming_chat_emits_chat_started_and_initial_message():
+def test_incoming_chat_with_initial_message_emits_only_message():
     body = {
         "webhook_id": "webhook-chat",
         "secret_key": "secret",
@@ -94,9 +94,75 @@ def test_incoming_chat_emits_chat_started_and_initial_message():
 
     events = normalize_webhook_payload(body, make_settings(livechat_allowed_group_ids="23"))
 
-    assert [event.standard_event_type for event in events] == ["CHAT_STARTED", "MESSAGE_CREATED"]
+    assert [event.standard_event_type for event in events] == ["MESSAGE_CREATED"]
     assert events[0].chat_id == "chat-1"
-    assert events[1].event_id == "event-1"
+    assert events[0].event_id == "event-1"
+
+
+def test_incoming_chat_empty_thread_emits_chat_started_intro():
+    body = {
+        "webhook_id": "webhook-chat",
+        "secret_key": "secret",
+        "action": "incoming_chat",
+        "organization_id": "org-1",
+        "payload": {
+            "chat": {
+                "id": "chat-1",
+                "created_at": "2026-07-06T00:00:00Z",
+                "access": {"group_ids": [23]},
+                "users": [{"id": "customer-1", "type": "customer"}],
+                "thread": {
+                    "id": "thread-1",
+                    "created_at": "2026-07-06T00:00:00Z",
+                    "events": [],
+                },
+            }
+        },
+    }
+
+    events = normalize_webhook_payload(body, make_settings(livechat_allowed_group_ids="23"))
+
+    assert [event.standard_event_type for event in events] == ["CHAT_STARTED"]
+    assert events[0].event_id == "chat_started:chat-1:thread-1"
+
+
+def test_incoming_chat_self_agent_greeting_does_not_emit_chat_started_intro():
+    body = {
+        "webhook_id": "webhook-chat",
+        "secret_key": "secret",
+        "action": "incoming_chat",
+        "organization_id": "org-1",
+        "payload": {
+            "chat": {
+                "id": "chat-1",
+                "created_at": "2026-07-06T00:00:00Z",
+                "access": {"group_ids": [23]},
+                "users": [{"id": "lingxi@goetm.com", "type": "agent"}],
+                "thread": {
+                    "id": "thread-1",
+                    "created_at": "2026-07-06T00:00:00Z",
+                    "events": [
+                        {
+                            "id": "event-1",
+                            "type": "message",
+                            "author_id": "lingxi@goetm.com",
+                            "created_at": "2026-07-06T00:00:01Z",
+                            "text": "hello",
+                        }
+                    ],
+                },
+            }
+        },
+    }
+
+    events = normalize_webhook_payload(
+        body,
+        make_settings(livechat_allowed_group_ids="23", livechat_self_author_ids="lingxi@goetm.com"),
+    )
+
+    assert [event.standard_event_type for event in events] == ["MESSAGE_CREATED"]
+    assert events[0].ignored is True
+    assert events[0].ignore_reason == "self_message"
 
 
 def test_incoming_event_file_maps_to_file_received():

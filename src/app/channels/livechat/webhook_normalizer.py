@@ -94,28 +94,35 @@ def _normalize(body: dict, settings, chat_lookup: dict | None) -> list[InboundEv
 def _normalize_incoming_chat(body: dict, payload: dict, settings, chat_lookup: dict | None) -> list[InboundEvent]:
     chat = payload.get("chat") if isinstance(payload.get("chat"), dict) else payload
     thread = _primary_thread(chat)
-    chat_started_payload = {
-        **payload,
-        "event": {
-            "id": f"chat_started:{_chat_id(chat, payload) or '-'}:{_thread_id(thread, payload) or '-'}",
-            "type": "chat_started",
-            "created_at": chat.get("created_at") or thread.get("created_at"),
-            "author_id": None,
-        },
-    }
-    events = [
-        _build_event(
-            body,
-            chat_started_payload,
-            settings=settings,
-            standard_event_type="CHAT_STARTED",
-            event_type="chat_started",
-            chat=chat,
-            thread=thread,
-            event=chat_started_payload["event"],
-            chat_lookup=chat_lookup,
+    events = []
+    has_message_or_file = any(
+        isinstance(event, dict) and event.get("type") in {"message", "file"}
+        for item_thread in _threads(chat)
+        for event in (item_thread.get("events") or [])
+    )
+    if not has_message_or_file:
+        chat_started_payload = {
+            **payload,
+            "event": {
+                "id": f"chat_started:{_chat_id(chat, payload) or '-'}:{_thread_id(thread, payload) or '-'}",
+                "type": "chat_started",
+                "created_at": chat.get("created_at") or thread.get("created_at"),
+                "author_id": None,
+            },
+        }
+        events.append(
+            _build_event(
+                body,
+                chat_started_payload,
+                settings=settings,
+                standard_event_type="CHAT_STARTED",
+                event_type="chat_started",
+                chat=chat,
+                thread=thread,
+                event=chat_started_payload["event"],
+                chat_lookup=chat_lookup,
+            )
         )
-    ]
     for item_thread in _threads(chat):
         for event in item_thread.get("events") or []:
             if not isinstance(event, dict) or event.get("type") not in {"message", "file"}:

@@ -30,7 +30,7 @@ class LiveChatSenderClient:
 
     async def send_text(self, chat_id: str, thread_id: str | None, text: str, custom_id: str | None = None) -> dict:
         del thread_id
-        await self.add_user_to_chat(chat_id)
+        await self._ensure_agent_added_before_send(chat_id)
         event = {
             "type": "message",
             "text": text,
@@ -85,7 +85,7 @@ class LiveChatSenderClient:
 
     async def send_buttons(self, chat_id: str, thread_id: str | None, menu: dict) -> dict:
         del thread_id
-        await self.add_user_to_chat(chat_id)
+        await self._ensure_agent_added_before_send(chat_id)
         body = {
             "chat_id": chat_id,
             "event": menu["rich_message"],
@@ -100,7 +100,7 @@ class LiveChatSenderClient:
         filename: str | None = None,
     ) -> dict:
         del thread_id
-        await self.add_user_to_chat(chat_id)
+        await self._ensure_agent_added_before_send(chat_id)
         file_data = await self._load_file(asset_ref, filename=filename)
         uploaded = await self.upload_file(
             file_data["content"],
@@ -157,6 +157,14 @@ class LiveChatSenderClient:
         except LiveChatApiError as exc:
             if exc.status in {400, 409, 422} and _looks_like_already_joined_error(exc.data):
                 return {"skipped": True, "reason": "already_joined"}
+            raise
+
+    async def _ensure_agent_added_before_send(self, chat_id: str) -> dict:
+        try:
+            return await self.add_user_to_chat(chat_id)
+        except LiveChatApiError as exc:
+            if exc.status == 500 and exc.data.get("path") == "/agent/action/add_user_to_chat":
+                return {"skipped": True, "reason": "add_user_to_chat_server_error", "error": str(exc)}
             raise
 
     async def transfer_chat_to_group(
