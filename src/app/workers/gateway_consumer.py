@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import logging
+import socket
 
 from app.channels.livechat.sender_client import LiveChatSenderClient
 from app.core.settings import Settings
@@ -30,14 +31,33 @@ def configure_logging() -> None:
     logging.getLogger("app.graph.nodes").setLevel(logging.INFO)
 
 
-async def process_next_batch(pool, limit: int = 20, checkpoint_mode: str = "off", settings=None) -> dict:
+def default_worker_id() -> str:
+    return f"gateway-consumer-{socket.gethostname()}"
+
+
+async def process_next_batch(
+    pool,
+    limit: int = 20,
+    checkpoint_mode: str = "off",
+    settings=None,
+    concurrency: int | None = None,
+    worker_id: str | None = None,
+    lease_seconds: int | None = None,
+) -> dict:
     inbound_repository, service, managed_checkpointer = _build_gateway_dependencies(pool, checkpoint_mode, settings)
     try:
-        rows = await inbound_repository.fetch_unprocessed(limit=limit)
-        result = await _process_rows(service, rows)
+        worker_id = worker_id or default_worker_id()
+        lease_seconds = lease_seconds or getattr(settings, "worker_lease_seconds", 300)
+        concurrency = max(int(concurrency if concurrency is not None else getattr(settings, "gateway_concurrency", 15)), 1)
+        if hasattr(inbound_repository, "lease_unprocessed"):
+            rows = await inbound_repository.lease_unprocessed(limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
+        else:
+            rows = await inbound_repository.fetch_unprocessed(limit=limit)
+        result = await _process_rows(service, rows, concurrency=concurrency, inbound_repository=inbound_repository)
         return {
             **result,
             "llm": _build_llm_summary(settings),
+            "concurrency": concurrency,
         }
     finally:
         managed_checkpointer.close()
@@ -171,23 +191,34 @@ def _build_livechat_sender_client(settings):
     )
 
 
-async def _process_rows(service, rows: list[dict]) -> dict:
+async def _process_rows(service, rows: list[dict], concurrency: int = 1, inbound_repository=None) -> dict:
     results = []
     failures = []
+    rows_by_conversation: dict[str, list[dict]] = {}
     for row in rows:
-        inbound_event_id = row.pop("id")
-        event = InboundEvent(**row)
-        try:
-            results.append(await service.process_event(inbound_event_id, event))
-        except Exception as exc:
-            failures.append(
-                {
-                    "inbound_event_id": inbound_event_id,
-                    "event_id": event.event_id,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                }
-            )
+        key = str(row.get("chat_id") or row.get("conversation_id") or f"inbound:{row.get('id')}")
+        rows_by_conversation.setdefault(key, []).append(row)
+    for group in rows_by_conversation.values():
+        group.sort(key=lambda item: item.get("id") or 0)
+
+    semaphore = asyncio.Semaphore(max(int(concurrency), 1))
+
+    async def process_group(group: list[dict]) -> tuple[list[dict], list[dict]]:
+        group_results = []
+        group_failures = []
+        async with semaphore:
+            for row in group:
+                result, failure = await _process_one_row(service, row, inbound_repository=inbound_repository)
+                if failure:
+                    group_failures.append(failure)
+                else:
+                    group_results.append(result)
+        return group_results, group_failures
+
+    group_outputs = await asyncio.gather(*(process_group(group) for group in rows_by_conversation.values()))
+    for group_results, group_failures in group_outputs:
+        results.extend(group_results)
+        failures.extend(group_failures)
     return {
         "results": results,
         "failures": failures,
@@ -195,6 +226,23 @@ async def _process_rows(service, rows: list[dict]) -> dict:
         "failed": len(failures),
         "enqueued": sum(1 for result in results if result.get("outbound_message")),
     }
+
+
+async def _process_one_row(service, row: dict, inbound_repository=None) -> tuple[dict | None, dict | None]:
+    row = dict(row)
+    inbound_event_id = row.pop("id")
+    event = InboundEvent(**row)
+    try:
+        return await service.process_event(inbound_event_id, event), None
+    except Exception as exc:
+        if inbound_repository is not None and hasattr(inbound_repository, "release_lease"):
+            await inbound_repository.release_lease(inbound_event_id)
+        return None, {
+            "inbound_event_id": inbound_event_id,
+            "event_id": event.event_id,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        }
 
 
 def _build_llm_summary(settings) -> dict:
@@ -247,21 +295,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Consume inbound_events into conversation state and outbox.")
     parser.add_argument("--once", action="store_true", help="Run one gateway batch and exit.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum inbound events to process.")
+    parser.add_argument("--concurrency", type=int, help="Maximum conversations to process concurrently.")
+    parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
+    parser.add_argument("--lease-seconds", type=int, help="Seconds before an inbound lease expires.")
     return parser
 
 
-async def run_once(limit: int) -> dict:
+async def run_once(
+    limit: int,
+    concurrency: int | None = None,
+    worker_id: str | None = None,
+    lease_seconds: int | None = None,
+) -> dict:
     settings = Settings(
         livechat_agent_access_token="unused-for-gateway",
         livechat_account_id="unused-for-gateway",
     )
     pool = await create_pool(settings)
     try:
+        process_kwargs = {
+            "limit": limit,
+            "checkpoint_mode": settings.langgraph_checkpoint_mode,
+            "settings": settings,
+        }
+        if concurrency is not None:
+            process_kwargs["concurrency"] = concurrency
+        if worker_id is not None:
+            process_kwargs["worker_id"] = worker_id
+        if lease_seconds is not None:
+            process_kwargs["lease_seconds"] = lease_seconds
         results = await process_next_batch(
             pool,
-            limit=limit,
-            checkpoint_mode=settings.langgraph_checkpoint_mode,
-            settings=settings,
+            **process_kwargs,
         )
         return {
             "worker": "gateway_consumer",
@@ -280,7 +345,14 @@ async def run_once(limit: int) -> dict:
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
     args = build_arg_parser().parse_args(argv)
-    result = asyncio.run(run_once(limit=args.limit))
+    result = asyncio.run(
+        run_once(
+            limit=args.limit,
+            concurrency=args.concurrency,
+            worker_id=args.worker_id,
+            lease_seconds=args.lease_seconds,
+        )
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

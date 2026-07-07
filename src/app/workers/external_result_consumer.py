@@ -69,6 +69,7 @@ async def process_pending_results(
     final_reply_service=None,
     llm_final_reply_enabled: bool = False,
     conversation_message_repository: ConversationMessageRepository | None = None,
+    concurrency: int = 15,
 ) -> list[dict]:
     worker_id = worker_id or default_worker_id()
     rows = await result_repository.lease_pending(limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
@@ -82,41 +83,42 @@ async def process_pending_results(
         )
     if conversation_message_repository is None and hasattr(result_repository, "pool"):
         conversation_message_repository = ConversationMessageRepository(result_repository.pool)
-    processed = []
-    for row in rows:
+    semaphore = asyncio.Semaphore(max(int(concurrency), 1))
+
+    async def process_one(row: dict) -> dict:
         try:
-            handler = build_result_handler(row)
-            recent_messages = (
-                await _load_recent_messages(row, conversation_message_repository) if llm_final_reply_enabled else []
-            )
-            handler = await _apply_backend_final_reply(
-                row,
-                handler,
-                recent_messages=recent_messages,
-                final_reply_service=final_reply_service,
-                llm_final_reply_enabled=llm_final_reply_enabled,
-            )
-            graph_state = handler["graph_state"]
-            outbound = build_result_outbox(row, handler["text"])
-            transaction_result = await transaction_repository.process_result_transactionally(
-                row,
-                graph_state=graph_state,
-                outbound_messages=[outbound],
-                external_commands=[],
-                summary_message=handler["summary_message"],
-            )
-            processed.append(
-                {
+            async with semaphore:
+                handler = build_result_handler(row)
+                recent_messages = (
+                    await _load_recent_messages(row, conversation_message_repository) if llm_final_reply_enabled else []
+                )
+                handler = await _apply_backend_final_reply(
+                    row,
+                    handler,
+                    recent_messages=recent_messages,
+                    final_reply_service=final_reply_service,
+                    llm_final_reply_enabled=llm_final_reply_enabled,
+                )
+                graph_state = handler["graph_state"]
+                outbound = build_result_outbox(row, handler["text"])
+                transaction_result = await transaction_repository.process_result_transactionally(
+                    row,
+                    graph_state=graph_state,
+                    outbound_messages=[outbound],
+                    external_commands=[],
+                    summary_message=handler["summary_message"],
+                )
+                return {
                     "id": row["id"],
                     "result_type": row["result_type"],
                     "status": "PROCESSED",
                     "outbound_inserts": transaction_result.get("outbound_inserts") or [],
                 }
-            )
         except Exception as exc:
             await result_repository.mark_processing_failed(row["id"], str(exc), max_retries=max_retries)
-            processed.append({"id": row["id"], "result_type": row.get("result_type"), "status": "FAILED", "error": str(exc)})
-    return processed
+            return {"id": row["id"], "result_type": row.get("result_type"), "status": "FAILED", "error": str(exc)}
+
+    return list(await asyncio.gather(*(process_one(row) for row in rows)))
 
 
 async def process_result_by_id(
@@ -575,8 +577,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--once", action="store_true", help="Run one external result batch and exit.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum external command results to process.")
     parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
-    parser.add_argument("--lease-seconds", type=int, default=60, help="Seconds before a queue lease expires.")
+    parser.add_argument("--lease-seconds", type=int, help="Seconds before a queue lease expires.")
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum processing attempts before FAILED.")
+    parser.add_argument("--concurrency", type=int, help="Maximum external command results to process concurrently.")
     parser.add_argument(
         "--recover-interval-seconds",
         type=int,
@@ -593,8 +596,9 @@ def default_worker_id() -> str:
 async def run_once(
     limit: int,
     worker_id: str | None = None,
-    lease_seconds: int = 60,
+    lease_seconds: int | None = None,
     max_retries: int = 3,
+    concurrency: int | None = None,
 ) -> dict:
     settings = Settings(
         livechat_agent_access_token="unused-for-external-result-consumer",
@@ -610,10 +614,11 @@ async def run_once(
             limit=limit,
             transaction_repository=ExternalResultTransactionRepository(pool),
             worker_id=worker_id,
-            lease_seconds=lease_seconds,
+            lease_seconds=lease_seconds if lease_seconds is not None else getattr(settings, "worker_lease_seconds", 300),
             max_retries=max_retries,
             final_reply_service=final_reply_service,
             llm_final_reply_enabled=getattr(settings, "llm_final_reply_enabled", False),
+            concurrency=concurrency if concurrency is not None else getattr(settings, "external_result_concurrency", 15),
         )
         return {
             "worker": "external_result_consumer",
@@ -650,9 +655,10 @@ async def maybe_recover_expired_leases(
 async def run_forever(
     limit: int,
     worker_id: str | None = None,
-    lease_seconds: int = 60,
+    lease_seconds: int | None = None,
     max_retries: int = 3,
     recover_interval_seconds: int = 30,
+    concurrency: int | None = None,
 ) -> None:
     settings = Settings(
         livechat_agent_access_token="unused-for-external-result-consumer",
@@ -676,10 +682,11 @@ async def run_forever(
             poll_seconds=settings.poll_seconds,
             limit=limit,
             worker_id=worker_id,
-            lease_seconds=lease_seconds,
+            lease_seconds=lease_seconds if lease_seconds is not None else getattr(settings, "worker_lease_seconds", 300),
             max_retries=max_retries,
             recover_interval_seconds=recover_interval_seconds,
             last_recovered_at=last_recovered_at,
+            concurrency=concurrency if concurrency is not None else getattr(settings, "external_result_concurrency", 15),
         )
     finally:
         pool.close()
@@ -702,6 +709,7 @@ async def run_polling_loop(
     sleep=asyncio.sleep,
     final_reply_service=None,
     llm_final_reply_enabled: bool = False,
+    concurrency: int = 15,
 ) -> None:
     iteration = 0
     while iterations is None or iteration < iterations:
@@ -722,6 +730,7 @@ async def run_polling_loop(
                 max_retries=max_retries,
                 final_reply_service=final_reply_service,
                 llm_final_reply_enabled=llm_final_reply_enabled,
+                concurrency=concurrency,
             )
         except Exception:
             logger.exception("external_result_consumer polling iteration failed.")
@@ -739,6 +748,7 @@ def main(argv: list[str] | None = None) -> int:
                 worker_id=args.worker_id,
                 lease_seconds=args.lease_seconds,
                 max_retries=args.max_retries,
+                concurrency=args.concurrency,
             )
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -750,6 +760,7 @@ def main(argv: list[str] | None = None) -> int:
                 lease_seconds=args.lease_seconds,
                 max_retries=args.max_retries,
                 recover_interval_seconds=args.recover_interval_seconds,
+                concurrency=args.concurrency,
             )
         )
     return 0

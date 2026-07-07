@@ -1,6 +1,10 @@
 import asyncio
+import io
+from urllib import error
 
-from app.channels.livechat.sender_client import LiveChatSenderClient
+import pytest
+
+from app.channels.livechat.sender_client import LiveChatApiError, LiveChatSenderClient
 
 
 def test_deactivate_chat_posts_livechat_deactivate_action(monkeypatch):
@@ -42,7 +46,63 @@ def test_send_text_adds_agent_to_chat_before_send(monkeypatch):
             "user_type": "agent",
             "visibility": "all",
             "ignore_requester_presence": True,
-            "ignore_agents_availability": True,
         },
     )
+    assert "ignore_agents_availability" not in calls[0][1]
     assert calls[1][0] == "/agent/action/send_event"
+
+
+def test_transfer_chat_to_group_keeps_ignore_agents_availability(monkeypatch):
+    client = LiveChatSenderClient("https://livechat.example/v3.6", "account-1", "token-1")
+    calls = []
+
+    async def fake_post_json(path: str, body: dict) -> dict:
+        calls.append((path, body))
+        return {"success": True}
+
+    monkeypatch.setattr(client, "_post_json", fake_post_json)
+
+    result = asyncio.run(
+        client.transfer_chat_to_group(
+            "chat-1",
+            7,
+            ignore_agents_availability=True,
+            ignore_requester_presence=False,
+        )
+    )
+
+    assert result == {"success": True}
+    assert calls == [
+        (
+            "/agent/action/transfer_chat",
+            {
+                "id": "chat-1",
+                "target": {"type": "group", "ids": [7]},
+                "ignore_agents_availability": True,
+                "ignore_requester_presence": False,
+            },
+        )
+    ]
+
+
+def test_post_json_error_includes_livechat_path(monkeypatch):
+    client = LiveChatSenderClient("https://livechat.example/v3.6", "account-1", "token-1")
+
+    def fake_urlopen(req, timeout):
+        del req, timeout
+        raise error.HTTPError(
+            url="https://livechat.example/v3.6/agent/action/add_user_to_chat",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=None,
+            fp=io.BytesIO(b"<HTML>edge error</HTML>"),
+        )
+
+    monkeypatch.setattr("app.channels.livechat.sender_client.request.urlopen", fake_urlopen)
+
+    with pytest.raises(LiveChatApiError) as exc_info:
+        client._post_json_sync("/agent/action/add_user_to_chat", {"chat_id": "chat-1"})
+
+    assert exc_info.value.status == 500
+    assert exc_info.value.data["path"] == "/agent/action/add_user_to_chat"
+    assert exc_info.value.data["raw"] == "<HTML>edge error</HTML>"

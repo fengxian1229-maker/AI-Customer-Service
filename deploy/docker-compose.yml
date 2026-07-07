@@ -2,10 +2,13 @@ services:
   ai-webhook:
     image: ai-customer-service:latest
     restart: unless-stopped
+    mem_limit: ${AI_WEBHOOK_MEMORY_LIMIT:-512m}
     env_file:
       - ${PRODUCTION_ENV_FILE:-production.env}
     environment:
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-service-account.json
+      MYSQL_POOL_MINSIZE: ${MYSQL_POOL_MINSIZE:-1}
+      MYSQL_POOL_MAXSIZE: ${MYSQL_POOL_MAXSIZE:-50}
     command: ["python", "-m", "app.workers.webhook_server", "--host", "0.0.0.0", "--port", "8087"]
     ports:
       - "8087:8087"
@@ -16,10 +19,23 @@ services:
   ai-worker:
     image: ai-customer-service:latest
     restart: unless-stopped
+    mem_limit: ${AI_WORKER_MEMORY_LIMIT:-2g}
     env_file:
       - ${PRODUCTION_ENV_FILE:-production.env}
     environment:
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-service-account.json
+      MYSQL_POOL_MINSIZE: ${MYSQL_POOL_MINSIZE:-1}
+      MYSQL_POOL_MAXSIZE: ${MYSQL_POOL_MAXSIZE:-50}
+      GATEWAY_CONCURRENCY: ${GATEWAY_CONCURRENCY:-15}
+      SENDER_CONCURRENCY: ${SENDER_CONCURRENCY:-15}
+      EXTERNAL_COMMAND_CONCURRENCY: ${EXTERNAL_COMMAND_CONCURRENCY:-15}
+      EXTERNAL_RESULT_CONCURRENCY: ${EXTERNAL_RESULT_CONCURRENCY:-15}
+      EXTERNAL_BACKEND_CONCURRENCY: ${EXTERNAL_BACKEND_CONCURRENCY:-5}
+      EXTERNAL_TELEGRAM_CONCURRENCY: ${EXTERNAL_TELEGRAM_CONCURRENCY:-5}
+      EXTERNAL_HANDOFF_CONCURRENCY: ${EXTERNAL_HANDOFF_CONCURRENCY:-3}
+      TELEGRAM_REPLY_CONCURRENCY: ${TELEGRAM_REPLY_CONCURRENCY:-1}
+      WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-300}
+      WORKER_LEASE_RECOVERY_SECONDS: ${WORKER_LEASE_RECOVERY_SECONDS:-60}
     command: ["python", "-m", "app.workers.service_runner", "--all"]
     secrets:
       - source: google_service_account

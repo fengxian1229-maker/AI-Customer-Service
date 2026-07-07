@@ -68,6 +68,70 @@ class InboundEventRepository:
             self._normalize_inbound_row(row)
         return rows
 
+    async def lease_unprocessed(self, limit: int, worker_id: str, lease_seconds: int) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                rows = await self._lease_unprocessed_on_connection(conn, limit, worker_id, lease_seconds)
+                await conn.commit()
+                return rows
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def _lease_unprocessed_on_connection(self, conn, limit: int, worker_id: str, lease_seconds: int) -> list[dict]:
+        select_sql = """
+        SELECT ie.id
+        FROM inbound_events ie
+        WHERE ie.processed = 0
+          AND ie.ignored = 0
+          AND (ie.locked_by IS NULL OR ie.lease_expires_at IS NULL OR ie.lease_expires_at < NOW(6))
+          AND NOT EXISTS (
+            SELECT 1
+            FROM inbound_events earlier
+            WHERE earlier.processed = 0
+              AND earlier.ignored = 0
+              AND COALESCE(earlier.chat_id, CONCAT('inbound:', earlier.id)) = COALESCE(ie.chat_id, CONCAT('inbound:', ie.id))
+              AND earlier.id < ie.id
+          )
+        ORDER BY ie.id ASC
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+        """
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(select_sql, (limit,))
+            id_rows = await cur.fetchall()
+            ids = [row["id"] for row in id_rows]
+            if not ids:
+                return []
+
+            placeholders = ", ".join(["%s"] * len(ids))
+            update_sql = f"""
+            UPDATE inbound_events
+            SET leased_at = NOW(6),
+                lease_expires_at = DATE_ADD(NOW(6), INTERVAL %s SECOND),
+                locked_by = %s,
+                attempted_at = NOW(6),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """
+            await cur.execute(update_sql, (lease_seconds, worker_id, *ids))
+
+            fetch_sql = f"""
+            SELECT id, chat_id, thread_id, event_id, event_type, standard_event_type,
+                   author_id, sender_role, occurred_at, dedup_key, payload_json,
+                   raw_action, source, organization_id, ignored, ignore_reason,
+                   leased_at, lease_expires_at, locked_by, attempted_at, processed_at
+            FROM inbound_events
+            WHERE id IN ({placeholders})
+            ORDER BY id ASC
+            """
+            await cur.execute(fetch_sql, tuple(ids))
+            rows = await cur.fetchall()
+        for row in rows:
+            self._normalize_inbound_row(row)
+        return rows
+
     async def fetch_unprocessed_by_id(self, inbound_event_id: int) -> dict | None:
         sql = """
         SELECT id, chat_id, thread_id, event_id, event_type, standard_event_type,
@@ -98,9 +162,54 @@ class InboundEventRepository:
             await self.mark_processed_on_connection(conn, inbound_event_id)
 
     async def mark_processed_on_connection(self, conn, inbound_event_id: int) -> None:
-        sql = "UPDATE inbound_events SET processed = 1 WHERE id = %s"
+        sql = """
+        UPDATE inbound_events
+        SET processed = 1,
+            processed_at = NOW(6),
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL
+        WHERE id = %s
+        """
         async with conn.cursor() as cur:
             await cur.execute(sql, (inbound_event_id,))
+
+    async def release_lease(self, inbound_event_id: int) -> None:
+        sql = """
+        UPDATE inbound_events
+        SET leased_at = NULL, lease_expires_at = NULL, locked_by = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (inbound_event_id,))
+
+    async def extend_lease(self, inbound_event_id: int, worker_id: str, lease_seconds: int) -> int:
+        sql = """
+        UPDATE inbound_events
+        SET lease_expires_at = DATE_ADD(NOW(6), INTERVAL %s SECOND), updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+          AND locked_by = %s
+          AND processed = 0
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (lease_seconds, inbound_event_id, worker_id))
+                return cur.rowcount
+
+    async def recover_expired_leases(self) -> int:
+        sql = """
+        UPDATE inbound_events
+        SET leased_at = NULL, lease_expires_at = NULL, locked_by = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE processed = 0
+          AND ignored = 0
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < NOW(6)
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql)
+                return cur.rowcount
 
 
 class ConversationRepository:
@@ -292,6 +401,123 @@ class OutboundMessageRepository:
             row["payload_json"] = json_loads(row["payload_json"])
         return rows
 
+    async def lease_pending_groups(
+        self,
+        limit: int,
+        worker_id: str,
+        lease_seconds: int,
+        max_per_conversation: int = 20,
+    ) -> list[list[dict]]:
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                groups = await self._lease_pending_groups_on_connection(
+                    conn,
+                    limit=limit,
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                    max_per_conversation=max_per_conversation,
+                )
+                await conn.commit()
+                return groups
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def _lease_pending_groups_on_connection(
+        self,
+        conn,
+        limit: int,
+        worker_id: str,
+        lease_seconds: int,
+        max_per_conversation: int,
+    ) -> list[list[dict]]:
+        conversation_sql = """
+        SELECT COALESCE(m.conversation_id, CONCAT('outbound:', m.id)) AS lease_conversation_id, m.id AS first_id
+        FROM outbound_messages m
+        WHERE m.status IN ('PENDING', 'RETRYABLE')
+          AND (m.locked_by IS NULL OR m.lease_expires_at IS NULL OR m.lease_expires_at < NOW(6))
+          AND NOT EXISTS (
+            SELECT 1
+            FROM outbound_messages earlier
+            WHERE earlier.status IN ('PENDING', 'RETRYABLE')
+              AND COALESCE(earlier.conversation_id, CONCAT('outbound:', earlier.id)) =
+                  COALESCE(m.conversation_id, CONCAT('outbound:', m.id))
+              AND earlier.id < m.id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM outbound_messages locked
+            WHERE locked.status IN ('PENDING', 'RETRYABLE')
+              AND COALESCE(locked.conversation_id, CONCAT('outbound:', locked.id)) =
+                  COALESCE(m.conversation_id, CONCAT('outbound:', m.id))
+              AND locked.locked_by IS NOT NULL
+              AND locked.lease_expires_at IS NOT NULL
+              AND locked.lease_expires_at >= NOW(6)
+          )
+        ORDER BY first_id ASC
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+        """
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(conversation_sql, (limit,))
+            conversation_rows = await cur.fetchall()
+            conversation_ids = [row["lease_conversation_id"] for row in conversation_rows]
+            if not conversation_ids:
+                return []
+
+            groups: list[list[dict]] = []
+            for conversation_id in conversation_ids:
+                select_sql = """
+                SELECT id
+                FROM outbound_messages
+                WHERE status IN ('PENDING', 'RETRYABLE')
+                  AND (locked_by IS NULL OR lease_expires_at IS NULL OR lease_expires_at < NOW(6))
+                  AND COALESCE(conversation_id, CONCAT('outbound:', id)) = %s
+                ORDER BY COALESCE(block_index, 2147483647), id ASC
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+                """
+                await cur.execute(select_sql, (conversation_id, max_per_conversation))
+                id_rows = await cur.fetchall()
+                ids = [row["id"] for row in id_rows]
+                if not ids:
+                    continue
+
+                placeholders = ", ".join(["%s"] * len(ids))
+                update_sql = f"""
+                UPDATE outbound_messages
+                SET leased_at = NOW(6),
+                    lease_expires_at = DATE_ADD(NOW(6), INTERVAL %s SECOND),
+                    locked_by = %s,
+                    attempted_at = NOW(6),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({placeholders})
+                """
+                await cur.execute(update_sql, (lease_seconds, worker_id, *ids))
+
+                fetch_sql = f"""
+                SELECT m.id, COALESCE(c.tenant_id, 'default') AS tenant_id,
+                       COALESCE(c.channel_type, 'livechat') AS channel_type,
+                       m.conversation_id, m.inbound_event_id, m.chat_id, m.thread_id,
+                       m.action_type, m.message_type, m.payload_json, m.status,
+                       m.dedup_key, m.block_index, m.message_kind, m.command_type,
+                       m.leased_at, m.lease_expires_at, m.locked_by, m.attempted_at, m.processed_at,
+                       c.status AS conversation_status,
+                       c.active_workflow AS conversation_active_workflow,
+                       c.workflow_stage AS conversation_workflow_stage
+                FROM outbound_messages m
+                LEFT JOIN conversation_states c ON c.conversation_id = m.conversation_id
+                WHERE m.id IN ({placeholders})
+                ORDER BY COALESCE(m.block_index, 2147483647), m.id ASC
+                """
+                await cur.execute(fetch_sql, tuple(ids))
+                rows = await cur.fetchall()
+                for row in rows:
+                    row["payload_json"] = json_loads(row["payload_json"])
+                groups.append(rows)
+        return groups
+
     async def fetch_handoff_ack_by_event(self, conversation_id: str, inbound_event_id: int) -> dict | None:
         sql = """
         SELECT id, conversation_id, inbound_event_id, status, last_error, sent_at, payload_json
@@ -315,7 +541,17 @@ class OutboundMessageRepository:
             await self.mark_sent_on_connection(conn, outbound_message_id)
 
     async def mark_sent_on_connection(self, conn, outbound_message_id: int) -> None:
-        sql = "UPDATE outbound_messages SET status = 'SENT', sent_at = NOW(6), last_error = NULL WHERE id = %s"
+        sql = """
+        UPDATE outbound_messages
+        SET status = 'SENT',
+            sent_at = NOW(6),
+            processed_at = NOW(6),
+            last_error = NULL,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL
+        WHERE id = %s
+        """
         async with conn.cursor() as cur:
             await cur.execute(sql, (outbound_message_id,))
 
@@ -327,10 +563,54 @@ class OutboundMessageRepository:
         retryable: bool = False,
     ) -> None:
         retry_sql = ", retry_count = retry_count + 1" if retryable else ""
-        sql = f"UPDATE outbound_messages SET status = %s, last_error = %s{retry_sql} WHERE id = %s"
+        sql = f"""
+        UPDATE outbound_messages
+        SET status = %s,
+            last_error = %s{retry_sql},
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            locked_by = NULL
+        WHERE id = %s
+        """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, (status, error, outbound_message_id))
+
+    async def release_lease(self, outbound_message_id: int) -> None:
+        sql = """
+        UPDATE outbound_messages
+        SET leased_at = NULL, lease_expires_at = NULL, locked_by = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (outbound_message_id,))
+
+    async def extend_lease(self, outbound_message_id: int, worker_id: str, lease_seconds: int) -> int:
+        sql = """
+        UPDATE outbound_messages
+        SET lease_expires_at = DATE_ADD(NOW(6), INTERVAL %s SECOND), updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+          AND locked_by = %s
+          AND status IN ('PENDING', 'RETRYABLE')
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, (lease_seconds, outbound_message_id, worker_id))
+                return cur.rowcount
+
+    async def recover_expired_leases(self) -> int:
+        sql = """
+        UPDATE outbound_messages
+        SET leased_at = NULL, lease_expires_at = NULL, locked_by = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE status IN ('PENDING', 'RETRYABLE')
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < NOW(6)
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql)
+                return cur.rowcount
 
     async def mark_pending_by_inbound_event_skipped(
         self,

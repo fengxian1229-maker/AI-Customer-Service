@@ -109,7 +109,13 @@ class LiveChatSenderClient:
         )
         url = str(uploaded.get("url") or "").strip()
         if not url:
-            raise LiveChatApiError(502, {"error": {"message": f"upload_file returned no url: {uploaded}"}})
+            raise LiveChatApiError(
+                502,
+                {
+                    "path": "/agent/action/upload_file",
+                    "error": {"message": f"upload_file returned no url: {uploaded}"},
+                },
+            )
         body = {
             "chat_id": chat_id,
             "event": {
@@ -145,7 +151,6 @@ class LiveChatSenderClient:
             "user_type": "agent",
             "visibility": "all",
             "ignore_requester_presence": True,
-            "ignore_agents_availability": True,
         }
         try:
             return await self._post_json("/agent/action/add_user_to_chat", body)
@@ -244,7 +249,7 @@ class LiveChatSenderClient:
                 data = json.loads(payload) if payload else {}
             except json.JSONDecodeError:
                 data = {"raw": payload}
-            raise LiveChatApiError(exc.code, data) from exc
+            raise LiveChatApiError(exc.code, _with_livechat_path(data, "/agent/action/upload_file")) from exc
 
     def _post_json_sync(self, path: str, body: dict) -> dict:
         raw_body = json.dumps(body).encode("utf-8")
@@ -267,7 +272,7 @@ class LiveChatSenderClient:
                 data = json.loads(payload) if payload else {}
             except json.JSONDecodeError:
                 data = {"raw": payload}
-            raise LiveChatApiError(exc.code, data) from exc
+            raise LiveChatApiError(exc.code, _with_livechat_path(data, path)) from exc
 
 
 class LiveChatApiError(RuntimeError):
@@ -275,6 +280,10 @@ class LiveChatApiError(RuntimeError):
         self.status = status
         self.data = data
         super().__init__(f"LiveChat API returned HTTP {status}: {data}")
+
+
+def _with_livechat_path(data: dict, path: str) -> dict:
+    return {**data, "path": path}
 
 
 def _content_type_for_name(name: str) -> str:

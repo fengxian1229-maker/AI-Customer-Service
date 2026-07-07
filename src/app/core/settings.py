@@ -56,9 +56,21 @@ class Settings(BaseSettings):
     mysql_user: str = "root"
     mysql_password: str = ""
     mysql_database: str = "ai_customer_service"
+    mysql_pool_minsize: int = 1
+    mysql_pool_maxsize: int = 50
 
     poll_seconds: int = 5
     poll_limit: int = 20
+    gateway_concurrency: int = 15
+    sender_concurrency: int = 15
+    external_command_concurrency: int = 15
+    external_result_concurrency: int = 15
+    external_backend_concurrency: int = 5
+    external_telegram_concurrency: int = 5
+    external_handoff_concurrency: int = 3
+    telegram_reply_concurrency: int = 1
+    worker_lease_seconds: int = 300
+    worker_lease_recovery_seconds: int = 60
     livechat_allowed_group_ids: str = ""
     langgraph_checkpoint_mode: str = "off"
     langgraph_checkpoint_setup_on_start: bool = False

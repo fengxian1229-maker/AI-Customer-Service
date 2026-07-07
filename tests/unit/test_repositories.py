@@ -1595,6 +1595,143 @@ def test_external_command_lease_pending_uses_skip_locked_and_returns_rows():
     assert rows[0]["payload_json"] == {"ok": True}
 
 
+def test_inbound_event_lease_unprocessed_uses_skip_locked_and_returns_rows():
+    import asyncio
+
+    class LeaseCursor(FakeCursor):
+        def __init__(self) -> None:
+            super().__init__(rowcount=1)
+            self.executed = []
+
+        async def execute(self, sql, args):
+            self.sql = sql
+            self.args = args
+            self.executed.append((sql, args))
+
+        async def fetchall(self):
+            if self.sql.strip().startswith("SELECT ie.id"):
+                return [{"id": 1}]
+            return [
+                {
+                    "id": 1,
+                    "source": "livechat_webhook",
+                    "raw_action": "incoming_event",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "event_id": "event-1",
+                    "event_type": "message",
+                    "standard_event_type": "MESSAGE_CREATED",
+                    "author_id": "user-1",
+                    "sender_role": "external",
+                    "occurred_at": "2026-06-24 00:00:00.000000",
+                    "dedup_key": "dedup-1",
+                    "payload_json": '{"event":{"text":"hi"}}',
+                    "organization_id": None,
+                    "ignored": 0,
+                    "ignore_reason": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "locked_by": "gateway-a",
+                    "attempted_at": None,
+                    "processed_at": None,
+                }
+            ]
+
+    cursor = LeaseCursor()
+    repository = InboundEventRepository(FakePool(cursor))
+
+    rows = asyncio.run(repository.lease_unprocessed(limit=15, worker_id="gateway-a", lease_seconds=300))
+
+    assert "FOR UPDATE SKIP LOCKED" in cursor.executed[0][0]
+    assert "earlier.id < ie.id" in cursor.executed[0][0]
+    assert "lease_expires_at < NOW(6)" in cursor.executed[0][0]
+    assert cursor.executed[1][1] == (300, "gateway-a", 1)
+    assert rows[0]["payload_json"] == {"event": {"text": "hi"}}
+
+
+def test_outbound_message_lease_pending_groups_locks_conversation_groups():
+    import asyncio
+
+    class LeaseCursor(FakeCursor):
+        def __init__(self) -> None:
+            super().__init__(rowcount=1)
+            self.executed = []
+
+        async def execute(self, sql, args):
+            self.sql = sql
+            self.args = args
+            self.executed.append((sql, args))
+
+        async def fetchall(self):
+            if "lease_conversation_id" in self.sql:
+                return [{"lease_conversation_id": "livechat:chat-1", "first_id": 10}]
+            if self.sql.strip().startswith("SELECT id"):
+                return [{"id": 10}, {"id": 11}]
+            return [
+                {
+                    "id": 10,
+                    "tenant_id": "default",
+                    "channel_type": "livechat",
+                    "conversation_id": "livechat:chat-1",
+                    "inbound_event_id": 1,
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "action_type": "livechat.send_text",
+                    "message_type": "text",
+                    "payload_json": '{"text":"first"}',
+                    "status": "PENDING",
+                    "dedup_key": "d1",
+                    "block_index": 0,
+                    "message_kind": "text",
+                    "command_type": "livechat.send_text",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "locked_by": "sender-a",
+                    "attempted_at": None,
+                    "processed_at": None,
+                    "conversation_status": "AI_ACTIVE",
+                    "conversation_active_workflow": None,
+                    "conversation_workflow_stage": None,
+                },
+                {
+                    "id": 11,
+                    "tenant_id": "default",
+                    "channel_type": "livechat",
+                    "conversation_id": "livechat:chat-1",
+                    "inbound_event_id": 1,
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "action_type": "livechat.send_text",
+                    "message_type": "text",
+                    "payload_json": '{"text":"second"}',
+                    "status": "PENDING",
+                    "dedup_key": "d2",
+                    "block_index": 1,
+                    "message_kind": "text",
+                    "command_type": "livechat.send_text",
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "locked_by": "sender-a",
+                    "attempted_at": None,
+                    "processed_at": None,
+                    "conversation_status": "AI_ACTIVE",
+                    "conversation_active_workflow": None,
+                    "conversation_workflow_stage": None,
+                },
+            ]
+
+    cursor = LeaseCursor()
+    repository = OutboundMessageRepository(FakePool(cursor))
+
+    groups = asyncio.run(repository.lease_pending_groups(limit=15, worker_id="sender-a", lease_seconds=300))
+
+    assert "FOR UPDATE SKIP LOCKED" in cursor.executed[0][0]
+    assert "locked.lease_expires_at >= NOW(6)" in cursor.executed[0][0]
+    assert "earlier.id < m.id" in cursor.executed[0][0]
+    assert cursor.executed[2][1] == (300, "sender-a", 10, 11)
+    assert [row["payload_json"]["text"] for row in groups[0]] == ["first", "second"]
+
+
 def test_external_command_lease_pending_returns_empty_when_no_available_rows():
     import asyncio
 

@@ -30,20 +30,47 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
 
 
 async def ensure_inbound_events_compat(cur) -> None:
-    await cur.execute("SHOW COLUMNS FROM inbound_events")
-    columns = {row[0] for row in await cur.fetchall()}
-    additions = {
-        "organization_id": "ALTER TABLE inbound_events ADD COLUMN organization_id VARCHAR(128) NULL",
-        "standard_event_type": "ALTER TABLE inbound_events ADD COLUMN standard_event_type VARCHAR(64) NOT NULL DEFAULT 'UNSUPPORTED'",
-        "author_id": "ALTER TABLE inbound_events ADD COLUMN author_id VARCHAR(128) NULL",
-        "ignored": "ALTER TABLE inbound_events ADD COLUMN ignored TINYINT(1) NOT NULL DEFAULT 0",
-        "ignore_reason": "ALTER TABLE inbound_events ADD COLUMN ignore_reason VARCHAR(128) NULL",
-        "processed": "ALTER TABLE inbound_events ADD COLUMN processed TINYINT(1) NOT NULL DEFAULT 0",
-        "updated_at": "ALTER TABLE inbound_events ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
-    }
-    for column, statement in additions.items():
-        if column not in columns:
-            await cur.execute(statement)
+    columns = await fetch_columns(cur, "inbound_events")
+    await ensure_columns(
+        cur,
+        "inbound_events",
+        {
+            "organization_id": "ALTER TABLE inbound_events ADD COLUMN organization_id VARCHAR(128) NULL",
+            "standard_event_type": (
+                "ALTER TABLE inbound_events ADD COLUMN standard_event_type VARCHAR(64) NOT NULL DEFAULT 'UNSUPPORTED'"
+            ),
+            "author_id": "ALTER TABLE inbound_events ADD COLUMN author_id VARCHAR(128) NULL",
+            "ignored": "ALTER TABLE inbound_events ADD COLUMN ignored TINYINT(1) NOT NULL DEFAULT 0",
+            "ignore_reason": "ALTER TABLE inbound_events ADD COLUMN ignore_reason VARCHAR(128) NULL",
+            "processed": "ALTER TABLE inbound_events ADD COLUMN processed TINYINT(1) NOT NULL DEFAULT 0",
+            "leased_at": "ALTER TABLE inbound_events ADD COLUMN leased_at DATETIME(6) NULL",
+            "lease_expires_at": "ALTER TABLE inbound_events ADD COLUMN lease_expires_at DATETIME(6) NULL",
+            "locked_by": "ALTER TABLE inbound_events ADD COLUMN locked_by VARCHAR(128) NULL",
+            "attempted_at": "ALTER TABLE inbound_events ADD COLUMN attempted_at DATETIME(6) NULL",
+            "processed_at": "ALTER TABLE inbound_events ADD COLUMN processed_at DATETIME(6) NULL",
+            "updated_at": (
+                "ALTER TABLE inbound_events "
+                "ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+            ),
+        },
+    )
+    await ensure_indexes(
+        cur,
+        "inbound_events",
+        {
+            "idx_inbound_events_processed_lease_id": (
+                "CREATE INDEX idx_inbound_events_processed_lease_id "
+                "ON inbound_events (processed, ignored, lease_expires_at, id)"
+            ),
+            "idx_inbound_events_locked_by": (
+                "CREATE INDEX idx_inbound_events_locked_by ON inbound_events (locked_by)"
+            ),
+            "idx_inbound_events_chat_lease_id": (
+                "CREATE INDEX idx_inbound_events_chat_lease_id "
+                "ON inbound_events (chat_id, processed, lease_expires_at, id)"
+            ),
+        },
+    )
     if "account_id" in columns:
         await cur.execute("ALTER TABLE inbound_events MODIFY account_id VARCHAR(128) NULL")
     if "created_at" in columns:
@@ -59,6 +86,11 @@ async def ensure_outbound_messages_compat(cur) -> None:
             "block_index": "ALTER TABLE outbound_messages ADD COLUMN block_index INT NULL",
             "message_kind": "ALTER TABLE outbound_messages ADD COLUMN message_kind VARCHAR(64) NULL",
             "command_type": "ALTER TABLE outbound_messages ADD COLUMN command_type VARCHAR(128) NULL",
+            "leased_at": "ALTER TABLE outbound_messages ADD COLUMN leased_at DATETIME(6) NULL",
+            "lease_expires_at": "ALTER TABLE outbound_messages ADD COLUMN lease_expires_at DATETIME(6) NULL",
+            "locked_by": "ALTER TABLE outbound_messages ADD COLUMN locked_by VARCHAR(128) NULL",
+            "attempted_at": "ALTER TABLE outbound_messages ADD COLUMN attempted_at DATETIME(6) NULL",
+            "processed_at": "ALTER TABLE outbound_messages ADD COLUMN processed_at DATETIME(6) NULL",
         },
     )
     await ensure_indexes(
@@ -67,6 +99,17 @@ async def ensure_outbound_messages_compat(cur) -> None:
         {
             "uk_outbound_messages_dedup_key": (
                 "CREATE UNIQUE INDEX uk_outbound_messages_dedup_key ON outbound_messages (dedup_key)"
+            ),
+            "idx_outbound_messages_status_lease_created": (
+                "CREATE INDEX idx_outbound_messages_status_lease_created "
+                "ON outbound_messages (status, lease_expires_at, created_at)"
+            ),
+            "idx_outbound_messages_locked_by": (
+                "CREATE INDEX idx_outbound_messages_locked_by ON outbound_messages (locked_by)"
+            ),
+            "idx_outbound_messages_conversation_status_created": (
+                "CREATE INDEX idx_outbound_messages_conversation_status_created "
+                "ON outbound_messages (conversation_id, status, created_at, id)"
             ),
         },
     )

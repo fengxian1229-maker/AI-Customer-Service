@@ -18,6 +18,15 @@ def test_settings_defaults():
     assert settings.livechat_polling_enabled is True
     assert settings.webhook_server_host == "0.0.0.0"
     assert settings.webhook_server_port == 8000
+    assert settings.mysql_pool_maxsize == 50
+    assert settings.gateway_concurrency == 15
+    assert settings.sender_concurrency == 15
+    assert settings.external_command_concurrency == 15
+    assert settings.external_result_concurrency == 15
+    assert settings.external_backend_concurrency == 5
+    assert settings.external_telegram_concurrency == 5
+    assert settings.external_handoff_concurrency == 3
+    assert settings.worker_lease_seconds == 300
 
 
 def test_settings_accepts_text_com_webhook_secret_alias(monkeypatch):
@@ -143,6 +152,49 @@ def test_outbound_messages_schema_has_multiblock_dedup_fields():
         assert "command_type VARCHAR(128) NULL" in ddl
     assert "UNIQUE KEY uk_outbound_messages_dedup_key (dedup_key)" in sql
     assert "uk_outbound_messages_dedup_key" in migration
+
+
+def test_inbound_and_outbound_schemas_have_lease_fields_and_indexes():
+    from pathlib import Path
+
+    inbound_sql = Path("sql/001_inbound_events.sql").read_text()
+    outbound_sql = Path("sql/003_outbound_messages.sql").read_text()
+
+    for sql in (inbound_sql, outbound_sql):
+        assert "leased_at DATETIME(6) NULL" in sql
+        assert "lease_expires_at DATETIME(6) NULL" in sql
+        assert "locked_by VARCHAR(128) NULL" in sql
+        assert "attempted_at DATETIME(6) NULL" in sql
+        assert "processed_at DATETIME(6) NULL" in sql
+    assert "KEY idx_inbound_events_processed_lease_id" in inbound_sql
+    assert "KEY idx_inbound_events_locked_by (locked_by)" in inbound_sql
+    assert "KEY idx_outbound_messages_status_lease_created" in outbound_sql
+    assert "KEY idx_outbound_messages_locked_by (locked_by)" in outbound_sql
+
+
+def test_deploy_files_expose_concurrency_and_memory_envs():
+    from pathlib import Path
+
+    env = Path("deploy/production.env.example").read_text()
+    compose = Path("deploy/docker-compose.yml").read_text()
+
+    for key in [
+        "MYSQL_POOL_MAXSIZE",
+        "GATEWAY_CONCURRENCY",
+        "SENDER_CONCURRENCY",
+        "EXTERNAL_COMMAND_CONCURRENCY",
+        "EXTERNAL_RESULT_CONCURRENCY",
+        "EXTERNAL_BACKEND_CONCURRENCY",
+        "EXTERNAL_TELEGRAM_CONCURRENCY",
+        "EXTERNAL_HANDOFF_CONCURRENCY",
+        "WORKER_LEASE_SECONDS",
+        "AI_WEBHOOK_MEMORY_LIMIT",
+        "AI_WORKER_MEMORY_LIMIT",
+    ]:
+        assert key in env
+        assert key in compose
+    assert "mem_limit: ${AI_WEBHOOK_MEMORY_LIMIT:-512m}" in compose
+    assert "mem_limit: ${AI_WORKER_MEMORY_LIMIT:-2g}" in compose
 
 
 def test_telegram_cases_schema_has_reply_lookup_tables():

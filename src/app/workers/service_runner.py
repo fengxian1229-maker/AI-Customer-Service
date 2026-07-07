@@ -63,6 +63,16 @@ class ServiceRunnerConfig:
     max_iterations: int | None
     stop_on_error: bool
     shutdown_timeout_seconds: float
+    gateway_concurrency: int = 15
+    sender_concurrency: int = 15
+    external_command_concurrency: int = 15
+    external_result_concurrency: int = 15
+    external_backend_concurrency: int = 5
+    external_telegram_concurrency: int = 5
+    external_handoff_concurrency: int = 3
+    telegram_reply_concurrency: int = 1
+    worker_lease_seconds: int = 300
+    worker_lease_recovery_seconds: int = 60
     livechat_idle_followup_seconds: int = livechat_idle_timer.DEFAULT_FOLLOWUP_SECONDS
     livechat_idle_close_seconds: int = livechat_idle_timer.DEFAULT_CLOSE_SECONDS
 
@@ -77,6 +87,7 @@ class ServiceRunnerContext:
     config: ServiceRunnerConfig
     external_command_worker_id: str = field(default_factory=lambda: f"service-runner-external-command-{socket.gethostname()}")
     external_result_worker_id: str = field(default_factory=lambda: f"service-runner-external-result-{socket.gethostname()}")
+    lease_recovered_at: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -149,6 +160,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--external-result-limit", type=int, default=20)
     parser.add_argument("--telegram-reply-limit", type=int, default=20)
     parser.add_argument("--livechat-idle-timer-limit", type=int, default=20)
+    parser.add_argument("--gateway-concurrency", type=int)
+    parser.add_argument("--sender-concurrency", type=int)
+    parser.add_argument("--external-command-concurrency", type=int)
+    parser.add_argument("--external-result-concurrency", type=int)
+    parser.add_argument("--external-backend-concurrency", type=int)
+    parser.add_argument("--external-telegram-concurrency", type=int)
+    parser.add_argument("--external-handoff-concurrency", type=int)
+    parser.add_argument("--telegram-reply-concurrency", type=int)
+    parser.add_argument("--worker-lease-seconds", type=int)
+    parser.add_argument("--worker-lease-recovery-seconds", type=int)
     parser.add_argument(
         "--shutdown-timeout-seconds",
         type=float,
@@ -209,6 +230,9 @@ async def run_async(args: argparse.Namespace) -> dict:
 
 def build_config(args: argparse.Namespace, settings: Settings) -> ServiceRunnerConfig:
     max_iterations = 1 if args.once else args.max_iterations
+    def setting(name: str, default):
+        return getattr(settings, name, default)
+
     return ServiceRunnerConfig(
         poll_seconds=args.poll_seconds if args.poll_seconds is not None else settings.poll_seconds,
         gateway_seconds=args.gateway_seconds,
@@ -226,6 +250,42 @@ def build_config(args: argparse.Namespace, settings: Settings) -> ServiceRunnerC
         external_result_limit=args.external_result_limit,
         telegram_reply_limit=args.telegram_reply_limit,
         livechat_idle_timer_limit=args.livechat_idle_timer_limit,
+        gateway_concurrency=args.gateway_concurrency if args.gateway_concurrency is not None else setting("gateway_concurrency", 15),
+        sender_concurrency=args.sender_concurrency if args.sender_concurrency is not None else setting("sender_concurrency", 15),
+        external_command_concurrency=(
+            args.external_command_concurrency
+            if args.external_command_concurrency is not None
+            else setting("external_command_concurrency", 15)
+        ),
+        external_result_concurrency=(
+            args.external_result_concurrency
+            if args.external_result_concurrency is not None
+            else setting("external_result_concurrency", 15)
+        ),
+        external_backend_concurrency=(
+            args.external_backend_concurrency
+            if args.external_backend_concurrency is not None
+            else setting("external_backend_concurrency", 5)
+        ),
+        external_telegram_concurrency=(
+            args.external_telegram_concurrency
+            if args.external_telegram_concurrency is not None
+            else setting("external_telegram_concurrency", 5)
+        ),
+        external_handoff_concurrency=(
+            args.external_handoff_concurrency
+            if args.external_handoff_concurrency is not None
+            else setting("external_handoff_concurrency", 3)
+        ),
+        telegram_reply_concurrency=(
+            args.telegram_reply_concurrency if args.telegram_reply_concurrency is not None else setting("telegram_reply_concurrency", 1)
+        ),
+        worker_lease_seconds=args.worker_lease_seconds if args.worker_lease_seconds is not None else setting("worker_lease_seconds", 300),
+        worker_lease_recovery_seconds=(
+            args.worker_lease_recovery_seconds
+            if args.worker_lease_recovery_seconds is not None
+            else setting("worker_lease_recovery_seconds", 60)
+        ),
         max_iterations=max_iterations,
         stop_on_error=bool(args.stop_on_error),
         shutdown_timeout_seconds=args.shutdown_timeout_seconds,
@@ -317,11 +377,14 @@ async def polling_tick(context: ServiceRunnerContext) -> dict:
 
 
 async def gateway_tick(context: ServiceRunnerContext) -> dict:
+    await maybe_recover_worker_leases(context, "inbound_events", InboundEventRepository(context.pool))
     result = await gateway_consumer.process_next_batch(
         context.pool,
         limit=context.config.gateway_limit,
         checkpoint_mode=context.settings.langgraph_checkpoint_mode,
         settings=context.settings,
+        concurrency=context.config.gateway_concurrency,
+        lease_seconds=context.config.worker_lease_seconds,
     )
     return {
         "worker": "gateway_consumer",
@@ -330,14 +393,18 @@ async def gateway_tick(context: ServiceRunnerContext) -> dict:
         "enqueued": result["enqueued"],
         "failures": result.get("failures", []),
         "llm": result.get("llm"),
+        "concurrency": result.get("concurrency"),
     }
 
 
 async def sender_tick(context: ServiceRunnerContext) -> dict:
+    await maybe_recover_worker_leases(context, "outbound_messages", OutboundMessageRepository(context.pool))
     results = await sender_worker.process_next_batch(
         context.pool,
         context.sender_client,
         limit=context.config.sender_limit,
+        concurrency=context.config.sender_concurrency,
+        lease_seconds=context.config.worker_lease_seconds,
     )
     return {
         "worker": "sender_worker",
@@ -345,12 +412,15 @@ async def sender_tick(context: ServiceRunnerContext) -> dict:
         "sent": sum(1 for result in results if result.get("status") == "SENT"),
         "failed": sum(1 for result in results if result.get("status") != "SENT"),
         "retryable": sum(1 for result in results if result.get("status") == "RETRYABLE"),
+        "concurrency": context.config.sender_concurrency,
     }
 
 
 async def external_command_tick(context: ServiceRunnerContext) -> dict:
+    command_repository = ExternalCommandRepository(context.pool)
+    await maybe_recover_worker_leases(context, "external_commands", command_repository)
     results = await external_command_worker.process_pending_commands(
-        ExternalCommandRepository(context.pool),
+        command_repository,
         result_repository=ExternalCommandResultRepository(context.pool),
         conversation_repository=ConversationRepository(context.pool),
         outbound_repository=OutboundMessageRepository(context.pool),
@@ -362,6 +432,11 @@ async def external_command_tick(context: ServiceRunnerContext) -> dict:
         execute_backend=True,
         settings=context.settings,
         worker_id=context.external_command_worker_id,
+        lease_seconds=context.config.worker_lease_seconds,
+        concurrency=context.config.external_command_concurrency,
+        backend_concurrency=context.config.external_backend_concurrency,
+        telegram_concurrency=context.config.external_telegram_concurrency,
+        handoff_concurrency=context.config.external_handoff_concurrency,
     )
     summary = external_command_worker.summarize_results(results)
     return {
@@ -373,11 +448,13 @@ async def external_command_tick(context: ServiceRunnerContext) -> dict:
         "emitted_result": summary["results_emitted"],
         "skipped": summary["skipped"],
         "blocked": summary["blocked"],
+        "concurrency": context.config.external_command_concurrency,
     }
 
 
 async def external_result_tick(context: ServiceRunnerContext) -> dict:
     result_repository = ExternalCommandResultRepository(context.pool)
+    await maybe_recover_worker_leases(context, "external_command_results", result_repository)
     conversation_repository = ConversationRepository(context.pool)
     outbound_repository = OutboundMessageRepository(context.pool)
     final_reply_service = build_final_reply_service_from_settings(context.settings)
@@ -393,24 +470,47 @@ async def external_result_tick(context: ServiceRunnerContext) -> dict:
         ),
         limit=context.config.external_result_limit,
         worker_id=context.external_result_worker_id,
+        lease_seconds=context.config.worker_lease_seconds,
         final_reply_service=final_reply_service,
         llm_final_reply_enabled=getattr(context.settings, "llm_final_reply_enabled", False),
+        concurrency=context.config.external_result_concurrency,
     )
     return {
         "worker": "external_result_consumer",
         "processed": len(results),
         "succeeded": sum(1 for result in results if result.get("status") == "PROCESSED"),
         "failed": sum(1 for result in results if result.get("status") == "FAILED"),
+        "concurrency": context.config.external_result_concurrency,
     }
 
 
 async def telegram_reply_tick(context: ServiceRunnerContext) -> dict:
-    return await telegram_reply_consumer.process_telegram_updates_once(
+    result = await telegram_reply_consumer.process_telegram_updates_once(
         pool=context.pool,
         settings=context.settings,
         limit=context.config.telegram_reply_limit,
         timeout=0,
     )
+    return {**result, "concurrency": context.config.telegram_reply_concurrency}
+
+
+async def maybe_recover_worker_leases(context: ServiceRunnerContext, queue_name: str, repository) -> int:
+    interval = int(context.config.worker_lease_recovery_seconds)
+    if interval <= 0 or not hasattr(repository, "recover_expired_leases"):
+        return 0
+    now = time.monotonic()
+    last_recovered_at = context.lease_recovered_at.get(queue_name)
+    if last_recovered_at is not None and now - last_recovered_at < interval:
+        return 0
+    context.lease_recovered_at[queue_name] = now
+    try:
+        recovered = await repository.recover_expired_leases()
+        if recovered:
+            logger.info("Recovered %s expired %s leases.", recovered, queue_name)
+        return int(recovered or 0)
+    except Exception:
+        logger.exception("Failed to recover expired %s leases.", queue_name)
+        return 0
 
 
 async def livechat_idle_timer_tick(context: ServiceRunnerContext) -> dict:

@@ -449,8 +449,17 @@ def test_gateway_tick_uses_shared_pool_settings_and_checkpoint_mode(monkeypatch)
     calls = {}
     context = make_context(service_runner, gateway_limit=7)
 
-    async def fake_process_next_batch(pool, limit, checkpoint_mode, settings):
-        calls.update({"pool": pool, "limit": limit, "checkpoint_mode": checkpoint_mode, "settings": settings})
+    async def fake_process_next_batch(pool, limit, checkpoint_mode, settings, concurrency=None, lease_seconds=None):
+        calls.update(
+            {
+                "pool": pool,
+                "limit": limit,
+                "checkpoint_mode": checkpoint_mode,
+                "settings": settings,
+                "concurrency": concurrency,
+                "lease_seconds": lease_seconds,
+            }
+        )
         return {"processed": 1, "failed": 0, "enqueued": 1, "failures": [], "llm": {"provider": "mock"}}
 
     monkeypatch.setattr(service_runner.gateway_consumer, "process_next_batch", fake_process_next_batch)
@@ -461,6 +470,8 @@ def test_gateway_tick_uses_shared_pool_settings_and_checkpoint_mode(monkeypatch)
     assert calls["settings"] is context.settings
     assert calls["checkpoint_mode"] == context.settings.langgraph_checkpoint_mode
     assert calls["limit"] == 7
+    assert calls["concurrency"] == 15
+    assert calls["lease_seconds"] == 300
     assert result["processed"] == 1
 
 
@@ -470,8 +481,16 @@ def test_sender_tick_uses_sender_worker_process_next_batch(monkeypatch):
     calls = {}
     context = make_context(service_runner, sender_limit=9)
 
-    async def fake_process_next_batch(pool, sender_client, limit):
-        calls.update({"pool": pool, "sender_client": sender_client, "limit": limit})
+    async def fake_process_next_batch(pool, sender_client, limit, concurrency=None, lease_seconds=None):
+        calls.update(
+            {
+                "pool": pool,
+                "sender_client": sender_client,
+                "limit": limit,
+                "concurrency": concurrency,
+                "lease_seconds": lease_seconds,
+            }
+        )
         return [{"status": "SENT"}, {"status": "RETRYABLE"}]
 
     monkeypatch.setattr(service_runner.sender_worker, "process_next_batch", fake_process_next_batch)
@@ -481,6 +500,8 @@ def test_sender_tick_uses_sender_worker_process_next_batch(monkeypatch):
     assert calls["pool"] is context.pool
     assert calls["sender_client"] is context.sender_client
     assert calls["limit"] == 9
+    assert calls["concurrency"] == 15
+    assert calls["lease_seconds"] == 300
     assert result["processed"] == 2
     assert result["sent"] == 1
     assert result["retryable"] == 1
@@ -533,6 +554,38 @@ def test_telegram_reply_tick_uses_reusable_process_function(monkeypatch):
     assert calls["limit"] == 13
     assert calls["timeout"] == 0
     assert result["worker"] == "telegram_reply_consumer"
+    assert result["concurrency"] == 1
+
+
+def test_maybe_recover_worker_leases_throttles_and_swallows_failures():
+    from app.workers import service_runner
+
+    context = make_context(service_runner)
+
+    class Repository:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def recover_expired_leases(self):
+            self.calls += 1
+            return 2
+
+    repository = Repository()
+
+    first = asyncio.run(service_runner.maybe_recover_worker_leases(context, "queue", repository))
+    second = asyncio.run(service_runner.maybe_recover_worker_leases(context, "queue", repository))
+
+    assert first == 2
+    assert second == 0
+    assert repository.calls == 1
+
+    class FailingRepository:
+        async def recover_expired_leases(self):
+            raise RuntimeError("db down")
+
+    result = asyncio.run(service_runner.maybe_recover_worker_leases(context, "other-queue", FailingRepository()))
+
+    assert result == 0
 
 
 def test_pool_created_once_and_closed_once(monkeypatch):

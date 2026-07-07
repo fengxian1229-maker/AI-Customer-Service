@@ -98,6 +98,10 @@ async def process_pending_commands(
     worker_id: str | None = None,
     lease_seconds: int = 60,
     max_retries: int = 3,
+    concurrency: int = 15,
+    backend_concurrency: int = 5,
+    telegram_concurrency: int = 5,
+    handoff_concurrency: int = 3,
 ) -> list[dict]:
     validate_execution_mode(
         dry_run=dry_run,
@@ -111,26 +115,25 @@ async def process_pending_commands(
 
     worker_id = worker_id or default_worker_id()
     commands = await repository.lease_pending(limit=limit, worker_id=worker_id, lease_seconds=lease_seconds)
-    results = []
-    for command in commands:
+    overall_semaphore = asyncio.Semaphore(max(int(concurrency), 1))
+    target_semaphores = {
+        "backend": asyncio.Semaphore(max(int(backend_concurrency), 1)),
+        "telegram": asyncio.Semaphore(max(int(telegram_concurrency), 1)),
+        "handoff": asyncio.Semaphore(max(int(handoff_concurrency), 1)),
+    }
+
+    async def process_one(command: dict) -> dict:
         command_type = command["command_type"]
-        try:
-            if command_type not in SUPPORTED_COMMAND_TYPES:
-                raise ValueError(f"unsupported command_type: {command_type}")
-            if dry_run:
-                item = await _process_dry_run_command(
-                    command,
-                    repository=repository,
-                    result_repository=result_repository,
-                    emit_result=emit_result,
-                )
-            else:
-                item = await _process_real_command(
+        async with overall_semaphore:
+            target_semaphore = target_semaphores.get(_command_limit_target(command_type))
+            if target_semaphore is None:
+                return await _process_one_pending_command(
                     command,
                     repository=repository,
                     result_repository=result_repository,
                     conversation_repository=conversation_repository,
                     outbound_repository=outbound_repository,
+                    dry_run=dry_run,
                     emit_result=emit_result,
                     execute_human_handoff=execute_human_handoff,
                     execute_telegram=execute_telegram,
@@ -142,11 +145,88 @@ async def process_pending_commands(
                     pending_reply_lookup_service=pending_reply_lookup_service,
                     max_retries=max_retries,
                 )
-            results.append(item)
-        except Exception as exc:
-            await repository.mark_processing_failed(command["id"], str(exc), max_retries=max_retries)
-            results.append({"id": command["id"], "command_type": command_type, "status": "FAILED", "error": str(exc)})
-    return results
+            async with target_semaphore:
+                return await _process_one_pending_command(
+                    command,
+                    repository=repository,
+                    result_repository=result_repository,
+                    conversation_repository=conversation_repository,
+                    outbound_repository=outbound_repository,
+                    dry_run=dry_run,
+                    emit_result=emit_result,
+                    execute_human_handoff=execute_human_handoff,
+                    execute_telegram=execute_telegram,
+                    execute_backend=execute_backend,
+                    execute_pending_reply_lookup=execute_pending_reply_lookup,
+                    settings=settings,
+                    sender_client_factory=sender_client_factory,
+                    telegram_client_factory=telegram_client_factory,
+                    pending_reply_lookup_service=pending_reply_lookup_service,
+                    max_retries=max_retries,
+                )
+
+    return list(await asyncio.gather(*(process_one(command) for command in commands)))
+
+
+def _command_limit_target(command_type: str) -> str | None:
+    if command_type == "backend.query":
+        return "backend"
+    if command_type in {"telegram.send_case_card", "telegram.append_to_case"}:
+        return "telegram"
+    if command_type == HUMAN_HANDOFF_COMMAND_TYPE:
+        return "handoff"
+    return None
+
+
+async def _process_one_pending_command(
+    command: dict,
+    repository: ExternalCommandRepository,
+    result_repository: ExternalCommandResultRepository | None,
+    conversation_repository: ConversationRepository | None,
+    outbound_repository: OutboundMessageRepository | None,
+    dry_run: bool,
+    emit_result: bool,
+    execute_human_handoff: bool,
+    execute_telegram: bool,
+    execute_backend: bool,
+    execute_pending_reply_lookup: bool,
+    settings: Settings | None,
+    sender_client_factory,
+    telegram_client_factory,
+    pending_reply_lookup_service,
+    max_retries: int,
+) -> dict:
+    command_type = command["command_type"]
+    try:
+        if command_type not in SUPPORTED_COMMAND_TYPES:
+            raise ValueError(f"unsupported command_type: {command_type}")
+        if dry_run:
+            return await _process_dry_run_command(
+                command,
+                repository=repository,
+                result_repository=result_repository,
+                emit_result=emit_result,
+            )
+        return await _process_real_command(
+            command,
+            repository=repository,
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            emit_result=emit_result,
+            execute_human_handoff=execute_human_handoff,
+            execute_telegram=execute_telegram,
+            execute_backend=execute_backend,
+            execute_pending_reply_lookup=execute_pending_reply_lookup,
+            settings=settings,
+            sender_client_factory=sender_client_factory,
+            telegram_client_factory=telegram_client_factory,
+            pending_reply_lookup_service=pending_reply_lookup_service,
+            max_retries=max_retries,
+        )
+    except Exception as exc:
+        await repository.mark_processing_failed(command["id"], str(exc), max_retries=max_retries)
+        return {"id": command["id"], "command_type": command_type, "status": "FAILED", "error": str(exc)}
 
 
 async def _process_dry_run_command(
@@ -807,8 +887,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--emit-result", action="store_true", help="Emit mock external_command_results in dry-run mode.")
     parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
-    parser.add_argument("--lease-seconds", type=int, default=60, help="Seconds before a queue lease expires.")
+    parser.add_argument("--lease-seconds", type=int, help="Seconds before a queue lease expires.")
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum processing attempts before FAILED.")
+    parser.add_argument("--concurrency", type=int, help="Maximum external commands to process concurrently.")
+    parser.add_argument("--backend-concurrency", type=int, help="Maximum backend.query commands to execute concurrently.")
+    parser.add_argument("--telegram-concurrency", type=int, help="Maximum Telegram commands to execute concurrently.")
+    parser.add_argument("--handoff-concurrency", type=int, help="Maximum LiveChat handoff commands to execute concurrently.")
     parser.add_argument(
         "--recover-interval-seconds",
         type=int,
@@ -831,8 +915,12 @@ async def run_once(
     execute_backend: bool = False,
     execute_pending_reply_lookup: bool = False,
     worker_id: str | None = None,
-    lease_seconds: int = 60,
+    lease_seconds: int | None = None,
     max_retries: int = 3,
+    concurrency: int | None = None,
+    backend_concurrency: int | None = None,
+    telegram_concurrency: int | None = None,
+    handoff_concurrency: int | None = None,
 ) -> dict:
     validate_execution_mode(
         dry_run=dry_run,
@@ -867,8 +955,12 @@ async def run_once(
             execute_pending_reply_lookup=execute_pending_reply_lookup,
             settings=settings,
             worker_id=worker_id,
-            lease_seconds=lease_seconds,
+            lease_seconds=lease_seconds if lease_seconds is not None else getattr(settings, "worker_lease_seconds", 300),
             max_retries=max_retries,
+            concurrency=concurrency if concurrency is not None else getattr(settings, "external_command_concurrency", 15),
+            backend_concurrency=backend_concurrency if backend_concurrency is not None else getattr(settings, "external_backend_concurrency", 5),
+            telegram_concurrency=telegram_concurrency if telegram_concurrency is not None else getattr(settings, "external_telegram_concurrency", 5),
+            handoff_concurrency=handoff_concurrency if handoff_concurrency is not None else getattr(settings, "external_handoff_concurrency", 3),
         )
         return {
             "worker": "external_command_worker",
@@ -916,9 +1008,13 @@ async def run_forever(
     execute_backend: bool = False,
     execute_pending_reply_lookup: bool = False,
     worker_id: str | None = None,
-    lease_seconds: int = 60,
+    lease_seconds: int | None = None,
     max_retries: int = 3,
     recover_interval_seconds: int = 30,
+    concurrency: int | None = None,
+    backend_concurrency: int | None = None,
+    telegram_concurrency: int | None = None,
+    handoff_concurrency: int | None = None,
 ) -> None:
     validate_execution_mode(
         dry_run=dry_run,
@@ -955,10 +1051,14 @@ async def run_forever(
             execute_pending_reply_lookup=execute_pending_reply_lookup,
             settings=settings,
             worker_id=worker_id,
-            lease_seconds=lease_seconds,
+            lease_seconds=lease_seconds if lease_seconds is not None else getattr(settings, "worker_lease_seconds", 300),
             max_retries=max_retries,
             recover_interval_seconds=recover_interval_seconds,
             last_recovered_at=last_recovered_at,
+            concurrency=concurrency if concurrency is not None else getattr(settings, "external_command_concurrency", 15),
+            backend_concurrency=backend_concurrency if backend_concurrency is not None else getattr(settings, "external_backend_concurrency", 5),
+            telegram_concurrency=telegram_concurrency if telegram_concurrency is not None else getattr(settings, "external_telegram_concurrency", 5),
+            handoff_concurrency=handoff_concurrency if handoff_concurrency is not None else getattr(settings, "external_handoff_concurrency", 3),
         )
     finally:
         pool.close()
@@ -984,6 +1084,10 @@ async def run_polling_loop(
     max_retries: int = 3,
     recover_interval_seconds: int = 30,
     last_recovered_at: float | None = None,
+    concurrency: int = 15,
+    backend_concurrency: int = 5,
+    telegram_concurrency: int = 5,
+    handoff_concurrency: int = 3,
     iterations: int | None = None,
     sleep=asyncio.sleep,
 ) -> None:
@@ -1018,6 +1122,10 @@ async def run_polling_loop(
                 worker_id=worker_id,
                 lease_seconds=lease_seconds,
                 max_retries=max_retries,
+                concurrency=concurrency,
+                backend_concurrency=backend_concurrency,
+                telegram_concurrency=telegram_concurrency,
+                handoff_concurrency=handoff_concurrency,
             )
         except Exception:
             logger.exception("external_command_worker polling iteration failed.")
@@ -1042,6 +1150,10 @@ def main(argv: list[str] | None = None) -> int:
                     worker_id=args.worker_id,
                     lease_seconds=args.lease_seconds,
                     max_retries=args.max_retries,
+                    concurrency=args.concurrency,
+                    backend_concurrency=args.backend_concurrency,
+                    telegram_concurrency=args.telegram_concurrency,
+                    handoff_concurrency=args.handoff_concurrency,
                 )
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1059,6 +1171,10 @@ def main(argv: list[str] | None = None) -> int:
                     lease_seconds=args.lease_seconds,
                     max_retries=args.max_retries,
                     recover_interval_seconds=args.recover_interval_seconds,
+                    concurrency=args.concurrency,
+                    backend_concurrency=args.backend_concurrency,
+                    telegram_concurrency=args.telegram_concurrency,
+                    handoff_concurrency=args.handoff_concurrency,
                 )
             )
     except ValueError as exc:

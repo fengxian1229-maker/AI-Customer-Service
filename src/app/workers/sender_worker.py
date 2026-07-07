@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import os
+import socket
 from urllib import error as url_error
 
 from app.channels.livechat.sender_client import LiveChatApiError, LiveChatSenderClient
@@ -24,6 +25,10 @@ BUSINESS_ERROR_MARKERS = (
     "can't send",
     "unable to send",
 )
+
+
+def default_worker_id() -> str:
+    return f"sender-worker-{socket.gethostname()}"
 
 
 def classify_send_result(response: dict) -> dict:
@@ -300,7 +305,14 @@ async def _send_buttons_fallback(sender_client, message: dict, menu: dict, origi
     return {"fallback_response": response, "original_error": original_exc}
 
 
-async def process_next_batch(pool, sender_client, limit: int = 20) -> list[dict]:
+async def process_next_batch(
+    pool,
+    sender_client,
+    limit: int = 20,
+    concurrency: int = 15,
+    worker_id: str | None = None,
+    lease_seconds: int = 300,
+) -> list[dict]:
     repository = OutboundMessageRepository(pool)
     message_repository = ConversationMessageRepository(pool)
     transaction_repository = SenderTransactionRepository(
@@ -308,17 +320,39 @@ async def process_next_batch(pool, sender_client, limit: int = 20) -> list[dict]
         outbound_repository=repository,
         conversation_message_repository=message_repository,
     )
-    results = []
-    for message in await repository.fetch_pending(limit=limit):
-        results.append(
-            await process_pending_message(
-                repository,
-                sender_client,
-                message,
-                message_repository=message_repository,
-                transaction_repository=transaction_repository,
-            )
+    if hasattr(repository, "lease_pending_groups"):
+        message_groups = await repository.lease_pending_groups(
+            limit=limit,
+            worker_id=worker_id or default_worker_id(),
+            lease_seconds=lease_seconds,
         )
+    else:
+        message_groups = [[message] for message in await repository.fetch_pending(limit=limit)]
+    semaphore = asyncio.Semaphore(max(int(concurrency), 1))
+
+    async def process_group(messages: list[dict]) -> list[dict]:
+        group_results = []
+        async with semaphore:
+            for message in messages:
+                try:
+                    group_results.append(
+                        await process_pending_message(
+                            repository,
+                            sender_client,
+                            message,
+                            message_repository=message_repository,
+                            transaction_repository=transaction_repository,
+                        )
+                    )
+                except Exception as exc:
+                    if hasattr(repository, "release_lease"):
+                        await repository.release_lease(message["id"])
+                    group_results.append({"status": "FAILED_UNKNOWN", "last_error": str(exc), "retryable": False})
+        return group_results
+
+    results = []
+    for group_results in await asyncio.gather(*(process_group(group) for group in message_groups)):
+        results.extend(group_results)
     return results
 
 
@@ -353,10 +387,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Send pending outbound_messages through LiveChat.")
     parser.add_argument("--once", action="store_true", help="Run one sender batch and exit.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum outbound messages to process.")
+    parser.add_argument("--concurrency", type=int, help="Maximum conversations to process concurrently.")
+    parser.add_argument("--worker-id", default=None, help="Stable worker id used for queue leases.")
+    parser.add_argument("--lease-seconds", type=int, help="Seconds before an outbound lease expires.")
     return parser
 
 
-async def run_once(limit: int) -> dict:
+async def run_once(
+    limit: int,
+    concurrency: int | None = None,
+    worker_id: str | None = None,
+    lease_seconds: int | None = None,
+) -> dict:
     settings = Settings()
     pool = await create_pool(settings)
     try:
@@ -366,7 +408,14 @@ async def run_once(limit: int) -> dict:
             settings.livechat_agent_access_token,
             agent_email=getattr(settings, "livechat_agent_email", None),
         )
-        results = await process_next_batch(pool, client, limit=limit)
+        results = await process_next_batch(
+            pool,
+            client,
+            limit=limit,
+            concurrency=concurrency if concurrency is not None else settings.sender_concurrency,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds or settings.worker_lease_seconds,
+        )
         return {
             "worker": "sender_worker",
             "mode": "once",
@@ -382,7 +431,14 @@ async def run_once(limit: int) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    result = asyncio.run(run_once(limit=args.limit))
+    result = asyncio.run(
+        run_once(
+            limit=args.limit,
+            concurrency=args.concurrency,
+            worker_id=args.worker_id,
+            lease_seconds=args.lease_seconds,
+        )
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

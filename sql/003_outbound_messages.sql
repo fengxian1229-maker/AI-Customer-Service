@@ -16,10 +16,18 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
   block_index INT NULL,
   message_kind VARCHAR(64) NULL,
   command_type VARCHAR(128) NULL,
+  leased_at DATETIME(6) NULL,
+  lease_expires_at DATETIME(6) NULL,
+  locked_by VARCHAR(128) NULL,
+  attempted_at DATETIME(6) NULL,
+  processed_at DATETIME(6) NULL,
   sent_at DATETIME(6) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_outbound_messages_dedup_key (dedup_key),
   KEY idx_status_created (status, created_at),
+  KEY idx_outbound_messages_status_lease_created (status, lease_expires_at, created_at),
+  KEY idx_outbound_messages_locked_by (locked_by),
+  KEY idx_outbound_messages_conversation_status_created (conversation_id, status, created_at, id),
   KEY idx_chat_thread (chat_id, thread_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -16,4 +16,8 @@ def mysql_pool_kwargs(settings: Settings) -> dict:
 
 
 async def create_pool(settings: Settings) -> aiomysql.Pool:
-    return await aiomysql.create_pool(**mysql_pool_kwargs(settings), minsize=1, maxsize=5)
+    return await aiomysql.create_pool(
+        **mysql_pool_kwargs(settings),
+        minsize=settings.mysql_pool_minsize,
+        maxsize=settings.mysql_pool_maxsize,
+    )
