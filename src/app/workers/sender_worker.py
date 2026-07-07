@@ -284,10 +284,10 @@ def _image_text_fallback_enabled() -> bool:
 
 def _final_send_custom_id(message: dict, payload: dict) -> str | None:
     custom_id = str(payload.get("custom_id") or "").strip()
-    if custom_id.startswith("preview:"):
+    if custom_id.startswith(("preview:", "final:")):
         inbound_event_id = message.get("inbound_event_id")
         if inbound_event_id:
-            return f"final:{inbound_event_id}"
+            return f"final-{inbound_event_id}"
         return None
     return custom_id or None
 
