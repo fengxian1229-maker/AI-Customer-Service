@@ -557,9 +557,9 @@ def test_gateway_livechat_text_reply_streams_preview_then_keeps_official_text_ou
     assert result["should_reply"] is True
     assert [message["message_type"] for message in result["outbound_messages"]] == ["text"]
     assert result["outbound_messages"][0]["payload_json"]["text"] == "streamed final text"
-    assert result["outbound_messages"][0]["payload_json"]["custom_id"] == "final-52"
+    assert "custom_id" not in result["outbound_messages"][0]["payload_json"]
     assert outbound_repository.inserted[0]["payload_json"]["text"] == "streamed final text"
-    assert outbound_repository.inserted[0]["payload_json"]["custom_id"] == "final-52"
+    assert "custom_id" not in outbound_repository.inserted[0]["payload_json"]
     assistant_messages = [message for message in message_repository.inserted if message["sender_role"] == "assistant"]
     assert assistant_messages == []
     assert result["graph_state"]["final_response_text"] == "streamed final text"
@@ -624,7 +624,7 @@ def test_gateway_faq_image_text_reply_streams_text_and_keeps_image_outbox():
     assert outbound_repository.inserted[0]["message_type"] == "image"
     assert outbound_repository.inserted[1]["message_type"] == "text"
     assert outbound_repository.inserted[1]["payload_json"]["text"] == "简体 FAQ 文本"
-    assert outbound_repository.inserted[1]["payload_json"]["custom_id"] == "final-53"
+    assert "custom_id" not in outbound_repository.inserted[1]["payload_json"]
     assistant_messages = [message for message in message_repository.inserted if message["sender_role"] == "assistant"]
     assert assistant_messages == []
 

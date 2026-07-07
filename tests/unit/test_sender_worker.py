@@ -173,7 +173,7 @@ def test_process_pending_message_passes_text_custom_id_to_livechat_send_event():
     result = asyncio.run(process_pending_message(repository, client, message, message_repository=message_repository))
 
     assert result["status"] == "SENT"
-    assert client.calls == [("chat-1", "thread-1", "streamed final", "final-123")]
+    assert client.calls == [("chat-1", "thread-1", "streamed final", None)]
     assert repository.sent == [7]
     assert message_repository.inserted[0]["text_content"] == "streamed final"
 
@@ -236,7 +236,38 @@ def test_process_pending_message_rewrites_legacy_final_custom_id_colon():
     result = asyncio.run(process_pending_message(repository, client, message))
 
     assert result["status"] == "SENT"
-    assert client.calls == [("chat-1", "thread-1", "legacy final", "final-123")]
+    assert client.calls == [("chat-1", "thread-1", "legacy final", None)]
+
+
+def test_process_pending_message_omits_generated_final_custom_id_dash():
+    class SenderClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_text(
+            self,
+            chat_id: str,
+            thread_id: str | None,
+            text: str,
+            custom_id: str | None = None,
+        ) -> dict:
+            self.calls.append((chat_id, thread_id, text, custom_id))
+            return {"event_id": "event-1"}
+
+    repository = FakeOutboundRepository()
+    client = SenderClient()
+    message = {
+        **make_message(),
+        "payload_json": {"text": "generated final", "custom_id": "final-123"},
+        "inbound_event_id": 123,
+        "conversation_status": "AI_ACTIVE",
+        "conversation_active_workflow": None,
+    }
+
+    result = asyncio.run(process_pending_message(repository, client, message))
+
+    assert result["status"] == "SENT"
+    assert client.calls == [("chat-1", "thread-1", "generated final", None)]
 
 
 def test_process_pending_message_skips_when_conversation_human_active():

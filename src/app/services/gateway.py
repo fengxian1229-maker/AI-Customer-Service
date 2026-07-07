@@ -914,8 +914,8 @@ class GatewayService:
         updated_payload = {
             **(text_message.get("payload_json") or {}),
             "text": final_text,
-            "custom_id": f"final-{inbound_event_id}",
         }
+        updated_payload.pop("custom_id", None)
         updated_messages[text_index] = {**text_message, "payload_json": updated_payload}
         return streamed_state, updated_messages, []
 
