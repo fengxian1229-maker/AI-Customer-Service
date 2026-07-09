@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-SECRET_FIELDS = {"authorization", "login_password"}
+SECRET_FIELDS = {"authorization", "login_password", "totp_secret"}
 
 
 @dataclass
@@ -13,6 +13,7 @@ class BackendConfig:
     merchant_code: str | None
     login_operator: str | None
     login_password: str | None
+    totp_secret: str | None
     login_merchant: str | None
     request_timeout_seconds: float
     default_lookback_days: int
@@ -30,6 +31,7 @@ class BackendConfig:
             "merchant_code": self.merchant_code,
             "login_operator": self.login_operator,
             "login_password": self.login_password,
+            "totp_secret": self.totp_secret,
             "login_merchant": self.login_merchant,
             "request_timeout_seconds": self.request_timeout_seconds,
             "default_lookback_days": self.default_lookback_days,

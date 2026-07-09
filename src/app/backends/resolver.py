@@ -29,6 +29,7 @@ class TenantBackendConfigResolver:
             merchant_code=_blank_to_none(self.settings.backend_merchant_code),
             login_operator=_blank_to_none(self.settings.backend_login_operator),
             login_password=_blank_to_none(self.settings.backend_login_password),
+            totp_secret=_blank_to_none(self.settings.backend_totp_secret),
             login_merchant=_blank_to_none(self.settings.backend_login_merchant),
             request_timeout_seconds=self.settings.backend_request_timeout_seconds,
             default_lookback_days=self.settings.backend_default_lookback_days,
@@ -53,6 +54,6 @@ def _missing_required_fields(config: BackendConfig) -> list[str]:
     for field_name in ("provider_type", "base_url", "merchant_code"):
         if not getattr(config, field_name):
             missing.append(f"backend_{field_name}")
-    if not config.authorization and not (config.login_operator and config.login_password):
-        missing.append("backend_authorization or backend_login_operator/backend_login_password")
+    if not config.authorization and not (config.login_operator and (config.login_password or config.totp_secret)):
+        missing.append("backend_authorization or backend_login_operator/backend_login_password or backend_login_operator/backend_totp_secret")
     return missing

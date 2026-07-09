@@ -42,6 +42,7 @@ def run_preflight(settings: Settings, factory=None) -> dict:
     provider_type = (settings.backend_provider_type or "").strip()
     has_login_operator = bool((settings.backend_login_operator or "").strip())
     has_login_password = bool((settings.backend_login_password or "").strip())
+    has_totp_secret = bool((settings.backend_totp_secret or "").strip())
     has_login_merchant = bool((settings.backend_login_merchant or "").strip())
     result = {
         "worker": "tac_backend_preflight",
@@ -53,6 +54,7 @@ def run_preflight(settings: Settings, factory=None) -> dict:
         "has_authorization": bool((settings.backend_authorization or "").strip()),
         "has_login_operator": has_login_operator,
         "has_login_password": has_login_password,
+        "has_totp_secret": has_totp_secret,
         "has_login_merchant": has_login_merchant,
         "preflight_status": "DISABLED",
         "safe_to_probe": False,
@@ -80,7 +82,7 @@ def run_preflight(settings: Settings, factory=None) -> dict:
 
     from app.backends.factory import BackendProviderFactory
 
-    if not (has_login_operator and has_login_password):
+    if not (has_login_operator and (has_login_password or has_totp_secret)):
         result.update(
             {
                 "preflight_status": "OK",
@@ -94,9 +96,10 @@ def run_preflight(settings: Settings, factory=None) -> dict:
     provider_factory = factory or BackendProviderFactory()
     result["preflight_status"] = "LOGIN_PENDING"
     result["login_attempted"] = True
+    result["login_method"] = "otp" if has_totp_secret else "password"
     try:
         provider = provider_factory.create(config)
-        provider.login_password()
+        provider.login_otp() if has_totp_secret else provider.login_password()
     except Exception as exc:
         result.update(
             {
@@ -137,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "preflight":
         result = _sanitize(run_preflight(settings), settings=settings)
         print(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
-        return int(result.get("exit_code") or 1)
+        return int(result.get("exit_code", 1))
     resolver = TenantBackendConfigResolver(settings)
     config = resolver.resolve(tenant_id=None)
     if getattr(args, "merchant_code", None):
@@ -164,7 +167,7 @@ def _sanitize(value, settings: Settings | None = None):
         redacted = {}
         for key, item in value.items():
             lowered = str(key).lower()
-            if not lowered.startswith("has_") and any(token in lowered for token in ("authorization", "password", "cookie", "token")):
+            if not lowered.startswith("has_") and any(token in lowered for token in ("authorization", "password", "cookie", "token", "secret")):
                 redacted[key] = "<redacted>"
             else:
                 redacted[key] = _sanitize(item, settings=settings)
@@ -186,6 +189,7 @@ def sanitize_backend_text(text: str, settings: Settings | None = None) -> str:
         r"Bearer\s+[A-Za-z0-9._~+/=-]+",
         r"token\s*[:=]\s*[^,\s}]+",
         r"password\s*[:=]\s*[^,\s}]+",
+        r"secret\s*[:=]\s*[^,\s}]+",
         r"cookie\s*[:=]\s*[^,\s}]+",
         r"https?://[^\s,)]+",
     ]

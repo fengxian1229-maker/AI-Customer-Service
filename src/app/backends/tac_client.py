@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
 import json
+import struct
+import time
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
@@ -118,6 +124,49 @@ class TacBackendClient:
         self.authorization = str(token)
         return self.authorization
 
+    def login_otp(self, merchant_code: str | None = None) -> str:
+        if not self.config.login_operator or not self.config.totp_secret:
+            raise BackendApiError("FAILED_CONFIG", "backend login operator/totp secret is required")
+        merchant = merchant_code or self.config.login_merchant or self.config.merchant_code
+        if not merchant:
+            raise BackendApiError("FAILED_CONFIG", "backend merchant code is required")
+        code = generate_totp(self.config.totp_secret)
+        body = json.dumps(
+            {"operatorName": self.config.login_operator, "code": code},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        base_url = _base_url(self.config)
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+            "Merchant": merchant,
+            "MerchantCode": merchant,
+            "language": "zh_CN",
+            "Referer": f"{base_url}/{merchant}",
+            "Origin": base_url,
+            "User-Agent": "Mozilla/5.0",
+        }
+        result = self.transport.request(
+            "POST",
+            _join_url(base_url, "/tac/api/login/otp"),
+            headers=headers,
+            body=body,
+            timeout_seconds=self.config.request_timeout_seconds,
+        )
+        token = result.get("token") if isinstance(result, dict) else None
+        if not token:
+            code_value = str(result.get("errorCode") or "FAILED_BACKEND_QUERY") if isinstance(result, dict) else "FAILED_BACKEND_QUERY"
+            message = str(result.get("message") or "otp login response missing token") if isinstance(result, dict) else "otp login response missing token"
+            raise BackendApiError(code_value, message)
+        self.authorization = str(token)
+        return self.authorization
+
+    def login(self, merchant_code: str | None = None) -> str:
+        if self.config.totp_secret:
+            return self.login_otp(merchant_code)
+        return self.login_password(merchant_code)
+
     def api_get(
         self,
         path: str,
@@ -126,10 +175,10 @@ class TacBackendClient:
         _retry_invalid_token: bool = True,
     ) -> dict[str, Any]:
         if not self.authorization:
-            self.login_password(merchant_code)
+            self.login(merchant_code)
         result = self._api_get_once(path, params or {}, merchant_code)
         if result.get("errorCode") == "INVALID_TOKEN" and _retry_invalid_token:
-            self.login_password(merchant_code)
+            self.login(merchant_code)
             result = self._api_get_once(path, params or {}, merchant_code)
         return result
 
@@ -295,6 +344,20 @@ def assert_backend_success(result: dict[str, Any], context: str = "backend API")
         message = str(result.get("message") or result.get("msg") or context)
         raise BackendApiError(code, message)
     return result
+
+
+def generate_totp(secret: str, *, for_time: int | None = None, digits: int = 6, interval_seconds: int = 30) -> str:
+    normalized = "".join(secret.strip().split()).upper()
+    padding = "=" * ((8 - len(normalized) % 8) % 8)
+    try:
+        key = base64.b32decode(normalized + padding, casefold=True)
+    except (binascii.Error, ValueError) as exc:
+        raise BackendApiError("FAILED_CONFIG", "backend_totp_secret must be base32 encoded") from exc
+    counter = int((for_time if for_time is not None else time.time()) // interval_seconds)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
+    return str(code % (10**digits)).zfill(digits)
 
 
 def extract_rows(result: Any) -> list[dict[str, Any]]:

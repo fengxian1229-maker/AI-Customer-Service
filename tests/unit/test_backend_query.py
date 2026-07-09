@@ -31,6 +31,7 @@ def make_config(**overrides):
         "merchant_code": "COP",
         "login_operator": "operator-a",
         "login_password": "password-a",
+        "totp_secret": None,
         "login_merchant": "COP",
         "request_timeout_seconds": 10.0,
         "default_lookback_days": 30,
@@ -51,6 +52,16 @@ def test_backend_config_repr_redacts_secrets():
     assert "secret-password" not in rendered
     assert safe["authorization"] == "<redacted>"
     assert safe["login_password"] == "<redacted>"
+
+
+def test_backend_config_repr_redacts_totp_secret():
+    config = make_config(totp_secret="JBSWY3DPEHPK3PXP")
+
+    rendered = repr(config)
+    safe = config.sanitized()
+
+    assert "JBSWY3DPEHPK3PXP" not in rendered
+    assert safe["totp_secret"] == "<redacted>"
 
 
 def test_tenant_backend_config_resolver_default_disabled_fails_config():
@@ -82,6 +93,7 @@ def test_tenant_backend_config_resolver_env_default_source_and_missing_config(mo
         "BACKEND_MERCHANT_CODE",
         "BACKEND_LOGIN_OPERATOR",
         "BACKEND_LOGIN_PASSWORD",
+        "BACKEND_TOTP_SECRET",
         "BACKEND_LOGIN_MERCHANT",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -96,6 +108,7 @@ def test_tenant_backend_config_resolver_env_default_source_and_missing_config(mo
         backend_merchant_code=None,
         backend_login_operator=None,
         backend_login_password=None,
+        backend_totp_secret=None,
         backend_login_merchant=None,
     )
 
@@ -106,6 +119,31 @@ def test_tenant_backend_config_resolver_env_default_source_and_missing_config(mo
         assert "backend_base_url" in str(exc)
     else:
         raise AssertionError("expected missing config")
+
+
+def test_tenant_backend_config_resolver_accepts_operator_with_totp_without_password():
+    from app.backends.resolver import TenantBackendConfigResolver
+    from app.core.settings import Settings
+
+    config = TenantBackendConfigResolver(
+        Settings(
+            livechat_agent_access_token="unused",
+            livechat_account_id="unused",
+            backend_query_enabled=True,
+            backend_provider_type="tac",
+            backend_base_url="https://tac.example",
+            backend_authorization=None,
+            backend_merchant_code="COP",
+            backend_login_operator="operator-a",
+            backend_login_password=None,
+            backend_totp_secret="JBSWY3DPEHPK3PXP",
+            backend_login_merchant="COP",
+        )
+    ).resolve(tenant_id="tenant-a")
+
+    assert config.login_operator == "operator-a"
+    assert config.login_password is None
+    assert config.totp_secret == "JBSWY3DPEHPK3PXP"
 
 
 def test_tac_login_password_posts_login_endpoint_and_redacts_token():
@@ -127,6 +165,39 @@ def test_tac_login_password_posts_login_endpoint_and_redacts_token():
     assert "new-secret-token" not in repr(client)
 
 
+def test_generate_totp_matches_rfc_6238_sha1_vector():
+    from app.backends.tac_client import generate_totp
+
+    # RFC 6238 test secret: b"12345678901234567890".
+    assert generate_totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", for_time=59, digits=8) == "94287082"
+
+
+def test_tac_login_otp_posts_otp_endpoint_and_redacts_secret():
+    from app.backends.tac_client import TacBackendClient
+
+    transport = FakeTransport([{"token": "otp-secret-token"}])
+    client = TacBackendClient(
+        make_config(authorization=None, login_password=None, totp_secret="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"),
+        transport=transport,
+    )
+
+    token = client.login_otp()
+
+    assert token == "otp-secret-token"
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"] == "https://tac.example/tac/api/login/otp"
+    assert call["headers"]["Merchant"] == "COP"
+    assert call["headers"]["MerchantCode"] == "COP"
+    assert call["headers"]["Accept"] == "application/json, text/plain, */*"
+    assert call["headers"]["language"] == "zh_CN"
+    assert call["headers"]["User-Agent"] == "Mozilla/5.0"
+    assert b"operator-a" in call["body"]
+    assert b'"code":' in call["body"]
+    assert b"GEZDGNBVGY3TQOJQ" not in call["body"]
+    assert "GEZDGNBVGY3TQOJQ" not in repr(client)
+
+
 def test_tac_backend_preflight_disabled_does_not_login(monkeypatch):
     from app.core.settings import Settings
     from app.workers import tac_backend_probe
@@ -142,6 +213,7 @@ def test_tac_backend_preflight_disabled_does_not_login(monkeypatch):
         "BACKEND_MERCHANT_CODE",
         "BACKEND_LOGIN_OPERATOR",
         "BACKEND_LOGIN_PASSWORD",
+        "BACKEND_TOTP_SECRET",
         "BACKEND_LOGIN_MERCHANT",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -155,6 +227,7 @@ def test_tac_backend_preflight_disabled_does_not_login(monkeypatch):
             backend_merchant_code=None,
             backend_login_operator=None,
             backend_login_password=None,
+            backend_totp_secret=None,
             backend_login_merchant=None,
         ),
         factory=FailingFactory(),
@@ -163,6 +236,7 @@ def test_tac_backend_preflight_disabled_does_not_login(monkeypatch):
     assert result["backend_query_enabled"] is False
     assert result["has_authorization"] is False
     assert result["has_login_password"] is False
+    assert result["has_totp_secret"] is False
     assert result["login_attempted"] is False
     assert result["safe_to_probe"] is False
     assert result["settings_warning"] == [
@@ -194,6 +268,7 @@ def test_tac_backend_preflight_login_success_is_sanitized():
             backend_merchant_code="MERCHANT",
             backend_login_operator="operator-secret",
             backend_login_password="password-secret",
+            backend_totp_secret=None,
             backend_login_merchant="MERCHANT",
             backend_authorization=None,
         ),
@@ -210,6 +285,61 @@ def test_tac_backend_preflight_login_success_is_sanitized():
     assert "password-secret" not in rendered
     assert "operator-secret" not in rendered
     assert "https://secret.example" not in rendered
+
+
+def test_tac_backend_preflight_otp_login_success_is_sanitized():
+    from app.core.settings import Settings
+    from app.workers import tac_backend_probe
+
+    class FakeClient:
+        def login_otp(self):
+            return "secret-otp-token"
+
+    class FakeFactory:
+        def create(self, config):
+            assert config.totp_secret == "secret-base32"
+            return FakeClient()
+
+    result = tac_backend_probe.run_preflight(
+        Settings(
+            livechat_agent_access_token="unused",
+            livechat_account_id="unused",
+            backend_query_enabled=True,
+            backend_provider_type="tac",
+            backend_base_url="https://secret.example",
+            backend_merchant_code="MERCHANT",
+            backend_login_operator="operator-secret",
+            backend_login_password=None,
+            backend_totp_secret="secret-base32",
+            backend_login_merchant="MERCHANT",
+            backend_authorization=None,
+        ),
+        factory=FakeFactory(),
+    )
+
+    assert result["login_attempted"] is True
+    assert result["login_method"] == "otp"
+    assert result["login_success"] is True
+    assert result["safe_to_probe"] is True
+    rendered = str(result)
+    assert "secret-otp-token" not in rendered
+    assert "secret-base32" not in rendered
+    assert "operator-secret" not in rendered
+
+
+def test_tac_backend_preflight_main_returns_zero_when_preflight_ok(monkeypatch, capsys):
+    from app.core.settings import Settings
+    from app.workers import tac_backend_probe
+
+    monkeypatch.setattr(tac_backend_probe, "Settings", lambda: Settings(livechat_agent_access_token="unused", livechat_account_id="unused"))
+    monkeypatch.setattr(
+        tac_backend_probe,
+        "run_preflight",
+        lambda settings: {"preflight_status": "OK", "exit_code": 0, "terminal_status": "OK"},
+    )
+
+    assert tac_backend_probe.main(["preflight"]) == 0
+    assert '"exit_code": 0' in capsys.readouterr().out
 
 
 def test_tac_backend_preflight_missing_config_fails_without_login():
@@ -324,6 +454,29 @@ def test_tac_api_get_builds_headers_refreshes_invalid_token_once():
     assert first_get["headers"]["platform"] == "TCG"
     assert transport.calls[1]["method"] == "POST"
     assert transport.calls[2]["headers"]["Authorization"] == "Bearer fresh-token"
+
+
+def test_tac_api_get_refreshes_invalid_token_with_otp_when_secret_configured():
+    from app.backends.tac_client import TacBackendClient
+
+    transport = FakeTransport(
+        [
+            {"errorCode": "INVALID_TOKEN"},
+            {"token": "Bearer otp-token"},
+            {"success": True, "value": []},
+        ]
+    )
+    client = TacBackendClient(
+        make_config(login_password=None, totp_secret="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"),
+        transport=transport,
+    )
+
+    result = client.api_get("/tac/api/relay/get/player-search-non-bankcard", {"data": "andy", "pageNo": 1})
+
+    assert result == {"success": True, "value": []}
+    assert transport.calls[1]["method"] == "POST"
+    assert transport.calls[1]["url"] == "https://tac.example/tac/api/login/otp"
+    assert transport.calls[2]["headers"]["Authorization"] == "Bearer otp-token"
 
 
 def test_tac_query_player_user_tries_username_then_mobile_and_prefers_exact_match():

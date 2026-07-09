@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     telegram_upload_attachments_via_download: bool = True
     telegram_attachment_download_timeout_seconds: float = 15.0
     telegram_attachment_max_bytes: int = 10485760
+    daily_chat_report_enabled: bool = False
+    daily_chat_report_source: str = "lingxi"
+    daily_chat_report_lingxi_database: str = "lingxi_qa"
+    daily_chat_report_time: str = "08:00"
+    daily_chat_report_timezone: str = "Asia/Shanghai"
+    daily_chat_report_target_chat_id: str | None = None
+    daily_chat_report_message_thread_id: int | None = None
+    daily_chat_report_group_ids: str = "2,11,12,13,24,25,28"
+    daily_chat_report_excluded_group_ids: str = "23"
+    daily_chat_report_output_dir: str = "output/reports"
     backend_query_enabled: bool = False
     backend_provider_type: str | None = None
     backend_base_url: str | None = None
@@ -48,6 +58,7 @@ class Settings(BaseSettings):
     backend_merchant_code: str | None = None
     backend_login_operator: str | None = None
     backend_login_password: str | None = None
+    backend_totp_secret: str | None = None
     backend_login_merchant: str | None = None
     backend_request_timeout_seconds: float = 20.0
     backend_default_lookback_days: int = 30

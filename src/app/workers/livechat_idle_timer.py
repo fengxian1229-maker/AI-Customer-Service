@@ -56,9 +56,32 @@ class LiveChatIdleTimerRepository:
             LIMIT 1
           )
         WHERE c.channel_type = 'livechat'
-          AND c.status = 'AI_ACTIVE'
+          AND c.status IN ('AI_ACTIVE', 'WAITING_EXTERNAL')
           AND COALESCE(c.active_workflow, '') <> 'human_handoff'
           AND m.sender_role = 'assistant'
+          AND (
+            c.status <> 'WAITING_EXTERNAL'
+            OR (
+              NOT EXISTS (
+                SELECT 1
+                FROM external_commands ec
+                WHERE ec.conversation_id = c.conversation_id
+                  AND ec.status IN ('PENDING', 'RETRYABLE')
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM external_command_results ecr
+                WHERE ecr.conversation_id = c.conversation_id
+                  AND ecr.status IN ('PENDING', 'RETRYABLE')
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM outbound_messages om
+                WHERE om.conversation_id = c.conversation_id
+                  AND om.status IN ('PENDING', 'RETRYABLE')
+              )
+            )
+          )
         ORDER BY m.created_at ASC, m.id ASC
         LIMIT %s
         """
@@ -103,6 +126,29 @@ class LiveChatIdleTimerRepository:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(sql, (conversation_id, created_at))
+                return await cur.fetchone() is not None
+
+    async def has_unfinished_work(self, conversation_id: str) -> bool:
+        sql = """
+        SELECT 1
+        FROM external_commands ec
+        WHERE ec.conversation_id = %s
+          AND ec.status IN ('PENDING', 'RETRYABLE')
+        UNION ALL
+        SELECT 1
+        FROM external_command_results ecr
+        WHERE ecr.conversation_id = %s
+          AND ecr.status IN ('PENDING', 'RETRYABLE')
+        UNION ALL
+        SELECT 1
+        FROM outbound_messages om
+        WHERE om.conversation_id = %s
+          AND om.status IN ('PENDING', 'RETRYABLE')
+        LIMIT 1
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (conversation_id, conversation_id, conversation_id))
                 return await cur.fetchone() is not None
 
     async def insert_assistant_message(self, conversation: dict, text: str, now: datetime, source: str = "livechat_idle_timer") -> int | None:
@@ -206,12 +252,16 @@ async def process_idle_conversation(
     if slot_memory.get("idle_closed_at"):
         return _result(conversation, "SKIPPED_ALREADY_CLOSED")
 
+    if _is_waiting_external(conversation) and await _has_unfinished_work(repository, conversation_id):
+        return _result(conversation, "SKIPPED_PENDING_WORK")
+
     followup_sent_at = _parse_datetime(slot_memory.get("idle_followup_sent_at"))
     close_sent_at = _parse_datetime(slot_memory.get("idle_close_sent_at"))
 
     if followup_sent_at and await repository.has_customer_message_after(conversation_id, followup_sent_at):
         await _clear_idle_state(repository, conversation_id, slot_memory)
-        return _result(conversation, "RESET_BY_CUSTOMER")
+        followup_sent_at = None
+        close_sent_at = None
 
     if close_sent_at:
         return await _close_chat(conversation, repository, sender_client, slot_memory, now)
@@ -358,6 +408,16 @@ def _idle_failure_backoff_active(slot_memory: dict, now: datetime) -> bool:
     if failed_at is None:
         return False
     return now - failed_at < timedelta(seconds=DEFAULT_FAILURE_BACKOFF_SECONDS)
+
+
+def _is_waiting_external(conversation: dict) -> bool:
+    return str(conversation.get("status") or "").upper() == "WAITING_EXTERNAL"
+
+
+async def _has_unfinished_work(repository, conversation_id: str) -> bool:
+    if not hasattr(repository, "has_unfinished_work"):
+        return False
+    return bool(await repository.has_unfinished_work(conversation_id))
 
 
 def _parse_datetime(value: Any) -> datetime | None:

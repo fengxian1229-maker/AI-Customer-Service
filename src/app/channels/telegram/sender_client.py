@@ -1,5 +1,6 @@
 import json
 import mimetypes
+from pathlib import Path
 import socket
 import uuid
 from typing import Any
@@ -206,6 +207,88 @@ class TelegramSenderClient:
 
         req = request.Request(
             f"{self.api_base}/bot{self.bot_token}/sendPhoto",
+            data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            data = _safe_json(exc.read())
+            raise TelegramApiError(
+                _redact_auth(data.get("description") or str(exc), self.bot_token, self.attachment_auth_header),
+                status=exc.code,
+                error_code=data.get("error_code"),
+                data=data,
+                retryable=exc.code in {429, 500, 502, 503, 504},
+            ) from exc
+        except (error.URLError, TimeoutError, socket.timeout) as exc:
+            raise TelegramApiError(_redact_auth(str(exc), self.bot_token, self.attachment_auth_header), retryable=True) from exc
+        if not data.get("ok"):
+            raise TelegramApiError(
+                _redact_auth(data.get("description") or "Telegram API returned ok=false", self.bot_token, self.attachment_auth_header),
+                error_code=data.get("error_code"),
+                data=data,
+                retryable=data.get("error_code") in {429, 500, 502, 503, 504},
+            )
+        return data
+
+    def send_document(
+        self,
+        chat_id: str,
+        document_path: str,
+        caption: str | None = None,
+        message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> dict[str, Any]:
+        path = Path(document_path)
+        file_bytes = path.read_bytes()
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return self.send_document_multipart(
+            chat_id=chat_id,
+            file_bytes=file_bytes,
+            filename=path.name,
+            content_type=content_type,
+            caption=caption,
+            message_thread_id=message_thread_id,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+    def send_document_multipart(
+        self,
+        chat_id: str,
+        file_bytes: bytes,
+        filename: str,
+        content_type: str,
+        caption: str | None = None,
+        message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> dict[str, Any]:
+        boundary = f"----codex-telegram-{uuid.uuid4().hex}"
+        fields: dict[str, Any] = {
+            "chat_id": chat_id,
+            "caption": caption,
+            "message_thread_id": message_thread_id,
+            "reply_to_message_id": reply_to_message_id,
+        }
+        body = bytearray()
+        for key, value in fields.items():
+            if value is None:
+                continue
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode())
+            body.extend(str(value).encode("utf-8"))
+            body.extend(b"\r\n")
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'.encode())
+        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode())
+        body.extend(file_bytes)
+        body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode())
+
+        req = request.Request(
+            f"{self.api_base}/bot{self.bot_token}/sendDocument",
             data=bytes(body),
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",

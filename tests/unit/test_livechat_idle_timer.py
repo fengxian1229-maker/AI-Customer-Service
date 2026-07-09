@@ -6,10 +6,11 @@ from app.workers.livechat_idle_timer import CLOSE_TEXT, FOLLOWUP_TEXT, process_i
 
 
 class FakeIdleRepository:
-    def __init__(self, candidates=None, latest=None, customer_after=False) -> None:
+    def __init__(self, candidates=None, latest=None, customer_after=False, unfinished_work=False) -> None:
         self.candidates = candidates or []
         self.latest = latest
         self.customer_after = customer_after
+        self.unfinished_work = unfinished_work
         self.inserted_messages = []
         self.slot_updates = []
         self.closed = []
@@ -23,6 +24,9 @@ class FakeIdleRepository:
 
     async def has_customer_message_after(self, conversation_id: str, created_at: datetime) -> bool:
         return self.customer_after
+
+    async def has_unfinished_work(self, conversation_id: str) -> bool:
+        return self.unfinished_work
 
     async def insert_assistant_message(self, conversation: dict, text: str, now: datetime, source: str = "livechat_idle_timer") -> int:
         message_id = 100 + len(self.inserted_messages)
@@ -84,14 +88,14 @@ class FakeFinalReplyService:
         }
 
 
-def make_conversation(slot_memory=None) -> dict:
+def make_conversation(slot_memory=None, status: str = "AI_ACTIVE") -> dict:
     return {
         "conversation_id": "livechat:chat-1",
         "tenant_id": "default",
         "channel_type": "livechat",
         "chat_id": "chat-1",
         "thread_id": "thread-1",
-        "status": "AI_ACTIVE",
+        "status": status,
         "active_workflow": None,
         "slot_memory": slot_memory or {},
     }
@@ -294,6 +298,94 @@ def test_idle_timer_resets_when_customer_replies_after_followup():
     assert repository.slot_updates[-1][1] == {}
 
 
+def test_idle_timer_restarts_followup_after_customer_reply_and_new_assistant_message():
+    now = datetime(2026, 7, 3, 9, 5, 0)
+    slot_memory = {
+        "idle_followup_sent_at": "2026-07-03 09:00:00",
+        "idle_followup_message_id": 100,
+        "idle_base_assistant_message_id": 9,
+    }
+    repository = FakeIdleRepository(
+        latest=make_latest_assistant(now - timedelta(seconds=121), message_id=102),
+        customer_after=True,
+    )
+    client = FakeLiveChatClient()
+
+    result = asyncio.run(
+        process_idle_conversation(
+            make_conversation(slot_memory),
+            repository=repository,
+            sender_client=client,
+            followup_seconds=120,
+            close_seconds=120,
+            now=now,
+        )
+    )
+
+    assert result["status"] == "FOLLOWUP_SENT"
+    assert client.sent_texts == [("chat-1", "thread-1", FOLLOWUP_TEXT)]
+    assert repository.slot_updates[0][1] == {}
+    refreshed_slot_memory = repository.slot_updates[-1][1]
+    assert refreshed_slot_memory["idle_base_assistant_message_id"] == 102
+    assert refreshed_slot_memory["idle_followup_message_id"] == 100
+    assert refreshed_slot_memory["idle_followup_sent_at"] == "2026-07-03 09:05:00"
+
+
+def test_idle_timer_waiting_external_restarts_followup_when_no_pending_work():
+    now = datetime(2026, 7, 3, 9, 5, 0)
+    slot_memory = {
+        "idle_followup_sent_at": "2026-07-03 09:00:00",
+        "idle_followup_message_id": 100,
+        "idle_base_assistant_message_id": 9,
+    }
+    repository = FakeIdleRepository(
+        latest=make_latest_assistant(now - timedelta(seconds=120), message_id=102),
+        customer_after=True,
+        unfinished_work=False,
+    )
+    client = FakeLiveChatClient()
+
+    result = asyncio.run(
+        process_idle_conversation(
+            make_conversation(slot_memory, status="WAITING_EXTERNAL"),
+            repository=repository,
+            sender_client=client,
+            followup_seconds=120,
+            close_seconds=120,
+            now=now,
+        )
+    )
+
+    assert result["status"] == "FOLLOWUP_SENT"
+    assert client.sent_texts == [("chat-1", "thread-1", FOLLOWUP_TEXT)]
+    assert repository.slot_updates[0][1] == {}
+    assert repository.slot_updates[-1][1]["idle_base_assistant_message_id"] == 102
+
+
+def test_idle_timer_waiting_external_skips_when_pending_work_exists():
+    now = datetime(2026, 7, 3, 9, 5, 0)
+    repository = FakeIdleRepository(
+        latest=make_latest_assistant(now - timedelta(seconds=120), message_id=102),
+        unfinished_work=True,
+    )
+    client = FakeLiveChatClient()
+
+    result = asyncio.run(
+        process_idle_conversation(
+            make_conversation(status="WAITING_EXTERNAL"),
+            repository=repository,
+            sender_client=client,
+            followup_seconds=120,
+            close_seconds=120,
+            now=now,
+        )
+    )
+
+    assert result["status"] == "SKIPPED_PENDING_WORK"
+    assert client.sent_texts == []
+    assert repository.slot_updates == []
+
+
 def test_idle_timer_sends_close_text_and_closes_after_second_120_seconds():
     now = datetime(2026, 7, 3, 9, 2, 1)
     slot_memory = {
@@ -321,6 +413,64 @@ def test_idle_timer_sends_close_text_and_closes_after_second_120_seconds():
     assert repository.inserted_messages[0]["text"] == CLOSE_TEXT
     assert repository.closed[-1][1]["idle_close_sent_at"] == "2026-07-03 09:02:01"
     assert repository.closed[-1][1]["idle_closed_at"] == "2026-07-03 09:02:01"
+
+
+def test_idle_timer_sends_close_after_refreshed_followup_when_customer_stays_silent():
+    now = datetime(2026, 7, 3, 9, 7, 1)
+    slot_memory = {
+        "idle_followup_sent_at": "2026-07-03 09:05:00",
+        "idle_followup_message_id": 100,
+        "idle_base_assistant_message_id": 102,
+    }
+    repository = FakeIdleRepository(latest=make_latest_assistant(datetime(2026, 7, 3, 9, 5, 0), message_id=100))
+    client = FakeLiveChatClient()
+
+    result = asyncio.run(
+        process_idle_conversation(
+            make_conversation(slot_memory),
+            repository=repository,
+            sender_client=client,
+            followup_seconds=120,
+            close_seconds=120,
+            now=now,
+        )
+    )
+
+    assert result["status"] == "CLOSED"
+    assert client.sent_texts == [("chat-1", "thread-1", CLOSE_TEXT)]
+    assert client.closed_chats == ["chat-1"]
+    assert repository.closed[-1][1]["idle_close_sent_at"] == "2026-07-03 09:07:01"
+    assert repository.closed[-1][1]["idle_closed_at"] == "2026-07-03 09:07:01"
+
+
+def test_idle_timer_customer_reply_after_refreshed_followup_prevents_close():
+    now = datetime(2026, 7, 3, 9, 7, 1)
+    slot_memory = {
+        "idle_followup_sent_at": "2026-07-03 09:05:00",
+        "idle_followup_message_id": 100,
+        "idle_base_assistant_message_id": 102,
+    }
+    repository = FakeIdleRepository(
+        latest={"id": 103, "sender_role": "customer", "created_at": now - timedelta(seconds=10)},
+        customer_after=True,
+    )
+    client = FakeLiveChatClient()
+
+    result = asyncio.run(
+        process_idle_conversation(
+            make_conversation(slot_memory),
+            repository=repository,
+            sender_client=client,
+            followup_seconds=120,
+            close_seconds=120,
+            now=now,
+        )
+    )
+
+    assert result["status"] == "RESET_BY_CUSTOMER"
+    assert client.sent_texts == []
+    assert client.closed_chats == []
+    assert repository.slot_updates[-1][1] == {}
 
 
 def test_idle_timer_does_not_duplicate_close_text_when_close_retry_fails():

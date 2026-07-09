@@ -122,6 +122,48 @@ def test_multipart_body_contains_chat_reply_and_photo(monkeypatch):
     assert b'name="photo"; filename="a.png"' in body
 
 
+def test_send_document_multipart_contains_chat_caption_and_file(tmp_path, monkeypatch):
+    captured = {}
+    document = tmp_path / "report.pdf"
+    document.write_bytes(b"%PDF report")
+    client = TelegramSenderClient("secret")
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return json.dumps({"ok": True, "result": {"message_id": 77}}).encode()
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["body"] = req.data
+        return Response()
+
+    monkeypatch.setattr("app.channels.telegram.sender_client.request.urlopen", fake_urlopen)
+
+    result = client.send_document(
+        chat_id="-100test",
+        document_path=str(document),
+        caption="Daily report",
+        message_thread_id=123,
+    )
+
+    assert result["result"]["message_id"] == 77
+    assert "/sendDocument" in captured["url"]
+    assert b'name="chat_id"' in captured["body"]
+    assert b"-100test" in captured["body"]
+    assert b'name="message_thread_id"' in captured["body"]
+    assert b"123" in captured["body"]
+    assert b'name="caption"' in captured["body"]
+    assert b"Daily report" in captured["body"]
+    assert b'name="document"; filename="report.pdf"' in captured["body"]
+    assert b"%PDF report" in captured["body"]
+
+
 def test_download_too_large_falls_back_to_text_url(monkeypatch):
     client = TelegramSenderClient("secret", upload_attachments_via_download=True)
     sent = []

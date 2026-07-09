@@ -126,10 +126,11 @@ def test_load_sql_files_in_order():
         "012_add_multimodal_knowledge_fields.sql",
         "013_add_outbound_message_dedup_fields.sql",
         "014_telegram_cases.sql",
-        "015_telegram_case_messages.sql",
-        "016_telegram_update_offsets.sql",
-        "017_livechat_webhook_audit.sql",
-    ]
+            "015_telegram_case_messages.sql",
+            "016_telegram_update_offsets.sql",
+            "017_livechat_webhook_audit.sql",
+            "018_daily_chat_reports.sql",
+        ]
 
 
 def test_outbound_messages_schema_does_not_keep_legacy_inbound_action_unique_key():
