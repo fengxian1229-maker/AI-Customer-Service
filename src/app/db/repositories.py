@@ -1,13 +1,27 @@
-import json
 import hashlib
+import json
+import os
 from datetime import datetime
 
 import aiomysql
 
 from app.schemas.events import InboundEvent
+from app.services.conversations import conversation_id_for_chat
 from app.services.knowledge_blocks import normalize_metadata_json, normalize_question_aliases, validate_answer_blocks
 from app.services.rag import ALLOWED_FAQ_INTENTS, is_allowed_faq_document, rank_knowledge_document
 from app.workflows.slot_extractors import normalize_text
+
+
+DEFAULT_OUTBOUND_RETRY_BASE_SECONDS = 2
+DEFAULT_OUTBOUND_RETRY_MAX_SECONDS = 15
+DEFAULT_OUTBOUND_INITIAL_DELAY_SECONDS = 3
+THREAD_CONTINUABLE_WORKFLOW_STAGES = {
+    "collecting_slots",
+    "waiting_backend",
+    "backend_querying",
+    "lookup_pending_reply",
+}
+THREAD_CONTINUABLE_STATUSES = {"WAITING_EXTERNAL"}
 
 
 class InboundEventRepository:
@@ -48,7 +62,9 @@ class InboundEventRepository:
             async with conn.cursor() as cur:
                 await cur.execute(sql, args)
                 inserted = cur.rowcount == 1
-                return {"inserted": inserted, "duplicate": not inserted}
+            if inserted and _is_human_agent_public_reply_event(event):
+                await ConversationRepository.mark_human_active_on_connection(conn, event)
+            return {"inserted": inserted, "duplicate": not inserted}
 
     async def fetch_unprocessed(self, limit: int = 20) -> list[dict]:
         sql = """
@@ -364,6 +380,11 @@ def _extract_livechat_group_ids(value) -> set[int]:
     return group_ids
 
 
+def _is_human_agent_public_reply_event(event: InboundEvent) -> bool:
+    payload = event.payload_json if isinstance(event.payload_json, dict) else {}
+    return bool(payload.get("human_agent_public_reply"))
+
+
 def _coerce_group_ids(value) -> set[int]:
     if value is None:
         return set()
@@ -388,26 +409,67 @@ class ConversationRepository:
         async with self.pool.acquire() as conn:
             return await self.get_or_create_on_connection(conn, chat_id, thread_id)
 
+    async def get_by_conversation_id(self, conversation_id: str) -> dict | None:
+        sql = """
+        SELECT conversation_id, tenant_id, channel_type, chat_id, current_thread_id,
+               status, active_workflow, workflow_stage, slot_memory, handoff_state
+        FROM conversation_states
+        WHERE conversation_id = %s
+        LIMIT 1
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (conversation_id,))
+                row = await cur.fetchone()
+        if not row:
+            return None
+        row["slot_memory"] = json_loads(row.get("slot_memory"))
+        row["handoff_state"] = json_loads(row.get("handoff_state"))
+        return row
+
     async def get_or_create_on_connection(self, conn, chat_id: str, thread_id: str | None = None) -> dict:
-        conversation_id = f"livechat:{chat_id}"
+        conversation_id = conversation_id_for_chat(chat_id, thread_id)
         insert_sql = """
         INSERT INTO conversation_states (
           conversation_id, chat_id, current_thread_id
         ) VALUES (%s, %s, %s)
-        ON DUPLICATE KEY UPDATE current_thread_id = COALESCE(VALUES(current_thread_id), current_thread_id)
+        ON DUPLICATE KEY UPDATE current_thread_id = VALUES(current_thread_id)
         """
         select_sql = """
         SELECT conversation_id, tenant_id, channel_type, chat_id, current_thread_id,
-               status, active_workflow, workflow_stage, slot_memory
+               status, active_workflow, workflow_stage, slot_memory, handoff_state
+        FROM conversation_states
+        WHERE conversation_id = %s
+        LIMIT 1
+        """
+        previous_sql = """
+        SELECT conversation_id, tenant_id, channel_type, chat_id, current_thread_id,
+               status, active_workflow, workflow_stage, slot_memory, handoff_state
         FROM conversation_states
         WHERE chat_id = %s
+          AND conversation_id <> %s
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
         """
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(insert_sql, (conversation_id, chat_id, thread_id))
-            await cur.execute(select_sql, (chat_id,))
+            await cur.execute(select_sql, (conversation_id,))
             row = await cur.fetchone()
+            previous = None
+            if thread_id:
+                await cur.execute(previous_sql, (chat_id, conversation_id))
+                previous = await cur.fetchone()
         if row and row.get("slot_memory") is not None:
             row["slot_memory"] = json_loads(row["slot_memory"])
+        if row and row.get("handoff_state") is not None:
+            row["handoff_state"] = json_loads(row["handoff_state"])
+        if previous and previous.get("slot_memory") is not None:
+            previous["slot_memory"] = json_loads(previous["slot_memory"])
+        if previous and previous.get("handoff_state") is not None:
+            previous["handoff_state"] = json_loads(previous["handoff_state"])
+        if row and previous:
+            row = self._inherit_unfinished_thread_state(row, previous)
+            row["previous_thread_state"] = previous
         return row or {
             "conversation_id": conversation_id,
             "tenant_id": "default",
@@ -418,6 +480,28 @@ class ConversationRepository:
             "active_workflow": None,
             "workflow_stage": None,
             "slot_memory": {},
+            "handoff_state": {},
+        }
+
+    def _inherit_unfinished_thread_state(self, current: dict, previous: dict) -> dict:
+        if not _is_fresh_ai_state(current):
+            return current
+        if not _is_continuable_previous_thread(previous):
+            return current
+        inherited_slot_memory = dict(previous.get("slot_memory") or {})
+        inherited_slot_memory["previous_thread_continuation"] = {
+            "conversation_id": previous.get("conversation_id"),
+            "thread_id": previous.get("current_thread_id"),
+            "active_workflow": previous.get("active_workflow"),
+            "workflow_stage": previous.get("workflow_stage"),
+            "status": previous.get("status"),
+        }
+        return {
+            **current,
+            "status": previous.get("status") or current.get("status"),
+            "active_workflow": previous.get("active_workflow"),
+            "workflow_stage": previous.get("workflow_stage"),
+            "slot_memory": inherited_slot_memory,
         }
 
     async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict) -> None:
@@ -426,7 +510,8 @@ class ConversationRepository:
         SET status = COALESCE(%s, status),
             active_workflow = %s,
             workflow_stage = %s,
-            slot_memory = %s
+            slot_memory = %s,
+            handoff_state = COALESCE(%s, handoff_state)
         WHERE conversation_id = %s
         """
         args = (
@@ -434,6 +519,7 @@ class ConversationRepository:
             graph_state.get("active_workflow"),
             graph_state.get("workflow_stage"),
             json_dumps(graph_state.get("slot_memory") or {}),
+            json_dumps(graph_state.get("handoff_state")) if graph_state.get("handoff_state") is not None else None,
             conversation_id,
         )
         async with conn.cursor() as cur:
@@ -442,6 +528,71 @@ class ConversationRepository:
     async def update_workflow_state(self, conversation_id: str, graph_state: dict) -> None:
         async with self.pool.acquire() as conn:
             await self.update_workflow_state_on_connection(conn, conversation_id, graph_state)
+
+    @staticmethod
+    async def mark_human_active_on_connection(conn, event: InboundEvent) -> dict:
+        chat_id = event.chat_id or "unknown"
+        conversation_id = conversation_id_for_chat(chat_id, event.thread_id)
+        insert_sql = """
+        INSERT INTO conversation_states (
+          conversation_id, chat_id, current_thread_id
+        ) VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE current_thread_id = COALESCE(VALUES(current_thread_id), current_thread_id)
+        """
+        select_sql = """
+        SELECT slot_memory, handoff_state
+        FROM conversation_states
+        WHERE conversation_id = %s
+        LIMIT 1
+        """
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(insert_sql, (conversation_id, chat_id, event.thread_id))
+            await cur.execute(select_sql, (conversation_id,))
+            row = await cur.fetchone() or {}
+            slot_memory = json_loads(row.get("slot_memory")) or {}
+            handoff_state = json_loads(row.get("handoff_state")) or {}
+            payload = event.payload_json or {}
+            handoff_state.update(
+                {
+                    "human_agent_detected": True,
+                    "agent_id": payload.get("human_agent_id") or event.author_id,
+                    "first_agent_event_id": payload.get("human_agent_event_id") or event.event_id,
+                    "detected_at": event.occurred_at,
+                    "source": "livechat_agent_public_reply",
+                }
+            )
+            update_sql = """
+            UPDATE conversation_states
+            SET status = 'HUMAN_ACTIVE',
+                workflow_stage = 'human_active',
+                slot_memory = %s,
+                handoff_state = %s
+            WHERE conversation_id = %s
+            """
+            await cur.execute(update_sql, (json_dumps(slot_memory), json_dumps(handoff_state), conversation_id))
+        return {
+            "status": "HUMAN_ACTIVE",
+            "workflow_stage": "human_active",
+            "slot_memory": slot_memory,
+            "handoff_state": handoff_state,
+        }
+
+
+def _is_fresh_ai_state(conversation: dict) -> bool:
+    return (
+        str(conversation.get("status") or "AI_ACTIVE").upper() == "AI_ACTIVE"
+        and not conversation.get("active_workflow")
+        and not conversation.get("workflow_stage")
+        and not (conversation.get("slot_memory") or {})
+    )
+
+
+def _is_continuable_previous_thread(conversation: dict) -> bool:
+    status = str(conversation.get("status") or "").upper()
+    workflow_stage = str(conversation.get("workflow_stage") or "")
+    if status in {"CLOSED", "HUMAN_ACTIVE", "HANDOFF_REQUESTED"}:
+        return False
+    return status in THREAD_CONTINUABLE_STATUSES or workflow_stage in THREAD_CONTINUABLE_WORKFLOW_STAGES
 
 
 class OutboundMessageRepository:
@@ -604,6 +755,7 @@ class OutboundMessageRepository:
         SELECT COALESCE(m.conversation_id, CONCAT('outbound:', m.id)) AS lease_conversation_id, m.id AS first_id
         FROM outbound_messages m
         WHERE m.status IN ('PENDING', 'RETRYABLE')
+          AND (m.status <> 'PENDING' OR m.created_at <= DATE_SUB(NOW(6), INTERVAL %s SECOND))
           AND (m.locked_by IS NULL OR m.lease_expires_at IS NULL OR m.lease_expires_at < NOW(6))
           AND NOT EXISTS (
             SELECT 1
@@ -628,7 +780,7 @@ class OutboundMessageRepository:
         FOR UPDATE SKIP LOCKED
         """
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(conversation_sql, (limit,))
+            await cur.execute(conversation_sql, (_outbound_initial_delay_seconds(), limit))
             conversation_rows = await cur.fetchall()
             conversation_ids = [row["lease_conversation_id"] for row in conversation_rows]
             if not conversation_ids:
@@ -640,13 +792,14 @@ class OutboundMessageRepository:
                 SELECT id
                 FROM outbound_messages
                 WHERE status IN ('PENDING', 'RETRYABLE')
+                  AND (status <> 'PENDING' OR created_at <= DATE_SUB(NOW(6), INTERVAL %s SECOND))
                   AND (locked_by IS NULL OR lease_expires_at IS NULL OR lease_expires_at < NOW(6))
                   AND COALESCE(conversation_id, CONCAT('outbound:', id)) = %s
                 ORDER BY COALESCE(block_index, 2147483647), id ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
                 """
-                await cur.execute(select_sql, (conversation_id, max_per_conversation))
+                await cur.execute(select_sql, (_outbound_initial_delay_seconds(), conversation_id, max_per_conversation))
                 id_rows = await cur.fetchall()
                 ids = [row["id"] for row in id_rows]
                 if not ids:
@@ -669,6 +822,7 @@ class OutboundMessageRepository:
                        COALESCE(c.channel_type, 'livechat') AS channel_type,
                        m.conversation_id, m.inbound_event_id, m.chat_id, m.thread_id,
                        m.action_type, m.message_type, m.payload_json, m.status,
+                       m.retry_count, m.last_error,
                        m.dedup_key, m.block_index, m.message_kind, m.command_type,
                        m.leased_at, m.lease_expires_at, m.locked_by, m.attempted_at, m.processed_at,
                        c.status AS conversation_status,
@@ -704,24 +858,24 @@ class OutboundMessageRepository:
             row["payload_json"] = json_loads(row["payload_json"])
         return row
 
-    async def mark_sent(self, outbound_message_id: int) -> None:
+    async def mark_sent(self, outbound_message_id: int, last_error: str | None = None) -> None:
         async with self.pool.acquire() as conn:
-            await self.mark_sent_on_connection(conn, outbound_message_id)
+            await self.mark_sent_on_connection(conn, outbound_message_id, last_error=last_error)
 
-    async def mark_sent_on_connection(self, conn, outbound_message_id: int) -> None:
+    async def mark_sent_on_connection(self, conn, outbound_message_id: int, last_error: str | None = None) -> None:
         sql = """
         UPDATE outbound_messages
         SET status = 'SENT',
             sent_at = NOW(6),
             processed_at = NOW(6),
-            last_error = NULL,
+            last_error = %s,
             leased_at = NULL,
             lease_expires_at = NULL,
             locked_by = NULL
         WHERE id = %s
         """
         async with conn.cursor() as cur:
-            await cur.execute(sql, (outbound_message_id,))
+            await cur.execute(sql, (last_error, outbound_message_id))
 
     async def mark_failed(
         self,
@@ -730,11 +884,27 @@ class OutboundMessageRepository:
         error: str,
         retryable: bool = False,
     ) -> None:
-        retry_sql = ", retry_count = retry_count + 1" if retryable else ""
-        sql = f"""
+        if retryable:
+            retry_base_seconds = _outbound_retry_base_seconds()
+            retry_max_seconds = _outbound_retry_max_seconds()
+            sql = """
+            UPDATE outbound_messages
+            SET status = %s,
+                last_error = %s,
+                retry_count = retry_count + 1,
+                leased_at = NULL,
+                lease_expires_at = DATE_ADD(
+                    NOW(6),
+                    INTERVAL LEAST(%s, %s * POW(2, LEAST(retry_count, 3))) SECOND
+                ),
+                locked_by = COALESCE(locked_by, 'retry-backoff')
+            WHERE id = %s
+            """
+        else:
+            sql = """
         UPDATE outbound_messages
         SET status = %s,
-            last_error = %s{retry_sql},
+            last_error = %s,
             leased_at = NULL,
             lease_expires_at = NULL,
             locked_by = NULL
@@ -742,7 +912,12 @@ class OutboundMessageRepository:
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql, (status, error, outbound_message_id))
+                args = (
+                    (status, error, retry_max_seconds, retry_base_seconds, outbound_message_id)
+                    if retryable
+                    else (status, error, outbound_message_id)
+                )
+                await cur.execute(sql, args)
 
     async def release_lease(self, outbound_message_id: int) -> None:
         sql = """
@@ -1436,7 +1611,7 @@ class ConversationMessageRepository:
 
     async def fetch_recent(self, conversation_id: str, limit: int = 10) -> list[dict]:
         sql = """
-        SELECT id, conversation_id, sender_role, message_type, text_content,
+        SELECT id, conversation_id, chat_id, thread_id, sender_role, message_type, text_content,
                attachment_refs, source, created_at
         FROM conversation_messages
         WHERE conversation_id = %s
@@ -1450,6 +1625,75 @@ class ConversationMessageRepository:
         rows = list(reversed(rows))
         for row in rows:
             row["attachment_refs"] = json_loads(row.get("attachment_refs") or "[]")
+        return rows
+
+    async def fetch_recent_current_thread(self, conversation_id: str, thread_id: str | None, limit: int = 10) -> list[dict]:
+        if not thread_id:
+            return await self.fetch_recent(conversation_id, limit=limit)
+        sql = """
+        SELECT id, conversation_id, chat_id, thread_id, sender_role, message_type, text_content,
+               attachment_refs, source, created_at
+        FROM conversation_messages
+        WHERE conversation_id = %s
+          AND thread_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (conversation_id, thread_id, limit))
+                rows = await cur.fetchall()
+        rows = list(reversed(rows))
+        for row in rows:
+            row["attachment_refs"] = json_loads(row.get("attachment_refs") or "[]")
+        return rows
+
+    async def fetch_previous_thread_memory(
+        self,
+        chat_id: str | None,
+        exclude_thread_id: str | None,
+        limit: int = 6,
+    ) -> list[dict]:
+        if not chat_id or not exclude_thread_id:
+            return []
+        thread_sql = """
+        SELECT thread_id
+        FROM conversation_messages
+        WHERE chat_id = %s
+          AND thread_id IS NOT NULL
+          AND thread_id <> %s
+        GROUP BY thread_id
+        ORDER BY MAX(created_at) DESC
+        LIMIT 1
+        """
+        message_sql = """
+        SELECT id, conversation_id, chat_id, thread_id, sender_role, message_type, text_content,
+               attachment_refs, source, created_at
+        FROM conversation_messages
+        WHERE chat_id = %s
+          AND thread_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(thread_sql, (chat_id, exclude_thread_id))
+                thread_row = await cur.fetchone()
+                if not thread_row:
+                    return []
+                previous_thread_id = thread_row["thread_id"]
+                await cur.execute(message_sql, (chat_id, previous_thread_id, limit))
+                rows = await cur.fetchall()
+        rows = list(reversed(rows))
+        for row in rows:
+            row["attachment_refs"] = json_loads(row.get("attachment_refs") or "[]")
+            row["context_scope"] = "previous_thread_memory"
+            row["read_only_memory"] = True
+            row["memory_instruction"] = (
+                "This message is from a previous LiveChat thread. Use it only as read-only background memory; "
+                "do not treat it as the current user request and do not continue prior handoff/backend actions unless "
+                "the current workflow explicitly continues an unfinished case."
+            )
         return rows
 
 
@@ -2197,11 +2441,16 @@ class SenderTransactionRepository:
         self.outbound_repository = outbound_repository or OutboundMessageRepository(pool)
         self.conversation_message_repository = conversation_message_repository or ConversationMessageRepository(pool)
 
-    async def mark_sent_with_message(self, outbound_message_id: int, message_record: dict) -> dict:
+    async def mark_sent_with_message(
+        self,
+        outbound_message_id: int,
+        message_record: dict,
+        last_error: str | None = None,
+    ) -> dict:
         async with self.pool.acquire() as conn:
             await conn.begin()
             try:
-                await self.outbound_repository.mark_sent_on_connection(conn, outbound_message_id)
+                await self.outbound_repository.mark_sent_on_connection(conn, outbound_message_id, last_error=last_error)
                 message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(conn, message_record)
                 await conn.commit()
             except Exception:
@@ -2218,6 +2467,29 @@ def json_loads(payload) -> dict:
     if isinstance(payload, str):
         return json.loads(payload)
     return payload
+
+
+def _outbound_retry_base_seconds() -> int:
+    return _positive_int_env("LIVECHAT_SEND_RETRY_BASE_SECONDS", DEFAULT_OUTBOUND_RETRY_BASE_SECONDS)
+
+
+def _outbound_retry_max_seconds() -> int:
+    return _positive_int_env("LIVECHAT_SEND_RETRY_MAX_SECONDS", DEFAULT_OUTBOUND_RETRY_MAX_SECONDS)
+
+
+def _outbound_initial_delay_seconds() -> int:
+    return _positive_int_env("LIVECHAT_SEND_INITIAL_DELAY_SECONDS", DEFAULT_OUTBOUND_INITIAL_DELAY_SECONDS)
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def _outbound_dedup_key(message: dict) -> str:

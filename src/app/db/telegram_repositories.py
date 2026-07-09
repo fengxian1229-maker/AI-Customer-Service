@@ -121,9 +121,11 @@ class TelegramCaseRepository:
         sql = """
         SELECT c.id, c.tenant_id, c.conversation_id, c.chat_id, c.thread_id,
                c.inbound_event_id, c.external_command_id, c.intent, c.active_workflow,
-               c.telegram_chat_id, c.telegram_message_thread_id, c.root_message_id, c.status
+               c.telegram_chat_id, c.telegram_message_thread_id, c.root_message_id, c.status,
+               s.slot_memory
         FROM telegram_case_messages m
         JOIN telegram_cases c ON c.id = m.telegram_case_id
+        LEFT JOIN conversation_states s ON s.conversation_id = c.conversation_id
         WHERE m.telegram_chat_id = %s
           AND m.telegram_message_id = %s
         LIMIT 1
@@ -137,6 +139,9 @@ class TelegramCaseRepository:
         expected_thread = row.get("telegram_message_thread_id")
         if expected_thread is not None and message_thread_id is not None and int(expected_thread) != int(message_thread_id):
             return None
+        row = dict(row)
+        slot_memory = json_loads(row.pop("slot_memory", None)) or {}
+        row["reply_language"] = _reply_language_from_slot_memory(slot_memory)
         return dict(row)
 
     async def record_staff_reply_message(
@@ -263,3 +268,11 @@ def _attachment_message_ids(result_json: dict) -> list[int]:
         if message_id is not None:
             ids.append(int(message_id))
     return ids
+
+
+def _reply_language_from_slot_memory(slot_memory: dict) -> str | None:
+    for key in ("last_reply_language", "conversation_language", "last_user_language"):
+        value = str((slot_memory or {}).get(key) or "").strip()
+        if value:
+            return value
+    return None

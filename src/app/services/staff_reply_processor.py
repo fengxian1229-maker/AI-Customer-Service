@@ -25,7 +25,12 @@ class StaffReplyProcessor:
                 parsed = _parse_candidate(candidate)
                 polished = _compact(parsed.get("text"))
                 reply_type = parsed.get("type") or classify_staff_reply(raw)
-                if polished and validate_staff_reply_facts(raw, polished)["ok"] and not has_untranslated_internal_english(polished, target_lang):
+                if (
+                    polished
+                    and validate_staff_reply_facts(raw, polished)["ok"]
+                    and not has_untranslated_internal_english(polished, target_lang)
+                    and not has_customer_visible_internal_backend_label(polished)
+                ):
                     return StaffReplyResult(type=reply_type, text=polished, source="model")
             except Exception:
                 pass
@@ -37,7 +42,7 @@ def staff_reply_passthrough_fallback(text: str, target_lang: str = "zh") -> str:
     if not raw:
         if target_lang == "en":
             return "The team is still checking your case. We will update you in this chat once there is progress."
-        return "后台仍在确认中，有更新会马上在这里通知你。"
+        return "我们仍在为您确认中，有更新会马上在这里通知您。"
     lower = raw.lower()
     reply_type = classify_staff_reply(raw)
     if target_lang == "en":
@@ -48,19 +53,27 @@ def staff_reply_passthrough_fallback(text: str, target_lang: str = "zh") -> str:
         if reply_type == "resolution":
             return with_critical_facts("The team has sent an update. We will continue helping you based on that reply.", raw, target_lang)
         return with_critical_facts("The team has received your case and is checking it now. We will keep following up in this chat. Your funds are safe within our process.", raw, target_lang)
+    if target_lang == "es":
+        if reply_type == "ask_customer":
+            if _PHONE_MISMATCH_PATTERN.search(lower):
+                return "El equipo encontró que el número de teléfono puede no coincidir. Confirme y envíe el número registrado correcto aquí para que podamos continuar revisando."
+            return with_critical_facts("El equipo necesita información adicional. Envíe los datos solicitados aquí para que podamos continuar revisando.", raw, target_lang)
+        if reply_type == "resolution":
+            return with_critical_facts("El equipo envió una actualización. Continuaremos ayudándole según esa respuesta.", raw, target_lang)
+        return with_critical_facts("El equipo recibió su caso y lo está revisando ahora. Seguiremos dando seguimiento en este chat. Sus fondos están seguros dentro de nuestro proceso.", raw, target_lang)
     if reply_type == "ask_customer":
         if _PHONE_MISMATCH_PATTERN.search(lower):
-            return "后台核实时发现手机号可能不一致，请你再次确认并发送正确的注册手机号，我们收到后会继续协助确认。"
-        return with_critical_facts("后台需要你补充资料，请按照要求提供，我们收到后会继续协助确认。", raw, target_lang)
+            return "为您核实时发现手机号可能不一致，请您再次确认并发送正确的注册手机号，我们收到后会继续协助确认。"
+        return with_critical_facts("还需要您补充相关资料，请按要求提供，我们收到后会继续协助确认。", raw, target_lang)
     if reply_type == "resolution":
         if re.search(r"(withdraw|retiro|出款|提款|取款).*(success|completed|done|成功|完成|processed|aprobado|procesado)", lower):
-            return with_critical_facts("后台回复你的提款已处理完成，请你确认账户入账情况。", raw, target_lang)
+            return with_critical_facts("已为您核实到这笔提款已处理完成，请您确认账户入账情况。", raw, target_lang)
         if re.search(r"(deposit|recarga|存款|充值).*(success|completed|done|成功|完成|credited|acredit|aprobado)", lower):
-            return with_critical_facts("后台回复你的存款已处理完成，请你确认账户余额。", raw, target_lang)
+            return with_critical_facts("已为您核实到这笔存款已处理完成，请您确认账户余额。", raw, target_lang)
         if _REJECTED_PATTERN.search(lower):
-            return with_critical_facts("后台回复此笔目前没有成功通过，我们会按照后台结果继续协助你确认下一步。", raw, target_lang)
-        return with_critical_facts("后台已回复，我们会按照这个更新继续协助你处理。", raw, target_lang)
-    return with_critical_facts("后台已收到并正在确认，我们会在这个对话内持续跟进。请放心，您的资金在我们的流程下是安全的。", raw, target_lang)
+            return with_critical_facts("经核实，此笔目前没有成功通过，我们会按照当前结果继续协助您确认下一步。", raw, target_lang)
+        return with_critical_facts("已收到处理更新，我们会按照这个更新继续协助您处理。", raw, target_lang)
+    return with_critical_facts("我们已收到相关信息并正在为您确认，会在此对话内持续跟进。请放心，您的资金在我们的流程下是安全的。", raw, target_lang)
 
 
 _WAIT_PATTERN = re.compile(r"(wait|checking|review|investig|pending|process(?:ing)?|on process|in process|under review|for review|稍等|审核|審核|查询|查詢|处理中|處理中)")
@@ -112,6 +125,10 @@ def has_untranslated_internal_english(text: str, target_lang: str = "zh") -> boo
     return bool(re.search(r"\b(still processing|already on process|on process|in process|checking|wait please|under checking|for review)\b", text.lower()))
 
 
+def has_customer_visible_internal_backend_label(text: str) -> bool:
+    return bool(re.search(r"(后台|後台|\bbackend\b)", text, re.I))
+
+
 def with_critical_facts(text: str, raw: str, target_lang: str = "zh") -> str:
     normalized_text = normalize_fact_text(text)
     facts = [fact for fact in critical_facts(normalize_fact_text(raw)) if fact not in normalized_text]
@@ -119,6 +136,8 @@ def with_critical_facts(text: str, raw: str, target_lang: str = "zh") -> str:
         return text
     if target_lang == "en":
         return f"{text} Case details: {', '.join(facts)}."
+    if target_lang == "es":
+        return f"{text} Detalles del caso: {', '.join(facts)}."
     return f"{text} 案件资料：{'、'.join(facts)}。"
 
 

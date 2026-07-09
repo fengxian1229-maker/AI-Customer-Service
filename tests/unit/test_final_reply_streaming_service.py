@@ -122,8 +122,23 @@ def test_final_reply_streaming_service_extracts_fenced_json_text(monkeypatch):
     assert result["final_response_text"] == "您好，请提供用户名或注册手机号。"
 
 
-def test_final_reply_streaming_service_guardrail_failure_returns_fallback(monkeypatch):
+def test_final_reply_streaming_service_guardrail_failure_is_audited(monkeypatch):
     model = FakeModel(["您的存款已到账。"])
+    monkeypatch.setattr("app.services.final_reply_streaming_service.build_gemini_chat_model", lambda settings: model)
+    publisher = FakePreviewPublisher()
+    service = FinalReplyStreamingService(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
+
+    result = asyncio.run(service.stream_final_reply(make_state(), publisher))
+
+    assert publisher.flushed == ["您的存款已到账。"]
+    assert result["final_response_text"] == "您的存款已到账。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
+    assert result["final_reply_result"]["warning_reason"] == "guardrail_audit"
+    assert "forbidden_backend_fact" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_streaming_service_empty_model_text_returns_fallback(monkeypatch):
+    model = FakeModel([""])
     monkeypatch.setattr("app.services.final_reply_streaming_service.build_gemini_chat_model", lambda settings: model)
     publisher = FakePreviewPublisher()
     service = FinalReplyStreamingService(Settings(livechat_agent_access_token="x", livechat_account_id="y"))
@@ -133,4 +148,4 @@ def test_final_reply_streaming_service_guardrail_failure_returns_fallback(monkey
     assert publisher.flushed == ["请提供用户名或注册手机号。"]
     assert result["final_response_text"] == "请提供用户名或注册手机号。"
     assert result["final_reply_result"]["status"] == "fallback"
-    assert result["final_reply_result"]["fallback_reason"] == "guardrail_failed"
+    assert result["final_reply_result"]["fallback_reason"] == "empty_model_text"

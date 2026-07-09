@@ -5,6 +5,7 @@ from typing import Any
 
 from app.channels.livechat.normalizer import parse_rfc3339_to_mysql
 from app.channels.livechat.polling_receiver import chat_group_ids
+from app.config.platforms import default_allowed_livechat_group_ids, platform_for_livechat_group_id
 from app.schemas.events import InboundEvent
 
 
@@ -53,6 +54,17 @@ async def normalize_webhook_payload_async(
                     chat_lookup = await client.get_chat(chat_id)
                 except Exception as exc:
                     chat_lookup_error = {"type": type(exc).__name__, "message": str(exc)}
+    if client is not None and _needs_author_lookup(body, chat_lookup):
+        chat_id = _extract_chat_id(body.get("payload") or {})
+        if chat_id:
+            try:
+                detailed_chat = await client.get_chat(chat_id)
+                if isinstance(chat_lookup, dict):
+                    chat_lookup = {**chat_lookup, **(detailed_chat or {})}
+                else:
+                    chat_lookup = detailed_chat
+            except Exception as exc:
+                chat_lookup_error = {"type": type(exc).__name__, "message": str(exc)}
     return _normalize(body, settings=settings, chat_lookup=chat_lookup, chat_lookup_error=chat_lookup_error)
 
 
@@ -87,6 +99,24 @@ def _needs_chat_lookup(body: dict, settings) -> bool:
         return False
     payload = body.get("payload") or {}
     return _extract_group_ids_from_payload(payload) == set()
+
+
+def _needs_author_lookup(body: dict, chat_lookup: dict | None) -> bool:
+    if body.get("action") != "incoming_event":
+        return False
+    payload = body.get("payload") or {}
+    event = _extract_event(payload)
+    author_id = _first_text(event.get("author_id"), payload.get("author_id"))
+    if not author_id:
+        return False
+    if _first_text(payload.get("author_type"), event.get("author_type")):
+        return False
+    sources = [payload]
+    if isinstance(payload.get("chat"), dict):
+        sources.append(payload["chat"])
+    if isinstance(chat_lookup, dict):
+        sources.append(chat_lookup)
+    return not any(source.get("users") or source.get("chat_users") for source in sources)
 
 
 def _normalize(
@@ -278,15 +308,22 @@ def _build_event(
     event = event or _extract_event(payload)
     author_id = _first_text(event.get("author_id"), payload.get("author_id"))
     sender_role = _sender_role(author_id, settings)
+    author_type = _author_type(chat, payload, author_id, chat_lookup)
+    human_agent_public_reply = (
+        author_type == "agent"
+        and not (author_id and str(author_id) in getattr(settings, "livechat_self_author_id_set", set()))
+        and str(event.get("visibility") or "all").lower() != "internal"
+    )
     reason = ignore_reason
     is_ignored = ignored
     if author_id and str(author_id) in getattr(settings, "livechat_self_author_id_set", set()):
         is_ignored = True
         reason = reason or "self_message"
-    elif _author_type(chat, payload, author_id, chat_lookup) == "agent":
+    elif author_type == "agent":
         is_ignored = True
         reason = reason or "agent_message"
-    if not _group_allowed(payload, chat, chat_lookup, settings):
+    platform_context = _platform_context(payload, chat, chat_lookup, settings)
+    if not _group_allowed(platform_context):
         is_ignored = True
         reason = _group_ignore_reason(body, payload, chat, chat_lookup, chat_lookup_error, settings)
 
@@ -306,14 +343,38 @@ def _build_event(
         sender_role=sender_role,
         occurred_at=parse_rfc3339_to_mysql(_first_text(event.get("created_at"), payload.get("created_at"), thread.get("created_at"), chat.get("created_at"))),
         dedup_key=_dedup_key(action, chat_id, thread_id, event_id, body),
-        payload_json=_payload_json(payload, body, chat_lookup, chat_lookup_error),
+        payload_json=_payload_json(
+            payload,
+            body,
+            chat_lookup,
+            chat_lookup_error,
+            platform_context,
+            human_agent_context={
+                "public_reply": human_agent_public_reply,
+                "agent_id": str(author_id) if author_id else None,
+                "event_id": event_id,
+            },
+        ),
         ignored=is_ignored,
         ignore_reason=reason if is_ignored else None,
     )
 
 
-def _payload_json(payload: dict, body: dict, chat_lookup: dict | None, chat_lookup_error: dict | None) -> dict:
+def _payload_json(
+    payload: dict,
+    body: dict,
+    chat_lookup: dict | None,
+    chat_lookup_error: dict | None,
+    platform_context: dict[str, Any],
+    human_agent_context: dict[str, Any] | None = None,
+) -> dict:
     result = {**payload, "webhook_body": body}
+    result.update(platform_context)
+    human_agent_context = human_agent_context or {}
+    if human_agent_context.get("public_reply"):
+        result["human_agent_public_reply"] = True
+        result["human_agent_id"] = human_agent_context.get("agent_id")
+        result["human_agent_event_id"] = human_agent_context.get("event_id")
     if chat_lookup is not None:
         result["chat_lookup"] = chat_lookup
     if chat_lookup_error is not None:
@@ -348,12 +409,8 @@ def _sender_role(author_id: str | None, settings) -> str:
     return "external"
 
 
-def _group_allowed(payload: dict, chat: dict, chat_lookup: dict | None, settings) -> bool:
-    allowed = getattr(settings, "livechat_allowed_group_id_set", set())
-    if not allowed:
-        return True
-    group_ids = _collect_group_ids(payload, chat, chat_lookup)
-    return bool(group_ids & allowed)
+def _group_allowed(platform_context: dict[str, Any]) -> bool:
+    return bool(platform_context.get("allowed_platform"))
 
 
 def _group_ignore_reason(
@@ -380,6 +437,29 @@ def _collect_group_ids(payload: dict, chat: dict, chat_lookup: dict | None) -> s
     if chat_lookup:
         group_ids.update(chat_group_ids(chat_lookup))
     return group_ids
+
+
+def _platform_context(payload: dict, chat: dict, chat_lookup: dict | None, settings) -> dict[str, Any]:
+    group_ids = _collect_group_ids(payload, chat, chat_lookup)
+    allowed_groups = _allowed_group_ids(settings)
+    candidate_groups = sorted(group_ids & allowed_groups) if allowed_groups else sorted(group_ids)
+    for group_id in candidate_groups:
+        platform = platform_for_livechat_group_id(group_id)
+        if platform:
+            return {
+                "platform": platform,
+                "livechat_group_id": group_id,
+                "allowed_platform": True,
+            }
+    return {
+        "platform": None,
+        "livechat_group_id": None,
+        "allowed_platform": False,
+    }
+
+
+def _allowed_group_ids(settings) -> set[int]:
+    return set(getattr(settings, "livechat_allowed_group_id_set", default_allowed_livechat_group_ids(include_test=True)) or set())
 
 
 def _extract_group_ids_from_payload(payload: dict) -> set[int]:
@@ -478,6 +558,9 @@ def _threads(chat: dict) -> list[dict]:
 def _author_type(chat: dict, payload: dict, author_id: str | None, chat_lookup: dict | None) -> str | None:
     if not author_id:
         return None
+    direct_author_type = _first_text(payload.get("author_type"), _extract_event(payload).get("author_type"))
+    if direct_author_type:
+        return direct_author_type
     for source in (payload, chat, chat_lookup or {}):
         for user in source.get("users") or source.get("chat_users") or []:
             if str(user.get("id")) == str(author_id):

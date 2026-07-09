@@ -4,6 +4,7 @@ from app.services.livechat_menus import build_quick_replies_event, detect_button
 def test_get_menu_returns_language_specific_buttons_and_fallback():
     zh = get_menu("main", "zh-Hans")
     fallback = get_menu("main", "tl")
+    default = get_menu("main", None)
 
     assert zh["title"] == "您好，我是客服灵犀，我可以为您提供以下方面的协助：存款、提款、流水查询、上传截图，或为您转接真人客服。请告诉我您具体需要处理哪方面的问题，或者您可以点击下方的菜单按钮。"
     assert "客服灵犀" in zh["title"]
@@ -15,7 +16,9 @@ def test_get_menu_returns_language_specific_buttons_and_fallback():
         "other_menu",
     ]
     assert zh["buttons"][0]["label"] == "💰 存款问题"
-    assert fallback["language"] == "zh-Hans"
+    assert fallback["language"] == "es"
+    assert default["language"] == "es"
+    assert "Puedo ayudarle con depósitos" in default["title"]
 
 
 def test_main_menu_uses_long_welcome_copy_for_supported_languages():
@@ -69,9 +72,9 @@ def test_recovery_menus_are_available():
     assert get_menu("deposit_recovery", "en")["buttons"][1]["id"] == "route_main"
 
 
-def test_unknown_language_defaults_to_simplified_chinese():
+def test_unknown_language_defaults_to_spanish():
     menu = get_menu("deposit", None)
 
-    assert menu["language"] == "zh-Hans"
-    assert menu["title"] == "请选择存款问题："
-    assert menu["buttons"][0]["label"] == "🧾 存款未到账"
+    assert menu["language"] == "es"
+    assert menu["title"] == "Seleccione el caso de depósito:"
+    assert menu["buttons"][0]["label"] == "🧾 Depósito no acreditado"

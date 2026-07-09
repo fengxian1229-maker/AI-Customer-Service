@@ -483,6 +483,74 @@ def test_external_command_worker_real_telegram_sends_case_and_emits_result():
     assert result_repository.inserted[0]["result_json"]["telegram_message_id"] == 555
 
 
+def test_external_command_worker_real_telegram_skips_when_conversation_human_active():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.statuses = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 41,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 141,
+                    "command_type": "telegram.send_case_card",
+                    "payload_json": {
+                        "intent": "deposit_missing",
+                        "active_workflow": "deposit_missing",
+                        "conversation_id": "livechat:chat-1",
+                        "chat_id": "chat-1",
+                        "thread_id": "thread-1",
+                        "slot_memory": {"account_or_phone": "andy123", "deposit_screenshot": "https://cdn.example/a.png"},
+                    },
+                }
+            ]
+
+        async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+            self.statuses.append((command_id, status, error))
+
+    class FakeConversationRepository:
+        async def get_by_conversation_id(self, conversation_id: str):
+            assert conversation_id == "livechat:chat-1"
+            return {"conversation_id": conversation_id, "status": "HUMAN_ACTIVE"}
+
+    class FakeTelegramClient:
+        def send_case_card(self, card: dict):
+            raise AssertionError("Telegram client must not be called")
+
+    repository = FakeCommandRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        telegram_sop_enabled=True,
+        telegram_bot_token="secret",
+        telegram_test_group="-100test",
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            conversation_repository=FakeConversationRepository(),
+            dry_run=False,
+            execute_telegram=True,
+            settings=settings,
+            telegram_client_factory=lambda _settings: FakeTelegramClient(),
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.statuses == [
+        (41, "SKIPPED_HUMAN_ACTIVE", "conversation is HUMAN_ACTIVE; telegram command skipped")
+    ]
+    assert result[0]["status"] == "SKIPPED_HUMAN_ACTIVE"
+
+
 def test_external_command_worker_real_telegram_rejects_orphan_append_without_case_id():
     from app.core.settings import Settings
     from app.workers.external_command_worker import process_pending_commands
@@ -798,7 +866,7 @@ def test_external_command_worker_real_handoff_sent_ack_allows_transfer():
                     "thread_id": "thread-1",
                     "inbound_event_id": 24,
                     "command_type": "human_handoff.requested",
-                    "payload_json": {},
+                    "payload_json": {"livechat_group_id": 28, "platform": "ZAP69"},
                 }
             ]
 
@@ -848,9 +916,10 @@ def test_external_command_worker_real_handoff_sent_ack_allows_transfer():
         )
     )
 
-    assert sender_client.calls == [("chat-1", 23, True, True)]
+    assert sender_client.calls == [("chat-1", 28, True, True)]
     assert repository.done == [14]
     assert result[0]["status"] == "SENT"
+    assert result[0]["transfer_result"]["target_group_id"] == 28
     assert conversation_repository.updated[0][1]["status"] == "HUMAN_ACTIVE"
 
 
@@ -909,6 +978,60 @@ def test_external_command_worker_real_handoff_fails_when_ack_is_missing():
 
     assert repository.statuses == [(15, "FAILED_DEPENDENCY", "handoff ack outbound message is missing")]
     assert result[0]["status"] == "FAILED_DEPENDENCY"
+
+
+def test_external_command_worker_real_handoff_rejects_invalid_payload_group_id():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.statuses = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 16,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 26,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {"livechat_group_id": "not-a-group"},
+                }
+            ]
+
+        async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+            self.statuses.append((command_id, status, error))
+
+    class SenderClient:
+        async def transfer_chat_to_group(self, *args, **kwargs):
+            raise AssertionError("transfer must not run with an invalid handoff target group")
+
+    repository = FakeCommandRepository()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_enabled=True,
+        livechat_handoff_target_group_id=None,
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            dry_run=False,
+            execute_human_handoff=True,
+            settings=settings,
+            sender_client_factory=lambda settings: SenderClient(),
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.statuses == [
+        (16, "FAILED_CONFIG", "command.payload_json.livechat_group_id must be a positive integer")
+    ]
+    assert result[0]["status"] == "FAILED_CONFIG"
 
 
 def test_external_command_worker_real_handoff_success_transfers_emits_result_and_marks_human_active():
@@ -998,6 +1121,7 @@ def test_external_command_worker_real_handoff_success_transfers_emits_result_and
     assert result[0]["status"] == "SENT"
     assert result_repository.inserted[0]["result_type"] == "human_handoff.transfer_chat.result"
     assert result_repository.inserted[0]["result_json"]["status"] == "TRANSFERRED"
+    assert result_repository.inserted[0]["result_json"]["target_group_id"] == 23
     assert result_repository.inserted[0]["result_json"]["livechat_response"] == {}
     assert result_repository.inserted[0]["status"] == "PROCESSED"
     assert conversation_repository.updated == [

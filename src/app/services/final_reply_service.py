@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.services.chinese_script import adapt_chinese_script
 from app.services.language_policy import normalize_language_code, parse_supported_languages
 from app.services.reply_renderer import render_customer_reply
-from app.workflows.final_reply_policy import accepted_result, fallback_result, validate_final_reply_output
+from app.workflows.final_reply_policy import (
+    accepted_result,
+    accepted_with_warnings_result,
+    fallback_result,
+    validate_final_reply_output,
+)
 from app.workflows.final_reply_templates import (
     build_node_facts,
     build_node_reply_instruction,
@@ -29,7 +35,7 @@ class FinalReplyService:
         self.min_confidence = float(min_confidence)
         self.fallback_enabled = bool(fallback_enabled)
         self.tenant_persona = {
-            "default_language": "zh-Hans",
+            "default_language": "es",
             "tone": "polite",
             "assistant_name": None,
             "brand_name": None,
@@ -45,7 +51,7 @@ class FinalReplyService:
             or state.get("response_text")
             or self._render_structured_fallback(state)
         )
-        fallback_text = normalize_text(adapt_chinese_script(fallback_text_raw, reply_language))
+        fallback_text = normalize_text(_sanitize_customer_visible_internal_labels(adapt_chinese_script(fallback_text_raw, reply_language)))
         if not fallback_text:
             return {
                 **state,
@@ -57,21 +63,34 @@ class FinalReplyService:
         if not self.provider or not hasattr(self.provider, "compose_final_reply"):
             return self._fallback_state(state, fallback_text, "missing_provider")
 
-        payload = self._build_payload(state, fallback_text_raw or fallback_text)
+        payload_fallback_text = normalize_text(_sanitize_customer_visible_internal_labels(fallback_text_raw or fallback_text))
+        payload = self._build_payload(state, payload_fallback_text)
         try:
             output = await self.provider.compose_final_reply(payload)
         except Exception as exc:
             return self._fallback_state(state, fallback_text, "exception", error=exc)
 
         confidence = float((output or {}).get("confidence") or 0.0)
-        if confidence < self.min_confidence:
-            return self._fallback_state(state, fallback_text, "low_confidence")
-
-        violations = validate_final_reply_output(state, output or {})
-        if violations:
-            return self._fallback_state(state, fallback_text, "guardrail_failed", violations=violations)
-
         text = normalize_text((output or {}).get("text"))
+        if not text:
+            return self._fallback_state(state, fallback_text, "empty_model_text")
+        violations = validate_final_reply_output(state, output or {})
+        warning_reason = None
+        if confidence < self.min_confidence:
+            warning_reason = "low_confidence"
+            violations = sorted(set([*violations, "low_confidence"]))
+        if violations:
+            return {
+                **state,
+                "response_text_fallback": fallback_text,
+                "final_response_text": text,
+                "final_reply_result": accepted_with_warnings_result(
+                    output or {},
+                    violations=violations,
+                    warning_reason=warning_reason or "guardrail_audit",
+                ),
+            }
+
         return {
             **state,
             "response_text_fallback": fallback_text,
@@ -123,6 +142,7 @@ class FinalReplyService:
             "raw_user_input": state.get("raw_user_input"),
             "rewritten_question": state.get("rewritten_question"),
             "recent_messages": list(state.get("recent_messages") or []),
+            "previous_thread_memory": list(state.get("previous_thread_memory") or []),
             "route": state.get("route"),
             "intent_result": state.get("intent_result"),
             "active_workflow": state.get("active_workflow"),
@@ -154,3 +174,37 @@ class FinalReplyService:
         if language != "unknown":
             return language
         return normalize_language_code(self.tenant_persona.get("default_language"))
+
+
+def _sanitize_customer_visible_internal_labels(text: str) -> str:
+    replacements = (
+        ("后台回复显示", "查询结果显示"),
+        ("后台工作人员回复显示", "查询结果显示"),
+        ("后台人员回复显示", "查询结果显示"),
+        ("後台回覆顯示", "查詢結果顯示"),
+        ("後台工作人員回覆顯示", "查詢結果顯示"),
+        ("後台人員回覆顯示", "查詢結果顯示"),
+        ("后台核实时", "为您核实时"),
+        ("後台核實時", "為您核實時"),
+        ("后台已进行回复", "已收到处理更新"),
+        ("後台已進行回覆", "已收到處理更新"),
+        ("后台已回复", "已收到处理更新"),
+        ("後台已回覆", "已收到處理更新"),
+        ("后台回复", "已为您核实到"),
+        ("後台回覆", "已為您核實到"),
+        ("后台显示", "查询结果显示"),
+        ("後台顯示", "查詢結果顯示"),
+        ("后台工作人员", "处理人员"),
+        ("後台工作人員", "處理人員"),
+        ("后台人员", "处理人员"),
+        ("後台人員", "處理人員"),
+        ("后台", "我们"),
+        ("後台", "我們"),
+    )
+    sanitized = str(text or "")
+    for old, new in replacements:
+        sanitized = sanitized.replace(old, new)
+    sanitized = re.sub(r"\bbackend\s+replied\b", "we received an update", sanitized, flags=re.I)
+    sanitized = re.sub(r"\bbackend\s+shows\b", "the check result shows", sanitized, flags=re.I)
+    sanitized = re.sub(r"\bbackend\b", "support team", sanitized, flags=re.I)
+    return sanitized

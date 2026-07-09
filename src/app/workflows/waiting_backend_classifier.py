@@ -33,12 +33,12 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     )
     relation = (state.get("intent_result") or {}).get("workflow_relation") or dialogue_plan.get("intent_relation")
     explicit_human = relation == "human_request" or is_explicit_human_request(text)
+    if relation == "current_workflow_resolution" and has_workflow_resolution_signal(state, text=text, slot_memory=slot_memory):
+        return _resolved_state(state, slot_memory)
     if relation == "acknowledgement" or _is_acknowledgement(text):
         return _acknowledgement_state(state, slot_memory)
     if relation == "contextual_followup" or _is_name_offer_followup(text):
         return _contextual_followup_state(state, slot_memory)
-    if relation == "current_workflow_resolution":
-        return _resolved_state(state, slot_memory)
     waiting_customer_supplement = (
         state.get("workflow_stage") == "waiting_customer_supplement"
         or slot_memory.get("last_telegram_staff_reply_type") == "ask_customer"
@@ -48,16 +48,23 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     has_supplement = bool(
         urls
         or any(value for value in (dialogue_plan.get("slot_updates") or {}).values())
+        or _has_customer_supplement_signal(text)
         or (waiting_customer_supplement and _has_customer_supplement_signal(text))
         or (dialogue_plan.get("status") == "accepted" and relation == "current_sop_supplement")
     )
 
     if has_supplement:
+        if active_workflow == "withdrawal_blocked_or_rollover" and slot_memory.get("account_or_phone"):
+            return _backend_query_state(state, slot_memory)
         if not (slot_memory.get("telegram_case_id") and slot_memory.get("telegram_message_id")):
             if explicit_human:
                 return _build_handoff_state(state, slot_memory)
             return _waiting_followup_state(state, slot_memory)
-        reply = plan_sop_reply(str(active_workflow), {"action": "append_to_case"})
+        reply = plan_sop_reply(
+            str(active_workflow),
+            {"action": "append_to_case", "reply_language": state.get("reply_language")},
+            language=state.get("reply_language"),
+        )
         return {
             **state,
             "slot_memory": slot_memory,
@@ -96,7 +103,11 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
         if count >= 2:
             return _build_handoff_state(state, slot_memory, reason="waiting_backend_repeat_dispute")
 
-    reply_text = plan_sop_reply(str(active_workflow), {"action": "waiting_followup"})["reply_text"]
+    reply_text = plan_sop_reply(
+        str(active_workflow),
+        {"action": "waiting_followup", "reply_language": state.get("reply_language")},
+        language=state.get("reply_language"),
+    )["reply_text"]
     return {
         **state,
         "slot_memory": slot_memory,
@@ -119,6 +130,42 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _backend_query_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **state,
+        "slot_memory": slot_memory,
+        "status": "WAITING_EXTERNAL",
+        "active_workflow": "withdrawal_blocked_or_rollover",
+        "workflow_stage": "backend_querying",
+        "sop_action": "backend_query",
+        "response_text": None,
+        "response_text_fallback": None,
+        "node_reply_template": "backend_waiting",
+        "node_facts": {
+            "sop_name": "withdrawal_blocked_or_rollover",
+            "sop_action": "backend_query",
+            "slot_memory": slot_memory,
+            "fallback_text": None,
+        },
+        "reply_plan": _waiting_reply_plan("backend_waiting", ""),
+        "commands": [
+            {
+                "type": CommandType.BACKEND_QUERY,
+                "payload": {
+                    "intent": "withdrawal_blocked_or_rollover",
+                    "account_or_phone": slot_memory["account_or_phone"],
+                    "identity_kind": slot_memory.get("identity_kind"),
+                    "reply_language": state.get("reply_language"),
+                    "conversation_language": state.get("conversation_language"),
+                    "detected_language": state.get("detected_language"),
+                    "raw_user_input": state.get("raw_user_input"),
+                    "rewritten_question": state.get("rewritten_question"),
+                },
+            }
+        ],
+    }
+
+
 def _waiting_followup_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
     return {
         **state,
@@ -135,7 +182,7 @@ def _waiting_followup_state(state: dict[str, Any], slot_memory: dict[str, Any]) 
 
 
 def _acknowledgement_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
-    text = _acknowledgement_reply_text(str(state.get("reply_language") or "zh-Hans"), str(state.get("workflow_stage") or ""))
+    text = _acknowledgement_reply_text(str(state.get("reply_language") or "es"), str(state.get("workflow_stage") or ""))
     return {
         **state,
         "slot_memory": slot_memory,
@@ -157,7 +204,7 @@ def _acknowledgement_state(state: dict[str, Any], slot_memory: dict[str, Any]) -
 
 def _contextual_followup_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
     text = _contextual_followup_reply_text(
-        str(state.get("reply_language") or "zh-Hans"),
+        str(state.get("reply_language") or "es"),
         str(state.get("active_workflow") or ""),
     )
     return {
@@ -206,7 +253,7 @@ def _build_handoff_state(state: dict[str, Any], slot_memory: dict[str, Any], rea
 
 
 def _resolved_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
-    text = _resolved_ack_text(str(state.get("reply_language") or "zh-Hans"))
+    text = _resolved_ack_text(str(state.get("reply_language") or "es"))
     next_slot_memory = dict(slot_memory)
     next_slot_memory["customer_confirmed_resolved"] = True
     return {
@@ -252,6 +299,57 @@ def _waiting_reply_plan(kind: str, fallback_text: str) -> dict[str, Any]:
 def _is_acknowledgement(text: str) -> bool:
     normalized = re.sub(r"[.!?。！？…\s]+", "", str(text or "").lower())
     return normalized in {"ok", "okay", "好的", "好", "谢谢", "謝謝", "明白", "了解", "收到", "知道了", "thanks", "thankyou", "gracias", "vale", "bueno", "listo"}
+
+
+def has_workflow_resolution_signal(
+    state: dict[str, Any],
+    *,
+    text: str | None = None,
+    slot_memory: dict[str, Any] | None = None,
+) -> bool:
+    latest_text = str(text if text is not None else state.get("rewritten_question") or state.get("raw_user_input") or "")
+    if _is_explicit_resolution_text(latest_text):
+        return True
+
+    memory = slot_memory if slot_memory is not None else dict(state.get("slot_memory") or {})
+    if str(memory.get("last_telegram_staff_reply_type") or "").lower() == "resolution":
+        return True
+
+    for message in reversed(list(state.get("recent_messages") or [])[-8:]):
+        role = str(message.get("sender_role") or message.get("role") or "").lower()
+        if role not in {"assistant", "telegram", "backend", "staff"}:
+            continue
+        if _is_resolution_update_text(str(message.get("text_content") or message.get("text") or "")):
+            return True
+    return False
+
+
+def _is_explicit_resolution_text(text: str) -> bool:
+    raw = str(text or "").lower()
+    return bool(
+        raw.strip()
+        and re.search(
+            r"(已到账|已到帐|到帐了|到账了|收到了|已经收到|已解决|解决了|处理好了|已完成|完成了|"
+            r"\bgot it\b|\breceived\b|\bcredited\b|\barrived\b|\bit arrived\b|\bresolved\b|\bfixed\b|\bdone\b|"
+            r"ya\s+lleg[oó]|ya\s+me\s+lleg[oó]|recibido|acreditado|resuelto|listo)",
+            raw,
+            re.I,
+        )
+    )
+
+
+def _is_resolution_update_text(text: str) -> bool:
+    raw = str(text or "").lower()
+    return bool(
+        raw.strip()
+        and re.search(
+            r"(已到账|已到帐|到账成功|成功到账|款项已到账|已成功入账|已为您核实到.*到账|"
+            r"successfully credited|has been credited|deposit has been credited|credited to your account|"
+            r"ya\s+se\s+acredit[oó]|dep[oó]sito.*acreditado)",
+            raw,
+            re.I,
+        )
+    )
 
 
 def _is_name_offer_followup(text: str) -> bool:

@@ -26,7 +26,7 @@ def test_waiting_backend_supplement_with_telegram_case_appends():
     assert result["action"] == "append_to_case"
 
 
-def test_waiting_backend_unverified_image_attachment_is_not_supplement():
+def test_waiting_backend_unverified_image_attachment_is_supplement():
     result = evaluate_sop_policy(
         "deposit_missing",
         {"telegram_case_id": "tg:123", "telegram_message_id": 123},
@@ -35,8 +35,8 @@ def test_waiting_backend_unverified_image_attachment_is_not_supplement():
         attachments=[{"url": "https://cdn.example/landscape.png", "mime_type": "image/png"}],
     )
 
-    assert result["action"] == "waiting_followup"
-    assert result["reason"] == "customer_asked_status_or_unclear"
+    assert result["action"] == "append_to_case"
+    assert result["reason"] == "customer_sent_supplement"
 
 
 def test_waiting_backend_verified_matching_receipt_attachment_appends():

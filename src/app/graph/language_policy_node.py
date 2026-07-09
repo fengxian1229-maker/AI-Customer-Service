@@ -18,9 +18,9 @@ def language_policy_node(
     *,
     language_detection_enabled: bool = True,
     language_detection_min_confidence: float = 0.70,
-    tenant_persona_default_language: str = "zh-Hans",
+    tenant_persona_default_language: str = "es",
     tenant_supported_languages: str | list[str] = "zh-Hans,zh-Hant,en,es,tl,th,my,ms",
-    language_fallback: str = "zh-Hans",
+    language_fallback: str = "es",
     language_persist_to_slot_memory: bool = True,
 ) -> GraphState:
     if not language_detection_enabled:

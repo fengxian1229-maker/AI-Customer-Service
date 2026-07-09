@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from app.config.platforms import platform_for_livechat_group_id
 from app.channels.ingress import IngressEvent, IngressNormalizeResult
 from app.schemas.events import InboundEvent
 
@@ -57,10 +58,14 @@ def standard_event_from_type(event_type: str | None) -> str:
 
 
 def normalize_polling_event(payload: dict[str, Any], self_author_ids: set[str]) -> InboundEvent:
+    livechat_group_id, platform = _platform_from_group_ids(payload.get("group_ids") or [])
     normalized_payload = {
         **payload,
         "ingress_source": payload.get("ingress_source") or "polling",
         "group_ids": payload.get("group_ids") or [],
+        "platform": payload.get("platform") or platform,
+        "livechat_group_id": payload.get("livechat_group_id") or livechat_group_id,
+        "allowed_platform": bool(payload.get("allowed_platform", platform is not None)),
         "chat_users": payload.get("chat_users") or [],
         "polling_source": payload.get("polling_source") or "unknown",
         "last_thread_summary": payload.get("last_thread_summary") or {},
@@ -86,6 +91,14 @@ def normalize_polling_event(payload: dict[str, Any], self_author_ids: set[str]) 
         ignored=ignored,
         ignore_reason="self_message" if ignored else None,
     )
+
+
+def _platform_from_group_ids(group_ids: list[Any]) -> tuple[int | None, str | None]:
+    for group_id in sorted({int(value) for value in group_ids if str(value).strip().isdigit()}):
+        platform = platform_for_livechat_group_id(group_id)
+        if platform:
+            return group_id, platform
+    return None, None
 
 
 def normalize_ingress_event(ingress_event: IngressEvent, self_author_ids: set[str]) -> IngressNormalizeResult:

@@ -5,13 +5,19 @@ from app.workflows.final_reply_policy import build_reply_plan
 from app.workflows.llm_sop_dialogue_planner import plan_sop_dialogue_from_state
 from app.services.reply_intents import CustomerReplyIntent, build_customer_reply
 from app.services.reply_renderer import render_customer_reply
-from app.workflows.slot_extractors import extract_channel, extract_identity, is_wallet_or_receiving_account_change
+from app.workflows.slot_extractors import (
+    explicit_phone_reference,
+    extract_channel,
+    extract_identity,
+    extract_identity_from_texts,
+    is_wallet_or_receiving_account_change,
+)
 from app.workflows.sop_command_builder import build_sop_command
 from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
 
 
-DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_ASSET = "/Users/andy/ai-agent/bot66tornado/assets/examples/deposit-payment-success-onepay.jpg"
+DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_ASSET = "bot66tornado/assets/examples/deposit-payment-success-onepay.jpg"
 DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_KEY = "deposit_payment_success_example"
 DEPOSIT_EXAMPLE_SENT_SLOT = "deposit_missing_example_sent"
 
@@ -70,10 +76,11 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
     example_will_be_sent = _should_send_deposit_missing_intro(intent, policy, slot_memory)
     policy_context = {
         **policy,
+        "reply_language": state.get("reply_language") or state.get("conversation_language") or state.get("detected_language"),
         "deposit_example_sent": bool(slot_memory.get(DEPOSIT_EXAMPLE_SENT_SLOT)),
         "deposit_example_will_be_sent": example_will_be_sent,
     }
-    reply = plan_sop_reply(intent, policy_context)
+    reply = plan_sop_reply(intent, policy_context, language=policy_context.get("reply_language"))
     commands: list[dict[str, Any]] = []
     if policy["action"] == "send_telegram_case":
         commands.append(build_sop_command(CommandType.TELEGRAM_SEND_CASE_CARD, state, intent, slot_memory))
@@ -125,11 +132,16 @@ def _money_missing_sop(state: dict[str, Any], intent: str, screenshot_key: str) 
 
 def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
     slot_memory = dict(state.get("slot_memory") or {})
-    text = str(state.get("rewritten_question") or state.get("raw_user_input") or "")
+    raw_text = str(state.get("raw_user_input") or "")
+    rewritten_text = str(state.get("rewritten_question") or "")
+    text = rewritten_text or raw_text
     reply_language = state.get("reply_language") or state.get("conversation_language") or state.get("detected_language")
-    identity = extract_identity(text)
+    identity = extract_identity_from_texts(raw_text, rewritten_text)
     if identity:
         slot_memory["account_or_phone"] = identity["value"]
+        slot_memory["identity_kind"] = identity["type"]
+    elif slot_memory.get("account_or_phone") and explicit_phone_reference(raw_text):
+        slot_memory["identity_kind"] = "phone"
     payment_channel = extract_channel(text)
     if payment_channel:
         slot_memory["payment_channel"] = payment_channel
@@ -232,6 +244,7 @@ def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
                 "payload": {
                     "intent": "withdrawal_blocked_or_rollover",
                     "account_or_phone": slot_memory["account_or_phone"],
+                    "identity_kind": slot_memory.get("identity_kind"),
                     "reply_language": state.get("reply_language"),
                     "conversation_language": state.get("conversation_language"),
                     "detected_language": state.get("detected_language"),
@@ -303,7 +316,15 @@ def _pending_reply_lookup_sop(state: dict[str, Any]) -> dict[str, Any]:
         "commands": [
             {
                 "type": CommandType.PENDING_REPLY_LOOKUP,
-                "payload": {"pending_reply_identity": slot_memory["pending_reply_identity"]},
+                "payload": {
+                    "pending_reply_identity": slot_memory["pending_reply_identity"],
+                    "reply_language": state.get("reply_language"),
+                    "conversation_language": state.get("conversation_language"),
+                    "detected_language": state.get("detected_language"),
+                    "raw_user_input": state.get("raw_user_input"),
+                    "rewritten_question": state.get("rewritten_question"),
+                    "slot_memory": dict(slot_memory),
+                },
             }
         ],
     }
@@ -397,6 +418,7 @@ def _should_send_deposit_missing_intro(intent: str, policy: dict[str, Any], slot
 
 def _deposit_missing_intro_commands(state: dict[str, Any], collection_text: str) -> list[dict[str, Any]]:
     reason_text = _deposit_missing_reason_text(state.get("reply_language") or state.get("conversation_language") or state.get("detected_language"))
+    text = f"{reason_text}\n\n{collection_text}"
     return [
         {
             "type": CommandType.LIVECHAT_SEND_IMAGE,
@@ -412,15 +434,7 @@ def _deposit_missing_intro_commands(state: dict[str, Any], collection_text: str)
             "type": CommandType.LIVECHAT_SEND_TEXT,
             "block_index": 1,
             "payload": {
-                "text": reason_text,
-                "final_reply_exempt": True,
-            },
-        },
-        {
-            "type": CommandType.LIVECHAT_SEND_TEXT,
-            "block_index": 2,
-            "payload": {
-                "text": collection_text,
+                "text": text,
                 "final_reply_target": True,
             },
         },

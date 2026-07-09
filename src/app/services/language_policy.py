@@ -50,7 +50,7 @@ def parse_supported_languages(value: str | list[str] | tuple[str, ...] | None) -
         code = normalize_language_code(item)
         if code != "unknown" and code not in normalized:
             normalized.append(code)
-    return normalized or ["zh-Hans"]
+    return normalized or ["es"]
 
 
 def detect_language_deterministic(text: str | None) -> dict[str, Any]:
@@ -79,7 +79,7 @@ def resolve_language_policy(
     supported_languages: list[str] | str | None,
     *,
     min_confidence: float = 0.70,
-    fallback_language: str = "zh-Hans",
+    fallback_language: str = "es",
     persist_to_slot_memory: bool = True,
 ) -> dict[str, Any]:
     supported = parse_supported_languages(supported_languages)
@@ -163,7 +163,7 @@ def _ensure_supported(language: str, supported: list[str], fallback: str) -> str
     fallback_normalized = normalize_language_code(fallback)
     if fallback_normalized != "unknown" and fallback_normalized in supported:
         return fallback_normalized
-    return supported[0] if supported else "zh-Hans"
+    return supported[0] if supported else "es"
 
 
 def _detected(language: str, confidence: float, reason: str) -> dict[str, Any]:

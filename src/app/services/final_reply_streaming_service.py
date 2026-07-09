@@ -8,7 +8,12 @@ from typing import Any
 from app.llm.gemini_model import build_gemini_chat_model
 from app.services.chinese_script import adapt_chinese_script
 from app.services.final_reply_service import FinalReplyService
-from app.workflows.final_reply_policy import accepted_result, fallback_result, validate_final_reply_output
+from app.workflows.final_reply_policy import (
+    accepted_result,
+    accepted_with_warnings_result,
+    fallback_result,
+    validate_final_reply_output,
+)
 from app.workflows.final_reply_templates import (
     FINAL_REPLY_SEMANTIC_CONSTRAINTS,
     TEXT_ONLY_STREAMING_OUTPUT_INSTRUCTION,
@@ -24,7 +29,7 @@ class FinalReplyStreamingService:
             provider=None,
             enabled=False,
             tenant_persona={
-                "default_language": getattr(settings, "tenant_persona_default_language", "zh-Hans"),
+                "default_language": getattr(settings, "tenant_persona_default_language", "es"),
                 "supported_languages": getattr(
                     settings,
                     "tenant_supported_languages",
@@ -68,6 +73,14 @@ class FinalReplyStreamingService:
             if not suppress_preview:
                 await preview_publisher.publish_if_needed(accumulated_text)
         accumulated_text = self._normalize_streamed_text(accumulated_text)
+        if not accumulated_text:
+            await preview_publisher.flush(fallback_text)
+            return {
+                **state,
+                "response_text_fallback": fallback_text,
+                "final_response_text": fallback_text,
+                "final_reply_result": fallback_result("empty_model_text"),
+            }
 
         output = {
             "text": accumulated_text,
@@ -80,12 +93,16 @@ class FinalReplyStreamingService:
         }
         violations = validate_final_reply_output(state, output)
         if violations:
-            await preview_publisher.flush(fallback_text)
+            await preview_publisher.flush(accumulated_text)
             return {
                 **state,
                 "response_text_fallback": fallback_text,
-                "final_response_text": fallback_text,
-                "final_reply_result": fallback_result("guardrail_failed", violations=violations),
+                "final_response_text": accumulated_text,
+                "final_reply_result": accepted_with_warnings_result(
+                    output,
+                    violations=violations,
+                    warning_reason="guardrail_audit",
+                ),
             }
         await preview_publisher.flush(accumulated_text)
         return {

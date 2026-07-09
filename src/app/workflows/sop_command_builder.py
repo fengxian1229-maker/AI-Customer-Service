@@ -12,6 +12,12 @@ def build_sop_command(
     slot_memory: dict[str, Any],
     supplement: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    platform = state.get("platform") or (state.get("payload_json") or {}).get("platform") or slot_memory.get("platform")
+    livechat_group_id = (
+        state.get("livechat_group_id")
+        or (state.get("payload_json") or {}).get("livechat_group_id")
+        or slot_memory.get("livechat_group_id")
+    )
     payload: dict[str, Any] = {
         "intent": intent,
         "active_workflow": intent,
@@ -19,6 +25,8 @@ def build_sop_command(
         "chat_id": state.get("chat_id"),
         "thread_id": state.get("thread_id"),
         "inbound_event_id": state.get("inbound_event_id"),
+        "platform": platform,
+        "livechat_group_id": livechat_group_id,
         "slot_memory": dict(slot_memory),
     }
     if command_type == CommandType.TELEGRAM_APPEND_TO_CASE:

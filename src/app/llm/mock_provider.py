@@ -155,7 +155,7 @@ class MockLLMProvider:
 
     async def compose_final_reply(self, payload: LLMFinalReplyInput) -> LLMFinalReplyOutput:
         fallback_text = normalize_text(payload.get("response_text_fallback"))
-        language = payload.get("reply_language") or payload.get("conversation_language") or payload.get("detected_language") or "zh-Hans"
+        language = payload.get("reply_language") or payload.get("conversation_language") or payload.get("detected_language") or "es"
         tone = ((payload.get("tenant_persona") or {}).get("tone")) or "polite"
         return {
             "text": fallback_text,

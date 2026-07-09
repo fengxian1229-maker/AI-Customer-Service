@@ -15,6 +15,7 @@ def make_settings(**overrides):
         "livechat_agent_access_token": "token",
         "livechat_account_id": "account",
         "livechat_webhook_secret": "secret",
+        "livechat_allowed_group_ids": "",
     }
     values.update(overrides)
     return Settings(**values)
@@ -53,6 +54,8 @@ def test_secret_correct_normalizes_message():
     assert events[0].standard_event_type == "MESSAGE_CREATED"
     assert events[0].dedup_key == "livechat_webhook:incoming_event:chat-1:thread-1:event-1"
     assert events[0].ignored is False
+    assert events[0].payload_json["platform"] == "TEST"
+    assert events[0].payload_json["livechat_group_id"] == 23
 
 
 @pytest.mark.parametrize("secret", [None, "wrong"])
@@ -242,6 +245,34 @@ def test_agent_author_is_ignored():
 
     assert event.ignored is True
     assert event.ignore_reason == "agent_message"
+    assert event.payload_json["human_agent_public_reply"] is True
+    assert event.payload_json["human_agent_id"] == "agent-1"
+
+
+def test_internal_agent_note_does_not_mark_human_public_reply():
+    body = incoming_event_body()
+    body["payload"]["users"] = [{"id": "agent-1", "type": "agent"}]
+    body["payload"]["event"]["author_id"] = "agent-1"
+    body["payload"]["event"]["visibility"] = "internal"
+
+    event = normalize_webhook_payload(body, make_settings())[0]
+
+    assert event.ignored is True
+    assert event.ignore_reason == "agent_message"
+    assert event.payload_json.get("human_agent_public_reply") is not True
+
+
+def test_incoming_event_agent_author_type_is_ignored_without_users_lookup():
+    body = incoming_event_body()
+    body["payload"].pop("users")
+    body["payload"]["event"]["author_id"] = "agent-1"
+    body["payload"]["event"]["author_type"] = "agent"
+
+    event = normalize_webhook_payload(body, make_settings())[0]
+
+    assert event.ignored is True
+    assert event.ignore_reason == "agent_message"
+    assert event.payload_json["human_agent_public_reply"] is True
 
 
 def test_group_not_allowed_is_insertable_ignored_event():
@@ -249,6 +280,28 @@ def test_group_not_allowed_is_insertable_ignored_event():
 
     assert event.ignored is True
     assert event.ignore_reason == "group_not_allowed"
+
+
+def test_unknown_group_is_ignored_by_default_platform_filter():
+    body = incoming_event_body()
+    body["payload"]["access"]["group_ids"] = [99]
+
+    event = normalize_webhook_payload(body, make_settings())[0]
+
+    assert event.ignored is True
+    assert event.ignore_reason == "group_not_allowed"
+    assert event.payload_json["platform"] is None
+
+
+def test_official_group_maps_to_platform_by_default():
+    body = incoming_event_body()
+    body["payload"]["access"]["group_ids"] = [28]
+
+    event = normalize_webhook_payload(body, make_settings())[0]
+
+    assert event.ignored is False
+    assert event.payload_json["platform"] == "ZAP69"
+    assert event.payload_json["livechat_group_id"] == 28
 
 
 def test_dedup_key_falls_back_to_stable_hash_when_missing_ids():
@@ -301,6 +354,38 @@ def test_async_normalizer_uses_resolved_chat_lookup_before_get_chat():
 
     assert events[0].ignored is False
     assert events[0].payload_json["chat_lookup"]["access"]["group_ids"] == [23]
+
+
+def test_async_normalizer_uses_get_chat_for_missing_author_type_even_with_group_data():
+    body = incoming_event_body()
+    body["payload"].pop("users")
+    body["payload"]["event"]["author_id"] = "agent-1"
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def get_chat(self, chat_id):
+            self.calls.append(chat_id)
+            return {
+                "id": "chat-1",
+                "access": {"group_ids": [23]},
+                "users": [{"id": "agent-1", "type": "agent"}],
+            }
+
+    client = FakeClient()
+    events = asyncio.run(
+        normalize_webhook_payload_async(
+            body,
+            make_settings(livechat_allowed_group_ids="23"),
+            client=client,
+        )
+    )
+
+    assert client.calls == ["chat-1"]
+    assert events[0].ignored is True
+    assert events[0].ignore_reason == "agent_message"
+    assert events[0].payload_json["human_agent_public_reply"] is True
 
 
 def test_async_normalizer_marks_missing_group_when_get_chat_fails():

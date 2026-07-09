@@ -20,7 +20,7 @@ def build_final_reply_service_from_settings(settings: Settings | None):
         min_confidence=getattr(settings, "llm_final_reply_min_confidence", 0.70),
         fallback_enabled=getattr(settings, "llm_final_reply_fallback_enabled", True),
         tenant_persona={
-            "default_language": getattr(settings, "tenant_persona_default_language", "zh-Hans"),
+            "default_language": getattr(settings, "tenant_persona_default_language", "es"),
             "supported_languages": getattr(settings, "tenant_supported_languages", "zh-Hans,zh-Hant,en,es,tl,th,my,ms"),
             "tone": getattr(settings, "tenant_persona_tone", "polite"),
             "assistant_name": getattr(settings, "tenant_persona_assistant_name", None),

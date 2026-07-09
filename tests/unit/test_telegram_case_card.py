@@ -9,6 +9,7 @@ def test_case_card_includes_username_and_phone_separately():
             "payload_json": {
                 "intent": "withdrawal_missing",
                 "active_workflow": "withdrawal_missing",
+                "platform": "JG7",
                 "chat_id": "chat-1",
                 "thread_id": "thread-1",
                 "slot_memory": {
@@ -23,6 +24,34 @@ def test_case_card_includes_username_and_phone_separately():
 
     assert "Username / account: frank" in card["card_text"]
     assert "Phone: 12335" in card["card_text"]
+    assert "Platform: JG7" in card["card_text"]
+
+
+def test_case_card_does_not_include_order_id_field():
+    card = build_telegram_case_card(
+        {
+            "conversation_id": "livechat:chat-1",
+            "chat_id": "chat-1",
+            "payload_json": {
+                "intent": "deposit_missing",
+                "active_workflow": "deposit_missing",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "slot_memory": {
+                    "account_or_phone": "13800138000",
+                    "phone": "13800138000",
+                    "order_id": "TX123456",
+                    "deposit_order_id": "D123456",
+                    "deposit_screenshot": "https://cdn.example/deposit.png",
+                },
+            },
+        },
+        {"chat_id": "-100test", "message_thread_id": None},
+    )
+
+    assert "Order ID:" not in card["card_text"]
+    assert "TX123456" not in card["card_text"]
+    assert "D123456" not in card["card_text"]
 
 
 def _append_command(supplement):

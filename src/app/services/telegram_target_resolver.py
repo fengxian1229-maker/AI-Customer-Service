@@ -1,12 +1,27 @@
 from typing import Any
 
+from app.config.platforms import DEFAULT_TELEGRAM_FINANCE_GROUP, TEST_PLATFORM, normalize_platform, topic_for_platform
+
 
 def resolve_telegram_target(command: dict[str, Any], settings) -> dict[str, Any]:
     payload = command.get("payload_json") or command.get("payload") or {}
+    slot_memory = payload.get("slot_memory") or {}
     explicit_chat_id = payload.get("telegram_target_chat_id") or payload.get("target_chat_id")
     explicit_thread_id = payload.get("telegram_message_thread_id") or payload.get("message_thread_id")
     if explicit_chat_id:
         return {"chat_id": str(explicit_chat_id), "message_thread_id": explicit_thread_id, "target_source": "command_payload"}
+    platform = normalize_platform(payload.get("platform") or slot_memory.get("platform"))
+    if platform == TEST_PLATFORM:
+        if getattr(settings, "telegram_test_group", None):
+            return {"chat_id": str(settings.telegram_test_group), "message_thread_id": None, "target_source": "platform_test_group"}
+        return {"chat_id": None, "message_thread_id": None, "target_source": "missing_test_group"}
+    platform_topic = topic_for_platform(platform)
+    if platform_topic is not None:
+        return {
+            "chat_id": str(getattr(settings, "telegram_finance_group", None) or DEFAULT_TELEGRAM_FINANCE_GROUP),
+            "message_thread_id": None if getattr(settings, "telegram_force_no_topic", False) else platform_topic,
+            "target_source": "platform_finance_topic",
+        }
     if getattr(settings, "telegram_test_group", None):
         return {"chat_id": str(settings.telegram_test_group), "message_thread_id": None, "target_source": "test_group"}
     if getattr(settings, "telegram_sop_target_chat_id", None):

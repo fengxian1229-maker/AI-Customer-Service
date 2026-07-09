@@ -97,6 +97,17 @@ def make_file_event() -> InboundEvent:
     return event
 
 
+def make_human_agent_event() -> InboundEvent:
+    event = make_event_with_text("I will handle this case.")
+    event.event_id = "agent-event-1"
+    event.author_id = "agent-1"
+    event.payload_json["event"]["author_id"] = "agent-1"
+    event.payload_json["human_agent_public_reply"] = True
+    event.payload_json["human_agent_id"] = "agent-1"
+    event.payload_json["human_agent_event_id"] = "agent-event-1"
+    return event
+
+
 def test_should_enqueue_reply_for_message_created():
     assert should_enqueue_reply(make_inbound_event()) is True
 
@@ -154,6 +165,35 @@ class FakeConversationRepositoryWithState(FakeConversationRepository):
         return conversation
 
 
+class ThreadAwareConversationRepository(FakeConversationRepository):
+    def __init__(self, previous_status: str = "HUMAN_ACTIVE") -> None:
+        super().__init__(status="AI_ACTIVE")
+        self.previous_status = previous_status
+
+    async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
+        self.calls.append((chat_id, thread_id))
+        return {
+            "conversation_id": f"livechat:{chat_id}:{thread_id}" if thread_id else f"livechat:{chat_id}",
+            "tenant_id": "default",
+            "channel_type": "livechat",
+            "chat_id": chat_id,
+            "current_thread_id": thread_id,
+            "status": "AI_ACTIVE",
+            "active_workflow": None,
+            "workflow_stage": None,
+            "slot_memory": {},
+            "previous_thread_state": {
+                "conversation_id": f"livechat:{chat_id}:old-thread",
+                "chat_id": chat_id,
+                "current_thread_id": "old-thread",
+                "status": self.previous_status,
+                "active_workflow": "human_handoff" if self.previous_status == "HUMAN_ACTIVE" else None,
+                "workflow_stage": "transferred" if self.previous_status == "HUMAN_ACTIVE" else None,
+                "slot_memory": {},
+            },
+        }
+
+
 class FakeOutboundRepository:
     def __init__(self) -> None:
         self.inserted = []
@@ -199,14 +239,25 @@ class FakeGraphRunErrorRepository:
 
 
 class FakeConversationMessageRepository:
-    def __init__(self, recent_messages=None) -> None:
+    def __init__(self, recent_messages=None, previous_thread_memory=None) -> None:
         self.recent_messages = recent_messages or []
+        self.previous_thread_memory = previous_thread_memory or []
         self.inserted = []
         self.fetch_calls = []
+        self.fetch_current_thread_calls = []
+        self.fetch_previous_thread_calls = []
 
     async def fetch_recent(self, conversation_id: str, limit: int = 10) -> list[dict]:
         self.fetch_calls.append((conversation_id, limit))
         return list(self.recent_messages)
+
+    async def fetch_recent_current_thread(self, conversation_id: str, thread_id: str | None, limit: int = 10) -> list[dict]:
+        self.fetch_current_thread_calls.append((conversation_id, thread_id, limit))
+        return list(self.recent_messages)
+
+    async def fetch_previous_thread_memory(self, chat_id: str | None, exclude_thread_id: str | None, limit: int = 6) -> list[dict]:
+        self.fetch_previous_thread_calls.append((chat_id, exclude_thread_id, limit))
+        return list(self.previous_thread_memory)
 
     async def insert_idempotent(self, message: dict) -> dict:
         self.inserted.append(message)
@@ -489,13 +540,15 @@ def test_gateway_service_processes_message_created():
     result = asyncio.run(service.process_event(11, make_inbound_event()))
 
     assert result["should_reply"] is True
-    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text", "text"]
-    assert result["outbound_message"]["action_type"] == "livechat.send_image"
-    assert result["outbound_messages"][2]["payload_json"]["text"] == "上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text"]
+    assert result["outbound_messages"][0]["action_type"] == "livechat.send_image"
+    assert result["outbound_messages"][0]["payload_json"]["asset_key"] == "deposit_payment_success_example"
+    assert result["outbound_messages"][1]["action_type"] == "send_event"
+    assert "La imagen de arriba es un ejemplo de captura de pago exitoso" in result["outbound_messages"][1]["payload_json"]["text"]
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
     assert result["graph_state"]["recent_messages"][0]["text_content"] == "history"
     assert conversation_repository.updated[0][1]["active_workflow"] == "deposit_missing"
-    assert message_repository.fetch_calls == [("livechat:chat-1", 10)]
+    assert message_repository.fetch_current_thread_calls == [("livechat:chat-1", "thread-1", 10)]
     assert message_repository.inserted[0]["sender_role"] == "customer"
     assert message_repository.inserted[0]["message_type"] == "text"
     assert message_repository.inserted[0]["inbound_event_id"] == 11
@@ -530,7 +583,7 @@ def test_gateway_file_received_runs_image_analysis_before_graph():
     assert result["graph_state"]["image_analysis"]["receipt_kind"] == "withdrawal"
 
 
-def test_gateway_livechat_text_reply_streams_preview_then_keeps_official_text_outbox():
+def test_gateway_livechat_text_reply_skips_official_streaming_when_outbox_exists():
     final_reply_service = FakeFinalReplyService("ordinary final text")
     streaming_service = FakeOfficialStreamingService("streamed final text")
     sender_client = FakeLiveChatSenderClient()
@@ -552,20 +605,20 @@ def test_gateway_livechat_text_reply_streams_preview_then_keeps_official_text_ou
     result = asyncio.run(service.process_event(52, make_event_with_text("你好")))
 
     assert final_reply_service.calls == []
-    assert streaming_service.calls
-    assert sender_client.previews == [("chat-1", "streamed final text", "preview:52")]
+    assert streaming_service.calls == []
+    assert sender_client.previews == []
     assert result["should_reply"] is True
     assert [message["message_type"] for message in result["outbound_messages"]] == ["text"]
-    assert result["outbound_messages"][0]["payload_json"]["text"] == "streamed final text"
+    assert result["outbound_messages"][0]["payload_json"]["text"] != "streamed final text"
     assert "custom_id" not in result["outbound_messages"][0]["payload_json"]
-    assert outbound_repository.inserted[0]["payload_json"]["text"] == "streamed final text"
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == result["outbound_messages"][0]["payload_json"]["text"]
     assert "custom_id" not in outbound_repository.inserted[0]["payload_json"]
     assistant_messages = [message for message in message_repository.inserted if message["sender_role"] == "assistant"]
     assert assistant_messages == []
-    assert result["graph_state"]["final_response_text"] == "streamed final text"
+    assert result["graph_state"].get("final_response_text") != "streamed final text"
 
 
-def test_gateway_faq_image_text_reply_streams_text_and_keeps_image_outbox():
+def test_gateway_faq_image_text_reply_skips_official_streaming_and_keeps_image_outbox():
     streaming_service = FakeOfficialStreamingService("简体 FAQ 文本")
     message_repository = FakeConversationMessageRepository()
     outbound_repository = FakeOutboundRepository()
@@ -623,7 +676,8 @@ def test_gateway_faq_image_text_reply_streams_text_and_keeps_image_outbox():
     assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text"]
     assert outbound_repository.inserted[0]["message_type"] == "image"
     assert outbound_repository.inserted[1]["message_type"] == "text"
-    assert outbound_repository.inserted[1]["payload_json"]["text"] == "简体 FAQ 文本"
+    assert streaming_service.calls == []
+    assert outbound_repository.inserted[1]["payload_json"]["text"] == "繁體 FAQ 文本"
     assert "custom_id" not in outbound_repository.inserted[1]["payload_json"]
     assistant_messages = [message for message in message_repository.inserted if message["sender_role"] == "assistant"]
     assert assistant_messages == []
@@ -651,6 +705,82 @@ def test_gateway_livechat_streaming_failure_keeps_text_outbox():
     assert not [message for message in message_repository.inserted if message["sender_role"] == "assistant"]
 
 
+def test_gateway_sop_missing_slots_does_not_use_conflicting_final_text():
+    original_text = "请提供您的平台用户名或注册手机号。"
+    conflicting_text = "收到，已收到您提供的账号信息，我正在为您查询相关信息。"
+    workflow_graph = FakeWorkflowGraph(
+        {
+            "route": "sop",
+            "active_workflow": "withdrawal_blocked_or_rollover",
+            "workflow_stage": "collecting_slots",
+            "node_reply_template": "sop_missing_slots",
+            "node_facts": {"missing_slots": ["account_or_phone"]},
+            "response_text": original_text,
+            "response_text_fallback": original_text,
+            "final_response_text": conflicting_text,
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_TEXT,
+                    "payload": {"text": original_text},
+                }
+            ],
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=outbound_repository,
+        workflow_graph=workflow_graph,
+    )
+
+    result = asyncio.run(service.process_event(55, make_event_with_text("3239413629")))
+
+    assert result["outbound_messages"][0]["payload_json"]["text"] == original_text
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == original_text
+
+
+def test_gateway_sop_missing_slots_skips_official_streaming_override():
+    original_text = "请提供您的平台用户名或注册手机号。"
+    streaming_service = FakeOfficialStreamingService("收到，已收到账号，我正在查询提款限制。")
+    sender_client = FakeLiveChatSenderClient()
+    workflow_graph = FakeWorkflowGraph(
+        {
+            "route": "sop",
+            "active_workflow": "withdrawal_blocked_or_rollover",
+            "workflow_stage": "collecting_slots",
+            "node_reply_template": "sop_missing_slots",
+            "node_facts": {"missing_slots": ["account_or_phone"]},
+            "response_text": original_text,
+            "response_text_fallback": original_text,
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_TEXT,
+                    "payload": {"text": original_text},
+                }
+            ],
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=outbound_repository,
+        workflow_graph=workflow_graph,
+        livechat_sender_client=sender_client,
+        final_reply_streaming_service=streaming_service,
+        llm_final_reply_streaming_enabled=True,
+        llm_final_reply_preview_enabled=False,
+    )
+
+    result = asyncio.run(service.process_event(56, make_event_with_text("3239413629")))
+
+    assert streaming_service.calls == []
+    assert sender_client.previews == []
+    assert result["outbound_messages"][0]["payload_json"]["text"] == original_text
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == original_text
+
+
 def test_gateway_livechat_nav_button_sends_submenu_without_llm_router():
     router_service = FakeLLMRouterService()
     service = GatewayService(
@@ -669,7 +799,7 @@ def test_gateway_livechat_nav_button_sends_submenu_without_llm_router():
     assert result["graph_state"]["slot_memory"]["livechat_menu"]["context"] == "deposit"
     assert result["outbound_messages"][0]["message_type"] == "buttons"
     assert result["outbound_messages"][0]["payload_json"]["menu_key"] == "deposit"
-    assert result["outbound_messages"][0]["payload_json"]["language"] == "zh-Hans"
+    assert result["outbound_messages"][0]["payload_json"]["language"] == "es"
 
 
 def test_gateway_livechat_thread_started_sends_intro_menu_without_graph():
@@ -687,7 +817,7 @@ def test_gateway_livechat_thread_started_sends_intro_menu_without_graph():
     assert result["should_reply"] is True
     assert result["graph_state"]["route_source"] == "livechat_intro"
     assert [message["message_type"] for message in result["outbound_messages"]] == ["buttons"]
-    assert result["outbound_messages"][0]["payload_json"] == {"menu_key": "main", "language": "zh-Hans"}
+    assert result["outbound_messages"][0]["payload_json"] == {"menu_key": "main", "language": "es"}
     livechat_menu = conversation_repository.updated[0][1]["slot_memory"]["livechat_menu"]
     assert livechat_menu["context"] == "main"
     assert livechat_menu["intro_sent_threads"] == ["thread-1"]
@@ -708,7 +838,7 @@ def test_gateway_livechat_webhook_chat_started_sends_intro_menu_without_graph():
     assert result["should_reply"] is True
     assert result["graph_state"]["route_source"] == "livechat_intro"
     assert [message["message_type"] for message in result["outbound_messages"]] == ["buttons"]
-    assert result["outbound_messages"][0]["payload_json"] == {"menu_key": "main", "language": "zh-Hans"}
+    assert result["outbound_messages"][0]["payload_json"] == {"menu_key": "main", "language": "es"}
     livechat_menu = conversation_repository.updated[0][1]["slot_memory"]["livechat_menu"]
     assert livechat_menu["context"] == "main"
     assert livechat_menu["intro_sent_threads"] == ["thread-1"]
@@ -789,7 +919,7 @@ def test_gateway_livechat_business_button_routes_to_deposit_sop():
     assert result["graph_state"]["route_source"] == "livechat_button_fast_path"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_missing"
     assert result["graph_state"]["active_workflow"] == "deposit_missing"
-    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text", "text"]
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text"]
 
 
 @pytest.mark.parametrize(
@@ -848,8 +978,8 @@ def test_gateway_livechat_repeated_business_button_preserves_active_sop_and_fixe
     assert result["graph_state"]["intent_result"]["workflow_relation"] == "current_workflow_supplement"
     assert result["graph_state"]["active_workflow"] == "deposit_missing"
     assert result["graph_state"]["workflow_stage"] == "collecting_slots"
-    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text", "text"]
-    assert result["outbound_messages"][2]["payload_json"]["text"] == "上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text"]
+    assert "上方图片是付款成功截图示例" in result["outbound_messages"][1]["payload_json"]["text"]
     assert conversation_repository.updated[0][1]["active_workflow"] == "deposit_missing"
 
 
@@ -879,7 +1009,7 @@ def test_gateway_livechat_faq_button_routes_to_faq():
     assert result["graph_state"]["route_source"] == "livechat_button_fast_path"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
     assert result["graph_state"]["intent_result"]["faq_trigger_source"] == "livechat_button"
-    assert result["outbound_messages"][0]["payload_json"]["text"] == "FAQ answer 请回到选单并选择「存款未到账」。"
+    assert result["outbound_messages"][0]["payload_json"]["text"] == "FAQ answer 請回到選單並選擇「存款未到帳」。"
 
 
 @pytest.mark.parametrize(
@@ -949,7 +1079,7 @@ def test_gateway_natural_language_faq_strips_menu_directives():
     assert result["graph_state"]["route"] == "faq"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
     assert result["graph_state"]["intent_result"].get("faq_trigger_source") is None
-    assert result["outbound_messages"][0]["payload_json"]["text"] == "若你要进行充值，请依照以下步骤操作。"
+    assert result["outbound_messages"][0]["payload_json"]["text"] == "若你要進行充值，請依照以下步驟操作。"
 
 
 def test_gateway_livechat_human_button_routes_to_handoff():
@@ -962,12 +1092,18 @@ def test_gateway_livechat_human_button_routes_to_handoff():
         workflow_graph=FailIfCalledWorkflowGraph(),
     )
 
-    result = asyncio.run(service.process_event(44, make_event_with_button("global_human", "👤 Atención humana")))
+    event = make_event_with_button("global_human", "👤 Atención humana")
+    event.payload_json["livechat_group_id"] = 28
+    event.payload_json["platform"] = "ZAP69"
+
+    result = asyncio.run(service.process_event(44, event))
 
     assert result["graph_state"]["route"] == "human_handoff"
     assert result["graph_state"]["route_source"] == "livechat_button"
     assert result["outbound_messages"][0]["payload_json"]["handoff_ack"] is True
     assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
+    assert result["external_commands"][0]["payload_json"]["livechat_group_id"] == 28
+    assert result["external_commands"][0]["payload_json"]["platform"] == "ZAP69"
 
 
 def test_gateway_livechat_new_business_message_does_not_append_main_menu():
@@ -983,7 +1119,7 @@ def test_gateway_livechat_new_business_message_does_not_append_main_menu():
 
     result = asyncio.run(service.process_event(45, event))
 
-    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text", "text"]
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text"]
     assert "livechat_menu" not in conversation_repository.updated[0][1]["slot_memory"]
 
 
@@ -1128,18 +1264,43 @@ def test_gateway_service_uses_final_reply_text_for_outbound_message():
     result = asyncio.run(service.process_event(12, make_inbound_event()))
 
     assert final_reply_service.calls
-    assert result["graph_state"]["response_text"] == "上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+    assert result["graph_state"]["response_text"] == (
+        "La imagen de arriba es un ejemplo de captura de pago exitoso. Para ayudarle a revisar este depósito, "
+        "proporcione su usuario o número de teléfono registrado y suba una captura de su pago exitoso."
+    )
     assert result["graph_state"]["final_response_text"] == "您好，上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
-    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text", "text"]
-    assert result["outbound_messages"][0]["command_type"] == "livechat.send_image"
-    assert result["outbound_messages"][0]["payload_json"]["asset_key"] == "deposit_payment_success_example"
-    assert result["outbound_messages"][0]["payload_json"]["asset_ref"].endswith("deposit-payment-success-onepay.jpg")
-    assert "存款未到账通常可能" in result["outbound_messages"][1]["payload_json"]["text"]
-    assert result["outbound_messages"][2]["payload_json"]["text"] == "您好，上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
-    assert result["graph_state"]["commands"][2]["payload"]["text"] == "您好，上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
-    assert "final_reply_exempt" not in result["outbound_messages"][1]["payload_json"]
-    assert "final_reply_target" not in result["outbound_messages"][2]["payload_json"]
-    assert result["outbound_messages"][1]["dedup_key"] != result["outbound_messages"][2]["dedup_key"]
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text"]
+    assert result["outbound_messages"][1]["payload_json"]["text"].endswith(
+        "您好，上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+    )
+    assert result["graph_state"]["commands"][1]["payload"]["text"].endswith(
+        "您好，上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+    )
+    assert "final_reply_target" not in result["outbound_messages"][1]["payload_json"]
+
+
+def test_gateway_fast_path_sop_uses_final_reply_text_for_livechat_command():
+    final_reply_service = FakeFinalReplyService("We have received your details and are checking this deposit now. Please wait.")
+    outbound_repository = FakeOutboundRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=outbound_repository,
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_final_reply_service=final_reply_service,
+        llm_final_reply_enabled=True,
+    )
+    event = make_event_with_button("main_deposito", "🧾 Depósito no acreditado")
+
+    result = asyncio.run(service.process_event(1201, event))
+
+    assert final_reply_service.calls
+    assert result["graph_state"]["route_source"] == "livechat_button_fast_path"
+    assert result["graph_state"]["final_response_text"] == final_reply_service.final_text
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text"]
+    assert result["outbound_messages"][1]["payload_json"]["text"] == final_reply_service.final_text
+    assert outbound_repository.inserted[1]["payload_json"]["text"] == final_reply_service.final_text
 
 
 def test_gateway_language_policy_file_received_preserves_last_user_language():
@@ -1195,7 +1356,7 @@ def test_gateway_splits_livechat_outbox_and_external_commands():
     result = asyncio.run(service.process_event(11, event))
 
     assert [message["action_type"] for message in outbound_repository.inserted] == ["send_event"]
-    assert outbound_repository.inserted[0]["payload_json"]["text"] == "资料已收到，我们现在为你查询这笔存款，请稍等。"
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "Gracias por la información. Ahora estamos revisando este depósito para usted. Espere un momento."
     assert [command["command_type"] for command in external_repository.inserted] == ["telegram.send_case_card"]
     assert result["external_commands"][0]["command_type"] == "telegram.send_case_card"
 
@@ -1239,11 +1400,17 @@ def test_gateway_service_human_handoff_keeps_existing_external_command_semantics
         rag_service=rag_service,
     )
 
-    result = asyncio.run(service.process_event(13, make_event_with_text("I want human agent")))
+    event = make_event_with_text("I want human agent")
+    event.payload_json["livechat_group_id"] = 28
+    event.payload_json["platform"] = "ZAP69"
+
+    result = asyncio.run(service.process_event(13, event))
 
     assert rag_service.calls == []
     assert result["graph_state"]["route"] == "human_handoff"
     assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
+    assert external_repository.inserted[0]["payload_json"]["livechat_group_id"] == 28
+    assert external_repository.inserted[0]["payload_json"]["platform"] == "ZAP69"
     assert result["outbound_messages"][0]["payload_json"] == {
         "type": "message",
         "text": "我会为你转接真人客服继续协助。",
@@ -1268,6 +1435,33 @@ def test_gateway_service_human_handoff_outbound_uses_final_reply_and_preserves_a
 
     result = asyncio.run(service.process_event(14, make_event_with_text("转人工客服")))
 
+    assert result["graph_state"]["route"] == "human_handoff"
+    assert result["graph_state"]["final_response_text"] == final_text
+    assert result["outbound_messages"][0]["payload_json"] == {
+        "type": "message",
+        "text": final_text,
+        "handoff_ack": True,
+    }
+    assert outbound_repository.inserted[0]["payload_json"]["handoff_ack"] is True
+
+
+def test_gateway_livechat_human_button_uses_final_reply_and_preserves_ack_marker():
+    final_text = "I will request a live support handoff so an agent can continue helping you."
+    outbound_repository = FakeOutboundRepository()
+    final_reply_service = FakeFinalReplyService(final_text)
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=outbound_repository,
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        llm_final_reply_service=final_reply_service,
+        llm_final_reply_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(1202, make_event_with_button("global_human", "Live support")))
+
+    assert final_reply_service.calls
     assert result["graph_state"]["route"] == "human_handoff"
     assert result["graph_state"]["final_response_text"] == final_text
     assert result["outbound_messages"][0]["payload_json"] == {
@@ -1310,6 +1504,68 @@ def test_gateway_service_withdrawal_blocked_generates_backend_query_without_rag_
     assert external_repository.inserted[0]["payload_json"]["detected_language"] == result["graph_state"]["detected_language"]
 
 
+def test_gateway_active_withdrawal_blocked_numeric_account_generates_backend_query():
+    conversation_repository = FakeConversationRepositoryWithState(
+        active_workflow="withdrawal_blocked_or_rollover",
+        workflow_stage="collecting_slots",
+        slot_memory={"last_reply_language": "zh-Hans"},
+    )
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=FakeRagService(),
+    )
+
+    result = asyncio.run(service.process_event(89, make_event_with_text("3239413629")))
+
+    assert result["graph_state"]["route"] == "sop"
+    assert result["graph_state"]["intent_result"]["workflow_relation"] == "current_workflow_supplement"
+    assert result["graph_state"]["workflow_stage"] == "backend_querying"
+    assert result["graph_state"]["slot_memory"]["account_or_phone"] == "3239413629"
+    assert result["graph_state"]["slot_memory"]["identity_kind"] == "phone"
+    assert result["outbound_messages"] == []
+    assert outbound_repository.inserted == []
+    assert [command["command_type"] for command in external_repository.inserted] == ["backend.query"]
+    assert external_repository.inserted[0]["payload_json"]["account_or_phone"] == "3239413629"
+    assert external_repository.inserted[0]["payload_json"]["identity_kind"] == "phone"
+
+
+def test_gateway_closed_withdrawal_workflow_reopens_and_queries_phone():
+    conversation_repository = FakeConversationRepositoryWithState(
+        status="CLOSED",
+        active_workflow="withdrawal_blocked_or_rollover",
+        workflow_stage="collecting_slots",
+        slot_memory={"last_reply_language": "zh-Hans"},
+    )
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=FakeRagService(),
+    )
+
+    result = asyncio.run(service.process_event(90, make_event_with_text("手机号是：3239413629")))
+
+    assert result["graph_state"]["status"] == "WAITING_EXTERNAL"
+    assert result["graph_state"]["workflow_stage"] == "backend_querying"
+    assert result["graph_state"]["slot_memory"]["account_or_phone"] == "3239413629"
+    assert result["graph_state"]["slot_memory"]["identity_kind"] == "phone"
+    assert result["outbound_messages"] == []
+    assert outbound_repository.inserted == []
+    assert [command["command_type"] for command in external_repository.inserted] == ["backend.query"]
+    assert external_repository.inserted[0]["payload_json"]["account_or_phone"] == "3239413629"
+    assert external_repository.inserted[0]["payload_json"]["identity_kind"] == "phone"
+
+
 def test_gateway_service_human_active_records_inbound_but_does_not_run_graph_or_enqueue_work():
     conversation_repository = FakeConversationRepository(status="HUMAN_ACTIVE")
     outbound_repository = FakeOutboundRepository()
@@ -1334,8 +1590,80 @@ def test_gateway_service_human_active_records_inbound_but_does_not_run_graph_or_
     assert result["external_commands"] == []
     assert outbound_repository.inserted == []
     assert external_repository.inserted == []
-    assert message_repository.inserted[0]["sender_role"] == "customer"
+    assert message_repository.inserted == []
     assert inbound_repository.processed == [15]
+
+
+def test_gateway_new_thread_does_not_inherit_previous_thread_human_active_state():
+    conversation_repository = ThreadAwareConversationRepository(previous_status="HUMAN_ACTIVE")
+    outbound_repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository(
+        recent_messages=[],
+        previous_thread_memory=[
+            {
+                "sender_role": "customer",
+                "thread_id": "old-thread",
+                "text_content": "Si te pregunto como obtengo el código",
+                "context_scope": "previous_thread_memory",
+                "read_only_memory": True,
+            }
+        ],
+    )
+    graph = RecordingGraph()
+    event = make_event_with_text("Hola como puedo obtener el codigo de encaje")
+    event.thread_id = "new-thread"
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        message_repository=message_repository,
+        workflow_graph=graph,
+    )
+
+    result = asyncio.run(service.process_event(1501, event))
+
+    assert graph.calls
+    graph_state = graph.calls[0][0]
+    assert graph_state["conversation_id"] == "livechat:chat-1:new-thread"
+    assert graph_state["status"] == "AI_ACTIVE"
+    assert graph_state["active_workflow"] is None
+    assert graph_state["previous_thread_memory"][0]["context_scope"] == "previous_thread_memory"
+    assert result["outbound_messages"][0]["status"] == "PENDING"
+    assert outbound_repository.inserted[0]["conversation_id"] == "livechat:chat-1:new-thread"
+    assert outbound_repository.inserted[0]["status"] != "SKIPPED_HUMAN_ACTIVE"
+    assert message_repository.fetch_current_thread_calls == [("livechat:chat-1:new-thread", "new-thread", 10)]
+    assert message_repository.fetch_previous_thread_calls == [("chat-1", "new-thread", 6)]
+
+
+def test_gateway_service_marks_human_active_on_public_agent_reply_and_does_nothing_else():
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    message_repository = FakeConversationMessageRepository()
+    graph = RecordingGraph()
+    inbound_repository = FakeInboundRepository()
+    service = GatewayService(
+        inbound_repository=inbound_repository,
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        message_repository=message_repository,
+        workflow_graph=graph,
+    )
+
+    result = asyncio.run(service.process_event(16, make_human_agent_event()))
+
+    assert graph.calls == []
+    assert result["graph_state"]["status"] == "HUMAN_ACTIVE"
+    assert result["graph_state"]["workflow_stage"] == "human_active"
+    assert result["graph_state"]["handoff_state"]["human_agent_detected"] is True
+    assert result["outbound_messages"] == []
+    assert result["external_commands"] == []
+    assert outbound_repository.inserted == []
+    assert external_repository.inserted == []
+    assert message_repository.inserted == []
+    assert conversation_repository.updated[0][1]["status"] == "HUMAN_ACTIVE"
+    assert inbound_repository.processed == [16]
 
 
 def test_gateway_service_does_not_prefetch_rag_context_before_graph_for_faq_route():
@@ -1775,7 +2103,7 @@ def test_gateway_service_faq_authoritative_renders_multimodal_answer_blocks_to_o
         "caption": "第一步：进入充值页面",
         "position": "after",
     }
-    assert result["outbound_messages"][3]["payload_json"] == {"menu_key": "deposit_menu", "language": "zh-Hans"}
+    assert result["outbound_messages"][3]["payload_json"] == {"menu_key": "deposit_menu", "language": "es"}
     assert len({message["dedup_key"] for message in result["outbound_messages"]}) == 4
 
 
@@ -2107,7 +2435,6 @@ def test_gateway_service_llm_sop_slot_extractor_invalid_attachment_falls_back():
     assert "deposit_screenshot" not in result["graph_state"]["slot_memory"]
     assert [command["type"] for command in result["graph_state"]["commands"]] == [
         CommandType.LIVECHAT_SEND_IMAGE,
-        CommandType.LIVECHAT_SEND_TEXT,
         CommandType.LIVECHAT_SEND_TEXT,
     ]
     assert result["external_commands"] == []

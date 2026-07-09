@@ -48,6 +48,7 @@ class GraphState(TypedDict, total=False):
     node_facts: dict[str, Any] | None
 
     recent_messages: list[dict[str, Any]]
+    previous_thread_memory: list[dict[str, Any]]
 
     reply_plan: dict[str, Any] | None
     customer_reply: dict[str, Any] | None

@@ -15,7 +15,7 @@ from app.services.message_history import build_assistant_message_from_outbound
 
 CONFIG_FAILURE_STATUSES = {401, 403}
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
-DEFAULT_MAX_RETRIES = 12
+DEFAULT_MAX_RETRIES = 20
 BUSINESS_ERROR_MARKERS = (
     "chat is closed",
     "chat closed",
@@ -137,18 +137,26 @@ async def process_pending_message(
             response = fallback_result["fallback_response"]
             outbound_for_history = {**message, "payload_json": {"text": fallback_text(menu), "menu_key": menu["menu_key"]}}
             fallback_delivery_mode = "buttons_text_fallback"
+            fallback_last_error = _buttons_fallback_last_error(exc)
         else:
             fallback_delivery_mode = None
+            fallback_last_error = None
 
         result = classify_send_result(response)
         if fallback_delivery_mode and result["status"] == "SENT":
             result["delivery_mode"] = fallback_delivery_mode
+            result["last_error"] = fallback_last_error
         if result["status"] == "SENT":
             assistant_message = build_assistant_message_from_outbound(outbound_for_history)
             if transaction_repository:
-                await transaction_repository.mark_sent_with_message(message["id"], assistant_message)
+                await _mark_sent_with_message(
+                    transaction_repository,
+                    message["id"],
+                    assistant_message,
+                    last_error=fallback_last_error,
+                )
             else:
-                await outbound_repository.mark_sent(message["id"])
+                await _mark_sent(outbound_repository, message["id"], last_error=fallback_last_error)
                 if message_repository:
                     await message_repository.insert_idempotent(assistant_message)
         else:
@@ -322,6 +330,33 @@ def _message_retry_count(message: dict) -> int:
 
 def _is_image_text_fallback_response(response: dict) -> bool:
     return response.get("_delivery_mode") == "mvp_text_fallback"
+
+
+def _buttons_fallback_last_error(exc: Exception) -> str:
+    return f"delivery_mode=buttons_text_fallback; original_error={str(exc)[:900]}"
+
+
+async def _mark_sent(repository, outbound_message_id: int, last_error: str | None = None) -> None:
+    try:
+        await repository.mark_sent(outbound_message_id, last_error=last_error)
+    except TypeError:
+        await repository.mark_sent(outbound_message_id)
+
+
+async def _mark_sent_with_message(
+    transaction_repository,
+    outbound_message_id: int,
+    assistant_message: dict,
+    last_error: str | None = None,
+) -> None:
+    try:
+        await transaction_repository.mark_sent_with_message(
+            outbound_message_id,
+            assistant_message,
+            last_error=last_error,
+        )
+    except TypeError:
+        await transaction_repository.mark_sent_with_message(outbound_message_id, assistant_message)
 
 
 def _menu_for_payload(payload: dict) -> dict:

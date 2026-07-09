@@ -102,6 +102,43 @@ def test_sop_node_drops_unknown_and_protected_planner_slots():
     assert set(result["llm_sop_dialogue_plan"]["dropped_slots"]) == {"unknown_slot", "telegram_message_id"}
 
 
+def test_sop_node_drops_order_slots_for_image_collection_sops():
+    service = PlannerOnlyService(
+        {
+            "intent_relation": "current_sop_supplement",
+            "slot_updates": {
+                "phone": "13800138000",
+                "order_id": "TX123456",
+                "deposit_order_id": "D123456",
+                "withdrawal_order_id": "W987654",
+            },
+            "slot_confidence": {
+                "phone": 0.97,
+                "order_id": 0.99,
+                "deposit_order_id": 0.99,
+                "withdrawal_order_id": 0.99,
+            },
+            "missing_slots": ["receipt_screenshot"],
+            "should_ask_confirmation": False,
+            "reply_draft": "",
+            "reason": "mixed slots",
+        }
+    )
+    node = make_sop_node(service, llm_sop_slot_enabled=True)
+
+    result = asyncio.run(node(_sop_state()))
+
+    assert result["slot_memory"]["phone"] == "13800138000"
+    assert "order_id" not in result["slot_memory"]
+    assert "deposit_order_id" not in result["slot_memory"]
+    assert "withdrawal_order_id" not in result["slot_memory"]
+    assert set(result["llm_sop_dialogue_plan"]["dropped_slots"]) == {
+        "order_id",
+        "deposit_order_id",
+        "withdrawal_order_id",
+    }
+
+
 def test_sop_node_marks_matching_image_analysis_receipt_verified_for_planner():
     service = PlannerOnlyService(
         {

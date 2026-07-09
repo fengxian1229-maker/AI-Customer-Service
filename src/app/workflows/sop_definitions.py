@@ -117,15 +117,6 @@ def _money_missing_slots(screenshot_key: str, screenshot_label: str) -> tuple[So
             examples=("渠道 GCASH", "银行卡", "USDT"),
             ask_instruction="如方便，请补充支付渠道。",
         ),
-        SopSlotDefinition(
-            key="order_id",
-            label="订单号",
-            type="text",
-            required=False,
-            description="客户明确提供的订单号、交易号或流水号。",
-            examples=("订单 D123456", "交易号 TX123456"),
-            ask_instruction="如方便，请补充订单号或交易号。",
-        ),
     )
 
 

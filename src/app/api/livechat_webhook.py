@@ -90,9 +90,15 @@ async def receive_livechat_webhook(request: Request) -> dict:
 def _needs_livechat_client(body, settings) -> bool:
     if not isinstance(body, dict) or body.get("action") != "incoming_event":
         return False
+    payload = body.get("payload") or {}
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    has_author_id = bool(str(event.get("author_id") or payload.get("author_id") or "").strip())
+    has_author_type = bool(str(event.get("author_type") or payload.get("author_type") or "").strip())
+    has_users = bool(payload.get("users") or payload.get("chat_users"))
+    if has_author_id and not has_author_type and not has_users:
+        return True
     if not getattr(settings, "livechat_allowed_group_id_set", set()):
         return False
-    payload = body.get("payload") or {}
     return not any(
         [
             payload.get("group_id"),

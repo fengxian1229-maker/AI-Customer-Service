@@ -18,6 +18,7 @@ class LLMRewriteShadowInput(TypedDict, total=False):
     current_rewritten_question: str | None
     deterministic_rewrite_result: dict[str, Any] | None
     recent_messages: list[dict[str, Any]]
+    previous_thread_memory: list[dict[str, Any]]
     active_workflow: str | None
     workflow_stage: str | None
     slot_memory: dict[str, Any]
@@ -55,6 +56,7 @@ class LLMIntentShadowInput(TypedDict, total=False):
     active_workflow: str | None
     workflow_stage: str | None
     attachments_summary: list[dict[str, Any]]
+    previous_thread_memory: list[dict[str, Any]]
 
 
 class LLMIntentClassificationInput(TypedDict, total=False):
@@ -66,6 +68,7 @@ class LLMIntentClassificationInput(TypedDict, total=False):
     deterministic_intent_result: dict[str, Any] | None
     deterministic_route: str | None
     recent_messages: list[dict[str, Any]]
+    previous_thread_memory: list[dict[str, Any]]
     active_workflow: str | None
     workflow_stage: str | None
     slot_memory: dict[str, Any]
@@ -107,6 +110,7 @@ class LLMSopSlotExtractionInput(TypedDict, total=False):
     latest_user_text: str
     attachments_summary: list[dict[str, Any]]
     recent_messages: list[dict[str, Any]]
+    previous_thread_memory: list[dict[str, Any]]
     language: str
 
 
@@ -155,6 +159,7 @@ class LLMSopDialoguePlannerInput(TypedDict, total=False):
     latest_user_text: str
     attachments_summary: list[dict[str, Any]]
     recent_messages: list[dict[str, Any]]
+    previous_thread_memory: list[dict[str, Any]]
     reply_language: str
 
 
@@ -165,6 +170,7 @@ class LLMFinalReplyInput(TypedDict, total=False):
     raw_user_input: str
     rewritten_question: str | None
     recent_messages: list[dict[str, Any]]
+    previous_thread_memory: list[dict[str, Any]]
     route: str | None
     intent_result: dict[str, Any] | None
     active_workflow: str | None

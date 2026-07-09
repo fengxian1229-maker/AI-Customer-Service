@@ -529,6 +529,86 @@ def test_result_consumer_pending_reply_lookup_result_found_writes_reply():
     assert "上一笔案件仍在处理中" in outbound_repository.inserted[0]["payload_json"]["text"]
 
 
+def test_result_consumer_pending_reply_lookup_result_uses_final_reply_text():
+    from app.workers.external_result_consumer import process_pending_results
+
+    final_reply_service = FakeFinalReplyService("Your previous case is still being checked. Please wait for the next update here.")
+    result_repository = FakeResultRepository(
+        [
+            make_result("pending_reply.lookup.result")
+            | {
+                "result_json": {
+                    "status": "waiting",
+                    "reply_text": "我们已经有你上一笔案件记录，目前仍在确认中，暂时还没有最终答复。有新进度会在这里通知你。",
+                    "reply_language": "en",
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert processed[0]["status"] == "PROCESSED"
+    assert final_reply_service.calls
+    assert final_reply_service.calls[0]["reply_language"] == "en"
+    assert final_reply_service.calls[0]["node_reply_template"] == "pending_reply_lookup"
+    assert final_reply_service.calls[0]["response_text_fallback"].startswith("我们已经有你上一笔案件记录")
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == (
+        "Your previous case is still being checked. Please wait for the next update here."
+    )
+    assert conversation_repository.updated[0][1]["final_response_text"] == (
+        "Your previous case is still being checked. Please wait for the next update here."
+    )
+
+
+def test_result_consumer_pending_reply_lookup_final_reply_failure_uses_fallback():
+    from app.workers.external_result_consumer import process_pending_results
+
+    final_reply_service = FakeFinalReplyService(raise_error=True)
+    result_repository = FakeResultRepository(
+        [
+            make_result("pending_reply.lookup.result")
+            | {
+                "result_json": {
+                    "status": "not_found",
+                    "reply_text": "目前没有找到这组资料的上一笔有效案件。",
+                    "reply_language": "en",
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert processed[0]["status"] == "PROCESSED"
+    assert final_reply_service.calls
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "目前没有找到这组资料的上一笔有效案件。"
+
+
 def test_result_consumer_pending_reply_lookup_result_not_found_writes_safe_reply():
     _processed, result_repository, conversation_repository, outbound_repository = run_consumer_for(
         make_result("pending_reply.lookup.result")
@@ -539,6 +619,43 @@ def test_result_consumer_pending_reply_lookup_result_not_found_writes_safe_reply
     assert conversation_repository.updated[0][1]["workflow_stage"] == "pending_reply_not_found"
     assert conversation_repository.updated[0][1]["active_workflow"] is None
     assert "没有找到" in outbound_repository.inserted[0]["payload_json"]["text"]
+
+
+def test_result_consumer_telegram_case_created_does_not_use_final_reply_for_group_result():
+    from app.workers.external_result_consumer import process_pending_results
+
+    final_reply_service = FakeFinalReplyService("This should not be used.")
+    result_repository = FakeResultRepository(
+        [
+            make_result("telegram.case.created")
+            | {
+                "result_json": {
+                    "status": "created",
+                    "case_id": "tg:123",
+                    "intent": "deposit_missing",
+                    "telegram_message_id": 321,
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert processed[0]["status"] == "PROCESSED"
+    assert final_reply_service.calls == []
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "案件已建立，我们会继续跟进，请稍候。"
 
 
 def test_result_consumer_backend_query_result_success_uses_final_reply_text():

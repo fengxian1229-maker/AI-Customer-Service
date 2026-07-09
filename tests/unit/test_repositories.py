@@ -162,6 +162,48 @@ def test_conversation_update_workflow_state_allows_clearing_active_workflow():
     assert cursor.args[2] == "completed"
 
 
+def test_conversation_thread_state_inheritance_only_allows_unfinished_workflows():
+    repository = ConversationRepository(FakePool(FakeCursor(rowcount=1)))
+    fresh = {
+        "conversation_id": "livechat:chat-1:new-thread",
+        "status": "AI_ACTIVE",
+        "active_workflow": None,
+        "workflow_stage": None,
+        "slot_memory": {},
+    }
+
+    inherited = repository._inherit_unfinished_thread_state(
+        dict(fresh),
+        {
+            "conversation_id": "livechat:chat-1:old-thread",
+            "current_thread_id": "old-thread",
+            "status": "WAITING_EXTERNAL",
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {"account_or_phone": "123"},
+        },
+    )
+
+    assert inherited["status"] == "WAITING_EXTERNAL"
+    assert inherited["active_workflow"] == "deposit_missing"
+    assert inherited["slot_memory"]["account_or_phone"] == "123"
+    assert inherited["slot_memory"]["previous_thread_continuation"]["thread_id"] == "old-thread"
+
+    for status in ("HUMAN_ACTIVE", "HANDOFF_REQUESTED", "CLOSED"):
+        not_inherited = repository._inherit_unfinished_thread_state(
+            dict(fresh),
+            {
+                "conversation_id": "livechat:chat-1:old-thread",
+                "current_thread_id": "old-thread",
+                "status": status,
+                "active_workflow": "human_handoff" if status != "CLOSED" else "deposit_missing",
+                "workflow_stage": "transferred" if status != "CLOSED" else "collecting_slots",
+                "slot_memory": {"account_or_phone": "123"},
+            },
+        )
+        assert not_inherited == fresh
+
+
 async def run_insert(rowcount: int):
     cursor = FakeCursor(rowcount=rowcount)
     repository = InboundEventRepository(FakePool(cursor))
@@ -346,6 +388,68 @@ def test_outbound_mark_pending_by_inbound_event_skipped_only_updates_pending_row
     assert "WHERE inbound_event_id = %s" in cursor.sql
     assert "AND status = 'PENDING'" in cursor.sql
     assert cursor.args == ("SKIPPED_MANUAL_SMOKE", "manual smoke uses fake chat_id; not sent", 55)
+
+
+def test_outbound_mark_failed_retryable_sets_backoff_lease():
+    import asyncio
+
+    async def run_mark_failed_retryable():
+        cursor = FakeCursor(rowcount=1)
+        repository = OutboundMessageRepository(FakePool(cursor))
+        await repository.mark_failed(7, "RETRYABLE", "temporary", retryable=True)
+        return cursor
+
+    cursor = asyncio.run(run_mark_failed_retryable())
+
+    assert "retry_count = retry_count + 1" in cursor.sql
+    assert "lease_expires_at = DATE_ADD" in cursor.sql
+    assert "retry-backoff" in cursor.sql
+    assert "locked_by = NULL" not in cursor.sql
+    assert cursor.args == ("RETRYABLE", "temporary", 15, 2, 7)
+
+
+def test_outbound_mark_failed_retryable_allows_env_backoff_override(monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv("LIVECHAT_SEND_RETRY_BASE_SECONDS", "1")
+    monkeypatch.setenv("LIVECHAT_SEND_RETRY_MAX_SECONDS", "5")
+
+    async def run_mark_failed_retryable():
+        cursor = FakeCursor(rowcount=1)
+        repository = OutboundMessageRepository(FakePool(cursor))
+        await repository.mark_failed(7, "RETRYABLE", "temporary", retryable=True)
+        return cursor
+
+    cursor = asyncio.run(run_mark_failed_retryable())
+
+    assert cursor.args == ("RETRYABLE", "temporary", 5, 1, 7)
+
+
+def test_outbound_lease_pending_groups_allows_initial_delay_override(monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv("LIVECHAT_SEND_INITIAL_DELAY_SECONDS", "1")
+
+    class EmptyLeaseCursor(FakeCursor):
+        def __init__(self) -> None:
+            super().__init__(rowcount=0)
+            self.executed = []
+
+        async def execute(self, sql, args):
+            self.sql = sql
+            self.args = args
+            self.executed.append((sql, args))
+
+        async def fetchall(self):
+            return []
+
+    cursor = EmptyLeaseCursor()
+    repository = OutboundMessageRepository(FakePool(cursor))
+
+    groups = asyncio.run(repository.lease_pending_groups(limit=15, worker_id="sender-a", lease_seconds=300))
+
+    assert groups == []
+    assert cursor.executed[0][1] == (1, 15)
 
 
 def test_inbound_insert_reports_duplicate_without_failure():
@@ -1698,6 +1802,8 @@ def test_outbound_message_lease_pending_groups_locks_conversation_groups():
                     "message_type": "text",
                     "payload_json": '{"text":"first"}',
                     "status": "PENDING",
+                    "retry_count": 3,
+                    "last_error": "previous error",
                     "dedup_key": "d1",
                     "block_index": 0,
                     "message_kind": "text",
@@ -1723,6 +1829,8 @@ def test_outbound_message_lease_pending_groups_locks_conversation_groups():
                     "message_type": "text",
                     "payload_json": '{"text":"second"}',
                     "status": "PENDING",
+                    "retry_count": 4,
+                    "last_error": "previous error",
                     "dedup_key": "d2",
                     "block_index": 1,
                     "message_kind": "text",
@@ -1744,10 +1852,16 @@ def test_outbound_message_lease_pending_groups_locks_conversation_groups():
     groups = asyncio.run(repository.lease_pending_groups(limit=15, worker_id="sender-a", lease_seconds=300))
 
     assert "FOR UPDATE SKIP LOCKED" in cursor.executed[0][0]
+    assert "m.created_at <= DATE_SUB" in cursor.executed[0][0]
+    assert cursor.executed[0][1] == (3, 15)
+    assert "created_at <= DATE_SUB" in cursor.executed[1][0]
+    assert cursor.executed[1][1] == (3, "livechat:chat-1", 20)
     assert "locked.lease_expires_at >= NOW(6)" in cursor.executed[0][0]
     assert "earlier.id < m.id" in cursor.executed[0][0]
+    assert "m.retry_count" in cursor.executed[3][0]
     assert cursor.executed[2][1] == (300, "sender-a", 10, 11)
     assert [row["payload_json"]["text"] for row in groups[0]] == ["first", "second"]
+    assert [row["retry_count"] for row in groups[0]] == [3, 4]
 
 
 def test_external_command_lease_pending_returns_empty_when_no_available_rows():

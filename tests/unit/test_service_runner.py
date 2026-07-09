@@ -140,6 +140,46 @@ def test_preflight_missing_config_does_not_start_tasks(monkeypatch):
     assert "LIVECHAT_HANDOFF_TARGET_GROUP_ID" in result["missing"]
 
 
+def test_preflight_rejects_placeholder_livechat_credentials(monkeypatch):
+    from app.workers import service_runner
+
+    class PlaceholderLiveChatSettings(FakeSettings):
+        livechat_agent_access_token = "<livechat-agent-access-token>"
+        livechat_account_id = "<livechat-account-id>"
+
+    async def fail_create_pool(settings):
+        raise AssertionError("preflight failure must not create a pool")
+
+    monkeypatch.setattr(service_runner, "Settings", PlaceholderLiveChatSettings)
+    monkeypatch.setattr(service_runner, "create_pool", fail_create_pool)
+
+    result = service_runner.run(["--all", "--once"])
+
+    assert result["status"] == "FAILED_PREFLIGHT"
+    assert "LIVECHAT_AGENT_ACCESS_TOKEN" in result["missing"]
+    assert "LIVECHAT_ACCOUNT_ID" in result["missing"]
+
+
+def test_preflight_rejects_placeholder_telegram_target(monkeypatch):
+    from app.workers import service_runner
+
+    class PlaceholderTelegramTargetSettings(FakeSettings):
+        telegram_sop_target_chat_id = None
+        telegram_finance_group = None
+        telegram_test_group = "<telegram-test-group-id>"
+
+    async def fail_create_pool(settings):
+        raise AssertionError("preflight failure must not create a pool")
+
+    monkeypatch.setattr(service_runner, "Settings", PlaceholderTelegramTargetSettings)
+    monkeypatch.setattr(service_runner, "create_pool", fail_create_pool)
+
+    result = service_runner.run(["--all", "--once"])
+
+    assert result["status"] == "FAILED_PREFLIGHT"
+    assert "TELEGRAM_SOP_TARGET_CHAT_ID_OR_GROUP" in result["missing"]
+
+
 def test_once_each_worker_executes_once(monkeypatch):
     from app.workers import service_runner
 

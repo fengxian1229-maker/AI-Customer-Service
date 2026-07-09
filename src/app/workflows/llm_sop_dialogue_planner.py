@@ -23,6 +23,8 @@ INTENT_RELATIONS = {
 }
 
 LOW_CONFIDENCE_THRESHOLD = 0.55
+IMAGE_COLLECTION_SOPS = {"deposit_missing", "withdrawal_missing"}
+ORDER_SLOT_KEYS = {"order_id", "deposit_order_id", "withdrawal_order_id"}
 
 
 def build_llm_sop_dialogue_input(state: dict[str, Any], intent: str, definition: SopDefinition) -> dict[str, Any]:
@@ -37,6 +39,7 @@ def build_llm_sop_dialogue_input(state: dict[str, Any], intent: str, definition:
         "latest_user_text": str(state.get("rewritten_question") or state.get("raw_user_input") or ""),
         "attachments_summary": _attachments_summary(state, intent),
         "recent_messages": list(state.get("recent_messages") or []),
+        "previous_thread_memory": list(state.get("previous_thread_memory") or []),
         "reply_language": state.get("reply_language") or "unknown",
     }
 
@@ -66,6 +69,8 @@ def apply_llm_sop_plan(state: dict[str, Any], intent: str, llm_plan: dict[str, A
         return _fallback_plan(state, intent, "unsupported_sop")
 
     slot_memory = dict(state.get("slot_memory") or {})
+    if intent in IMAGE_COLLECTION_SOPS:
+        _drop_order_slots(slot_memory)
     slot_updates: dict[str, Any] = {}
     dropped_slots: list[str] = list(dict.fromkeys(str(key) for key in llm_plan.get("dropped_slots") or []))
     allowed_keys = set(definition.slot_keys) | _legacy_schema_keys(intent)
@@ -73,7 +78,7 @@ def apply_llm_sop_plan(state: dict[str, Any], intent: str, llm_plan: dict[str, A
 
     for key, value in dict(llm_plan.get("slot_updates") or llm_plan.get("extracted_slots") or {}).items():
         key = str(key)
-        if key in PROTECTED_SLOT_KEYS or key not in allowed_keys:
+        if key in PROTECTED_SLOT_KEYS or key not in allowed_keys or (intent in IMAGE_COLLECTION_SOPS and key in ORDER_SLOT_KEYS):
             dropped_slots.append(key)
             continue
         if value in (None, ""):
@@ -86,6 +91,8 @@ def apply_llm_sop_plan(state: dict[str, Any], intent: str, llm_plan: dict[str, A
     slot_memory.update(slot_updates)
     _merge_attachment_slots(intent, slot_memory, state.get("attachments") or [])
     _sync_legacy_aliases(intent, slot_memory)
+    if intent in IMAGE_COLLECTION_SOPS:
+        _drop_order_slots(slot_memory)
     missing_slots = compute_missing_slots(intent, slot_memory)
 
     return {
@@ -121,6 +128,8 @@ def _fallback_plan(state: dict[str, Any], intent: str, reason: str) -> dict[str,
     slot_memory = extraction["slot_memory"]
     _merge_attachment_slots(intent, slot_memory, state.get("attachments") or [])
     _sync_legacy_aliases(intent, slot_memory)
+    if intent in IMAGE_COLLECTION_SOPS:
+        _drop_order_slots(slot_memory)
     return {
         "status": "fallback",
         "source": "deterministic",
@@ -162,7 +171,7 @@ def _has_low_confidence(plan: dict[str, Any]) -> bool:
 
 def _legacy_schema_keys(intent: str) -> set[str]:
     screenshot_key = "deposit_screenshot" if intent == "deposit_missing" else "withdrawal_screenshot"
-    return {"account_or_phone", screenshot_key, "channel", "deposit_order_id", "withdrawal_order_id"}
+    return {"account_or_phone", screenshot_key, "channel"}
 
 
 def _slot_type(definition: SopDefinition, key: str) -> str:
@@ -202,44 +211,57 @@ def _verified_receipt_attachment(intent: str, attachment: dict[str, Any]) -> dic
     expected_kind = "deposit" if intent == "deposit_missing" else "withdrawal" if intent == "withdrawal_missing" else None
     if expected_kind is None or not attachment.get("url"):
         return None
+    opposite_kind = "withdrawal" if expected_kind == "deposit" else "deposit"
+    if str(attachment.get("receipt_kind") or "").lower() == opposite_kind:
+        return None
     if attachment.get("verified_receipt_attachment") and str(attachment.get("receipt_kind") or "").lower() == expected_kind:
         return attachment
 
     analysis = attachment.get("image_analysis")
-    if not isinstance(analysis, dict):
+    if isinstance(analysis, dict):
+        receipt_kind = str(analysis.get("receipt_kind") or "").lower()
+        if receipt_kind == opposite_kind:
+            return None
+        if analysis.get("is_receipt_like") and receipt_kind not in {"", "unknown", expected_kind}:
+            return None
+        if analysis.get("is_receipt_like"):
+            verified = dict(attachment)
+            verified["verified_receipt_attachment"] = True
+            verified["receipt_kind"] = expected_kind
+            return verified
+    if not str(attachment.get("content_type") or attachment.get("mime_type") or "").lower().startswith("image/"):
         return None
-    if not analysis.get("is_receipt_like"):
+    if not _is_image_attachment(attachment):
         return None
-    if str(analysis.get("receipt_kind") or "").lower() != expected_kind:
-        return None
-    try:
-        confidence = float(analysis.get("confidence") or 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    if confidence < LOW_CONFIDENCE_THRESHOLD:
-        return None
-
     verified = dict(attachment)
     verified["verified_receipt_attachment"] = True
     verified["receipt_kind"] = expected_kind
     return verified
 
 
+def _is_image_attachment(attachment: dict[str, Any]) -> bool:
+    content_type = str(attachment.get("content_type") or attachment.get("mime_type") or "").lower()
+    if content_type.startswith("image/"):
+        return True
+    name = str(attachment.get("name") or attachment.get("filename") or attachment.get("url") or "").lower()
+    return name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"))
+
+
 def _sync_legacy_aliases(intent: str, slot_memory: dict[str, Any]) -> None:
     screenshot_key = "deposit_screenshot" if intent == "deposit_missing" else "withdrawal_screenshot"
-    order_key = "deposit_order_id" if intent == "deposit_missing" else "withdrawal_order_id"
     if slot_memory.get("phone") and not slot_memory.get("account_or_phone"):
         slot_memory["account_or_phone"] = slot_memory["phone"]
-    elif slot_memory.get("account_or_phone"):
-        slot_memory.setdefault("phone", slot_memory["account_or_phone"])
     if slot_memory.get("receipt_screenshot"):
         slot_memory.setdefault(screenshot_key, slot_memory["receipt_screenshot"])
     elif slot_memory.get(screenshot_key):
         slot_memory.setdefault("receipt_screenshot", slot_memory[screenshot_key])
-    if slot_memory.get("order_id"):
-        slot_memory.setdefault(order_key, slot_memory["order_id"])
     if slot_memory.get("payment_channel"):
         slot_memory.setdefault("channel", slot_memory["payment_channel"])
+
+
+def _drop_order_slots(slot_memory: dict[str, Any]) -> None:
+    for key in ORDER_SLOT_KEYS:
+        slot_memory.pop(key, None)
 
 
 def _slot_present(intent: str, key: str, slot_memory: dict[str, Any]) -> bool:

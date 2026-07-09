@@ -23,7 +23,7 @@ from app.workflows.slot_extractors import (
     normalize_text,
 )
 from app.workflows.sop_handlers import run_sop
-from app.workflows.waiting_backend_classifier import handle_waiting_backend
+from app.workflows.waiting_backend_classifier import handle_waiting_backend, has_workflow_resolution_signal
 from app.workflows.final_reply_policy import build_reply_plan
 from app.workflows.llm_sop_dialogue_planner import build_llm_sop_dialogue_input
 from app.workflows.sop_definitions import get_sop_definition
@@ -42,12 +42,18 @@ def build_graph_state_from_event(
     event: InboundEvent,
     conversation: dict[str, Any],
     recent_messages: list[dict[str, Any]] | None = None,
+    previous_thread_memory: list[dict[str, Any]] | None = None,
 ) -> GraphState:
     payload = event.payload_json or {}
     raw_input = _extract_text(payload)
     attachments = _extract_attachments(payload, event.standard_event_type)
     image_analysis = _extract_image_analysis(payload, attachments)
     active_workflow = conversation.get("active_workflow")
+    slot_memory = dict(conversation.get("slot_memory") or {})
+    if payload.get("platform"):
+        slot_memory["platform"] = payload.get("platform")
+    if payload.get("livechat_group_id") is not None:
+        slot_memory["livechat_group_id"] = payload.get("livechat_group_id")
     image_candidate_only = bool(
         event.standard_event_type == "FILE_RECEIVED"
         and not raw_input
@@ -79,7 +85,7 @@ def build_graph_state_from_event(
         "status": conversation.get("status") or "AI_ACTIVE",
         "active_workflow": active_workflow,
         "workflow_stage": conversation.get("workflow_stage"),
-        "slot_memory": dict(conversation.get("slot_memory") or {}),
+        "slot_memory": slot_memory,
         "llm_rewrite_result": None,
         "llm_router_result": None,
         "intent_result": None,
@@ -93,6 +99,7 @@ def build_graph_state_from_event(
         "node_reply_template": None,
         "node_facts": None,
         "recent_messages": recent_messages or [],
+        "previous_thread_memory": previous_thread_memory or [],
         "reply_plan": None,
         "customer_reply": None,
         "response_text_fallback": None,
@@ -195,9 +202,9 @@ def language_policy_node(
     *,
     language_detection_enabled: bool = True,
     language_detection_min_confidence: float = 0.70,
-    tenant_persona_default_language: str = "zh-Hans",
+    tenant_persona_default_language: str = "es",
     tenant_supported_languages: str | list[str] = "zh-Hans,zh-Hant,en,es,tl,th,my,ms",
-    language_fallback: str = "zh-Hans",
+    language_fallback: str = "es",
     language_persist_to_slot_memory: bool = True,
 ) -> GraphState:
     if not language_detection_enabled:
@@ -564,9 +571,26 @@ def make_intent_router_node(
 
 
 def sop_node(state: GraphState) -> GraphState:
+    if state.get("active_workflow") and _current_workflow_resolution_relation(state):
+        if has_workflow_resolution_signal(state):
+            return handle_waiting_backend(state)
     if state.get("workflow_stage") in {"waiting_backend", "backend_querying", "waiting_customer_supplement"}:
         return handle_waiting_backend(state)
     return run_sop(state)
+
+
+def _current_workflow_resolution_relation(state: dict[str, Any]) -> bool:
+    if (state.get("intent_result") or {}).get("workflow_relation") == "current_workflow_resolution":
+        return True
+    for key in ("llm_sop_dialogue_plan", "llm_sop_slot_result"):
+        plan = state.get(key)
+        if not isinstance(plan, dict):
+            continue
+        nested = plan.get("result") if isinstance(plan.get("result"), dict) else {}
+        relation = plan.get("intent_relation") or nested.get("intent_relation")
+        if relation == "current_workflow_resolution":
+            return True
+    return False
 
 
 def rag_node(state: GraphState) -> GraphState:
@@ -1105,12 +1129,12 @@ def _prepare_final_reply_state(state: GraphState, kind: str) -> GraphState:
         must_not_say = ["已到账", "已完成", "已处理", "已同步", "已补充给后台", "tg:"]
         allowed_facts = [fallback_text]
     elif kind == "casual_chat":
-        fallback_text = _casual_reply_text(str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans"))
+        fallback_text = _casual_reply_text(str(state.get("reply_language") or state.get("conversation_language") or "es"))
         template = "default_final_reply"
         must_not_say = ["已到账", "已完成", "已处理", "已同步", "tg:"]
         allowed_facts = _system_capability_facts() + ["用户发送非业务闲聊或问候"]
     else:
-        fallback_text = "请补充你要咨询的问题，或说明是存款、提款、流水还是需要真人客服。"
+        fallback_text = _clarification_reply_text(str(state.get("reply_language") or state.get("conversation_language") or "es"))
         template = "clarification"
         kind = "clarification"
         must_not_say = ["已到账", "已完成", "已处理"]
@@ -1301,7 +1325,7 @@ def _is_casual_chat(state: GraphState) -> bool:
 
 
 def _acknowledgement_reply_text(state: GraphState) -> str:
-    language = str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans").lower()
+    language = str(state.get("reply_language") or state.get("conversation_language") or "es").lower()
     stage = str(state.get("workflow_stage") or "")
     if language.startswith("en"):
         if stage in {"waiting_backend", "backend_querying"}:
@@ -1309,6 +1333,12 @@ def _acknowledgement_reply_text(state: GraphState) -> str:
         if stage == "waiting_customer_supplement":
             return "Got it. Please send the requested details here when you have them, and I will continue helping you check this."
         return "Got it. You can send the requested details here whenever you are ready."
+    if language.startswith("es"):
+        if stage in {"waiting_backend", "backend_querying"}:
+            return "Entendido. El caso sigue en revisión y te avisaré aquí cuando haya novedades."
+        if stage == "waiting_customer_supplement":
+            return "Entendido. Envíame aquí los datos solicitados cuando los tengas y seguiré ayudándote a revisarlo."
+        return "Entendido. Puedes enviar aquí los datos solicitados cuando estés listo."
     if stage in {"waiting_backend", "backend_querying"}:
         return "收到，案件仍在确认中，有更新会在这里通知你。"
     if stage == "waiting_customer_supplement":
@@ -1320,7 +1350,7 @@ def _contextual_followup_reply_text(state: GraphState) -> str:
     memory_text = _conversation_memory_reply_text(state)
     if memory_text:
         return memory_text
-    language = str(state.get("reply_language") or state.get("conversation_language") or "zh-Hans").lower()
+    language = str(state.get("reply_language") or state.get("conversation_language") or "es").lower()
     active = str(state.get("active_workflow") or "")
     if language.startswith("en"):
         if active == "withdrawal_missing":
@@ -1330,6 +1360,14 @@ def _contextual_followup_reply_text(state: GraphState) -> str:
                 "to locate the record."
             )
         return "Yes, you may provide your name, but we may still need the requested account details and screenshot to continue checking."
+    if language.startswith("es"):
+        if active == "withdrawal_missing":
+            return (
+                "Sí, puedes proporcionar tu nombre, pero para revisar este retiro todavía necesitamos tu número de "
+                "teléfono registrado y una captura de la solicitud de retiro o el comprobante. Solo el nombre puede "
+                "no ser suficiente para localizar el registro."
+            )
+        return "Sí, puedes proporcionar tu nombre, pero quizá aún necesitemos los datos de la cuenta y la captura solicitada para continuar revisando."
     if active == "withdrawal_missing":
         return "可以提供姓名，但为了查询这笔提款，我们仍需要你的注册手机号和提款截图或凭证。只有姓名可能无法准确核实记录。"
     return "可以提供姓名，但为了继续核实，我们可能仍需要你按前面要求提供账号资料和截图。"
@@ -1338,7 +1376,18 @@ def _contextual_followup_reply_text(state: GraphState) -> str:
 def _casual_reply_text(language: str) -> str:
     if language.lower().startswith("en"):
         return "Hello, I can help with deposits, withdrawals, rollover requirements, screenshots, account access, and human support requests."
+    if language.lower().startswith("es"):
+        return "Hola, puedo ayudar con depósitos, retiros, requisitos de rollover, capturas, acceso a la cuenta y solicitudes de atención humana."
     return "你好，我可以协助处理存款、提款、流水要求、截图凭证、账号访问问题，也可以帮你请求真人客服。"
+
+
+def _clarification_reply_text(language: str) -> str:
+    normalized = language.lower()
+    if normalized.startswith("en"):
+        return "Please tell me what you need help with, or choose deposits, withdrawals, rollover, or human support."
+    if normalized.startswith("es"):
+        return "Indícame con qué necesitas ayuda, o elige depósitos, retiros, rollover o atención humana."
+    return "请补充你要咨询的问题，或说明是存款、提款、流水还是需要真人客服。"
 
 
 def _conversation_memory_reply_text(state: GraphState) -> str | None:
@@ -1835,7 +1884,7 @@ def _default_reply_language(tenant_default: str, fallback: str, supported: list[
         normalized = normalize_language_code(candidate)
         if normalized != "unknown" and normalized in supported:
             return normalized
-    return supported[0] if supported else "zh-Hans"
+    return supported[0] if supported else "es"
 
 
 def _redact_sensitive_text(value: str) -> str:
@@ -2007,7 +2056,7 @@ def _menu_language_for_state(state: GraphState) -> str:
         normalized = normalize_language_code(value)
         if normalized != "unknown":
             return normalized
-    return "zh-Hans"
+    return "es"
 
 
 def _next_menu_memory(livechat_menu: dict[str, Any], context: str, button_id: str) -> dict[str, Any]:

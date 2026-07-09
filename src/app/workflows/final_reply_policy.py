@@ -135,7 +135,7 @@ HUMAN_HANDOFF_FORBIDDEN_PROMISES = (
 
 INTERNAL_TELEGRAM_IDENTIFIER_PATTERN = re.compile(r"\b(?:tg|mock_tg):\d+\b|telegram_message_id|telegram_case_id", re.I)
 INTERNAL_ORGANIZATION_LABEL_PATTERN = re.compile(
-    r"(后台工作人员|后台人员|工作人员|人工后台|backend\s+staff|staff\s+reply|third[-\s]?party\s+platform|第三方平台|第三方\s*api|\bapi\b|接口)",
+    r"(后台|後台|\bbackend\b|工作人员|人工后台|backend\s+staff|staff\s+reply|third[-\s]?party\s+platform|第三方平台|第三方\s*api|\bapi\b|接口)",
     re.I,
 )
 INTERNAL_BACKEND_TRANSFER_PATTERN = re.compile(
@@ -201,6 +201,20 @@ def accepted_result(output: dict[str, Any]) -> dict[str, Any]:
         "used_facts": list(output.get("used_facts") or []),
         "reason": output.get("reason"),
     }
+
+
+def accepted_with_warnings_result(
+    output: dict[str, Any],
+    *,
+    violations: list[str] | None = None,
+    warning_reason: str = "guardrail_audit",
+) -> dict[str, Any]:
+    result = accepted_result(output)
+    result["status"] = "accepted_with_warnings"
+    result["warning_reason"] = warning_reason
+    if violations:
+        result["violations"] = sorted(set(violations))
+    return result
 
 
 def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -> list[str]:

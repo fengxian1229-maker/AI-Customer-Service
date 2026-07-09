@@ -121,6 +121,25 @@ async def ensure_conversation_states_compat(cur) -> None:
     columns = await fetch_columns(cur, "conversation_states")
     if "workflow_stage" not in columns:
         await cur.execute("ALTER TABLE conversation_states ADD COLUMN workflow_stage VARCHAR(128) NULL")
+    await ensure_indexes(
+        cur,
+        "conversation_states",
+        {
+            "uk_conversation_states_conversation_id": (
+                "CREATE UNIQUE INDEX uk_conversation_states_conversation_id "
+                "ON conversation_states (conversation_id)"
+            ),
+            "idx_conversation_states_chat_updated": (
+                "CREATE INDEX idx_conversation_states_chat_updated "
+                "ON conversation_states (chat_id, updated_at)"
+            ),
+            "idx_conversation_states_chat_thread": (
+                "CREATE INDEX idx_conversation_states_chat_thread "
+                "ON conversation_states (chat_id, current_thread_id)"
+            ),
+        },
+    )
+    await drop_index_if_exists(cur, "conversation_states", "uk_chat_id")
 
 
 async def ensure_external_command_lease_compat(cur) -> None:

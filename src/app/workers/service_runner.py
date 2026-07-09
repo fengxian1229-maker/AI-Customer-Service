@@ -514,12 +514,15 @@ async def maybe_recover_worker_leases(context: ServiceRunnerContext, queue_name:
 
 
 async def livechat_idle_timer_tick(context: ServiceRunnerContext) -> dict:
+    final_reply_service = build_final_reply_service_from_settings(context.settings)
     results = await livechat_idle_timer.process_idle_conversations(
         context.pool,
         context.sender_client,
         limit=context.config.livechat_idle_timer_limit,
         followup_seconds=context.config.livechat_idle_followup_seconds,
         close_seconds=context.config.livechat_idle_close_seconds,
+        final_reply_service=final_reply_service,
+        llm_final_reply_enabled=getattr(context.settings, "llm_final_reply_enabled", False),
     )
     return {"worker": "livechat_idle_timer", **livechat_idle_timer.summarize_results(results)}
 
@@ -780,19 +783,24 @@ def _empty_worker_summary() -> dict:
 
 
 def _require_text(value: Any, env_name: str, missing: list[str]) -> None:
-    if not str(value or "").strip():
+    if not _has_real_text(value):
         missing.append(env_name)
 
 
 def _telegram_target_configured(settings: Settings) -> bool:
     return any(
-        str(value or "").strip()
+        _has_real_text(value)
         for value in [
             settings.telegram_sop_target_chat_id,
             settings.telegram_finance_group,
             settings.telegram_test_group,
         ]
     )
+
+
+def _has_real_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text and not (text.startswith("<") and text.endswith(">")))
 
 
 def _pick(payload: dict, keys: list[str]) -> dict:

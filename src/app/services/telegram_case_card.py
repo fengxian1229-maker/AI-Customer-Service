@@ -6,11 +6,13 @@ def build_telegram_case_card(command: dict[str, Any], target: dict[str, Any]) ->
     payload = command.get("payload_json") or command.get("payload") or {}
     slot_memory = dict(payload.get("slot_memory") or {})
     intent = payload.get("intent") or payload.get("active_workflow") or "customer_case"
+    platform = payload.get("platform") or slot_memory.get("platform")
     attachments = _case_attachments(intent, slot_memory)
     card_text = "\n".join(
         [
             _title(intent),
             f"Case type: {intent}",
+            f"Platform: {_value(platform)}",
             f"Conversation ID: {_value(payload.get('conversation_id') or command.get('conversation_id'))}",
             f"Chat ID: {_value(payload.get('chat_id') or command.get('chat_id'))}",
             f"Thread ID: {_value(payload.get('thread_id') or command.get('thread_id'))}",
@@ -20,7 +22,6 @@ def build_telegram_case_card(command: dict[str, Any], target: dict[str, Any]) ->
             f"Customer name: {_value(slot_memory.get('customer_name'))}",
             f"Amount: {_value(slot_memory.get('amount'))}",
             f"Payment channel: {_value(slot_memory.get('payment_channel') or slot_memory.get('channel'))}",
-            f"Order ID: {_value(slot_memory.get('order_id') or slot_memory.get('deposit_order_id') or slot_memory.get('withdrawal_order_id'))}",
             f"Screenshot: {_value(slot_memory.get('deposit_screenshot') or slot_memory.get('withdrawal_screenshot'))}",
             f"Attachment URLs: {_value(', '.join(slot_memory.get('forwarded_attachment_urls') or []))}",
             f"Created at: {datetime.now(timezone.utc).isoformat()}",

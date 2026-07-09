@@ -316,7 +316,7 @@ def normalize_language(language: str | None) -> str:
         return "en"
     if value.startswith("es"):
         return "es"
-    return "zh-Hans"
+    return "es"
 
 
 def get_menu(menu_key: str, language: str | None = None) -> Menu:
@@ -325,14 +325,14 @@ def get_menu(menu_key: str, language: str | None = None) -> Menu:
     if not menus:
         raise KeyError(f"unknown livechat menu_key: {menu_key}")
     lang = normalize_language(language)
-    menu = menus.get(lang) or menus.get("zh-Hans") or menus.get("en") or menus.get("es") or next(iter(menus.values()))
+    menu = menus.get(lang) or menus.get("es") or menus.get("en") or menus.get("zh-Hans") or next(iter(menus.values()))
     buttons = [dict(button) for button in menu.get("buttons") or []]
     title = str(menu.get("title") or "")
     return {
         "menu_key": normalized_key,
         "title": title,
         "buttons": buttons,
-        "language": lang if lang in menus else "zh-Hans",
+        "language": lang if lang in menus else "es",
     }
 
 
@@ -347,6 +347,7 @@ def build_quick_replies_event(menu: Menu) -> dict[str, Any]:
                     {
                         "type": "message",
                         "text": button["label"],
+                        "value": button["label"],
                         "postback_id": button["id"],
                         "user_ids": [],
                     }

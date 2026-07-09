@@ -4,6 +4,7 @@ from typing import Any
 from app.channels.ingress import BaseIngressReceiver, IngressEvent
 from app.channels.livechat.normalizer import normalize_ingress_event, normalize_polling_event
 from app.channels.livechat.sender_client import LiveChatApiError
+from app.config.platforms import platform_for_livechat_group_id
 
 
 @dataclass
@@ -187,7 +188,7 @@ def chat_group_ids(chat: dict) -> set[int]:
 def chat_matches_allowed_groups(chat: dict, allowed_group_ids: set[int]) -> bool:
     if not allowed_group_ids:
         return True
-    return bool(chat_group_ids(chat) & allowed_group_ids)
+    return any(platform_for_livechat_group_id(group_id) for group_id in chat_group_ids(chat) & allowed_group_ids)
 
 
 def insert_result_flags(result) -> tuple[bool, bool]:

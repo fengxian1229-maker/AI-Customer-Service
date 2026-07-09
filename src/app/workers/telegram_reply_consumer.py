@@ -25,6 +25,7 @@ from app.db.telegram_repositories import (
 from app.llm.final_reply_provider import FinalReplyLLMProvider
 from app.llm.provider import build_llm_provider
 from app.services.final_reply_service import FinalReplyService
+from app.services.language_policy import normalize_language_code
 from app.services.message_history import build_external_result_summary_message
 from app.services.outbox import build_text_outbox
 from app.services.staff_reply_processor import StaffReplyProcessor
@@ -113,7 +114,13 @@ async def process_single_update(
     if not raw_text and not attachment_file_ids:
         return {"update_id": update_id, "status": "IGNORED", "reason": "empty_staff_reply"}
     if not raw_text and attachment_file_ids:
-        raw_text = "后台已发送附件，请继续查看案件资料。"
+        return {
+            "update_id": update_id,
+            "status": "IGNORED",
+            "reason": "attachment_only_staff_reply_unsupported",
+            "telegram_case_id": case["id"],
+            "attachment_count": len(attachment_file_ids),
+        }
 
     result_row = _build_result_row(update, message, case, raw_text, attachment_file_ids, telegram_chat_id, message_thread_id)
     insert = await result_repository.insert_idempotent(result_row)
@@ -173,7 +180,8 @@ async def process_single_update(
 def build_staff_reply_handler(row: dict, staff_reply_processor: StaffReplyProcessor | None = None) -> dict:
     result_json = row.get("result_json") or {}
     processor = staff_reply_processor or StaffReplyProcessor(enabled=False)
-    polished = processor.process(result_json.get("raw_text") or result_json.get("caption") or "", target_lang=result_json.get("language") or "zh")
+    reply_language = _result_reply_language(result_json)
+    polished = processor.process(result_json.get("raw_text") or result_json.get("caption") or "", target_lang=reply_language)
     active_workflow = result_json.get("active_workflow") or result_json.get("intent")
     if polished.type == "long_wait":
         status = "WAITING_EXTERNAL"
@@ -242,15 +250,15 @@ async def finalize_staff_reply_handler(
             "fallback_text": fallback_text,
             "staff_reply_type": (graph_state.get("slot_memory") or {}).get("last_telegram_staff_reply_type"),
         },
-        "reply_language": result_json.get("language") or "zh-Hans",
-        "conversation_language": result_json.get("language") or "zh-Hans",
-        "detected_language": result_json.get("language") or "zh-Hans",
+        "reply_language": _result_reply_language(result_json),
+        "conversation_language": _result_reply_language(result_json),
+        "detected_language": _result_reply_language(result_json),
         "reply_plan": build_reply_plan(
             kind="telegram_staff_reply",
             fallback_text=fallback_text,
             allowed_facts=[raw_text],
             staff_reply_key_facts=[],
-            must_not_say=["保证", "一定", "马上到账", "立即到账"],
+            must_not_say=["后台", "後台", "backend", "保证", "一定", "马上到账", "立即到账"],
             metadata={
                 "source": "telegram_staff_reply",
                 "telegram_message_id": result_json.get("telegram_message_id"),
@@ -386,7 +394,7 @@ def _build_final_reply_service(settings):
         min_confidence=getattr(settings, "llm_final_reply_min_confidence", 0.70),
         fallback_enabled=getattr(settings, "llm_final_reply_fallback_enabled", True),
         tenant_persona={
-            "default_language": getattr(settings, "tenant_persona_default_language", "zh-Hans"),
+            "default_language": getattr(settings, "tenant_persona_default_language", "es"),
             "supported_languages": getattr(settings, "tenant_supported_languages", "zh-Hans,zh-Hant,en,es,tl,th,my,ms"),
             "tone": getattr(settings, "tenant_persona_tone", "polite"),
             "assistant_name": getattr(settings, "tenant_persona_assistant_name", None),
@@ -445,6 +453,7 @@ def _build_result_row(
         "telegram_message_thread_id": message_thread_id,
         "intent": case.get("intent"),
         "active_workflow": case.get("active_workflow") or case.get("intent"),
+        "language": _case_reply_language(case),
     }
     return {
         "external_command_id": case.get("external_command_id") or 0,
@@ -484,6 +493,16 @@ def _safe_bot_user_id(client: TelegramUpdatesClient) -> int | None:
 
 def _message_text(message: dict[str, Any]) -> str:
     return str(message.get("text") or message.get("caption") or "").strip()
+
+
+def _case_reply_language(case: dict[str, Any]) -> str:
+    language = normalize_language_code(case.get("reply_language"))
+    return language if language != "unknown" else "zh-Hans"
+
+
+def _result_reply_language(result_json: dict[str, Any]) -> str:
+    language = normalize_language_code((result_json or {}).get("language"))
+    return language if language != "unknown" else "zh-Hans"
 
 
 def _attachment_file_ids(message: dict[str, Any]) -> list[str]:

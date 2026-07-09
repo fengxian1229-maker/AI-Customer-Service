@@ -42,7 +42,7 @@ def test_classify_send_error_marks_429_as_retryable():
 def test_classify_send_error_stops_retrying_after_retry_limit():
     result = sender_worker.classify_send_error(
         LiveChatApiError(500, {"raw": "<HTML>edge error</HTML>", "path": "/agent/action/send_event"}),
-        retry_count=11,
+        retry_count=19,
     )
 
     assert result["status"] == "FAILED_BUSINESS"
@@ -77,10 +77,12 @@ def test_classify_send_error_marks_unknown_failure():
 class FakeOutboundRepository:
     def __init__(self) -> None:
         self.sent = []
+        self.sent_last_errors = []
         self.failures = []
 
-    async def mark_sent(self, outbound_message_id: int) -> None:
+    async def mark_sent(self, outbound_message_id: int, last_error: str | None = None) -> None:
         self.sent.append(outbound_message_id)
+        self.sent_last_errors.append(last_error)
 
     async def mark_failed(self, outbound_message_id: int, status: str, error: str, retryable: bool) -> None:
         self.failures.append((outbound_message_id, status, error, retryable))
@@ -533,7 +535,7 @@ def test_process_pending_message_buttons_sends_quick_replies():
     rich = client.sent_buttons[0][2]["rich_message"]
     assert rich["template_id"] == "quick_replies"
     assert rich["elements"][0]["buttons"][0]["postback_id"] == "main_deposito"
-    assert "value" not in rich["elements"][0]["buttons"][0]
+    assert rich["elements"][0]["buttons"][0]["value"] == "🧾 存款未到账"
 
 
 def test_process_pending_message_buttons_falls_back_to_text_when_rich_send_fails():
@@ -554,8 +556,12 @@ def test_process_pending_message_buttons_falls_back_to_text_when_rich_send_fails
 
     result = asyncio.run(process_pending_message(repository, client, message))
 
-    assert result == {"status": "SENT", "last_error": None, "retryable": False, "delivery_mode": "buttons_text_fallback"}
+    assert result["status"] == "SENT"
+    assert result["retryable"] is False
+    assert result["delivery_mode"] == "buttons_text_fallback"
+    assert result["last_error"] == "delivery_mode=buttons_text_fallback; original_error=rich failed"
     assert repository.sent == [7]
+    assert repository.sent_last_errors == ["delivery_mode=buttons_text_fallback; original_error=rich failed"]
     assert client.sent_texts == ["Choose the deposit issue:\n\n1. 🧾 Deposit not credited\n2. 📘 How to deposit"]
 
 

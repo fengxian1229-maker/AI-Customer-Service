@@ -30,6 +30,10 @@ PAYMENT_CHANNELS = {
     "daviplata",
 }
 
+PHONE_LABEL_RE = re.compile(r"(手机号|手機號|电话|電話|注册手机号|註冊手機號|registered\s+phone|phone|tel[eé]fono|telefono)", re.I)
+PHONE_RE = re.compile(r"(?<![A-Za-z0-9])(?:\+?\d[\d\s-]{6,18}\d)(?![A-Za-z0-9])")
+STANDALONE_PHONE_RE = re.compile(r"^\+?\d[\d\s-]{4,18}\d$")
+
 
 def normalize_text(text: str | None) -> str:
     return str(text or "").strip()
@@ -42,7 +46,7 @@ def extract_identity(text: str | None) -> dict[str, str] | None:
     email = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", raw, re.I)
     if email:
         return {"type": "email", "value": email.group(0)}
-    phone = re.search(r"\b(?:\+?\d[\d\s-]{6,18}\d)\b", raw)
+    phone = PHONE_RE.search(raw)
     if phone:
         return {"type": "phone", "value": re.sub(r"\s+", "", phone.group(0))}
     username = re.search(
@@ -53,6 +57,25 @@ def extract_identity(text: str | None) -> dict[str, str] | None:
     if username and username.group(1).lower() not in COMMON_WORDS | PAYMENT_CHANNELS:
         return {"type": "username", "value": username.group(1)}
     return None
+
+
+def extract_identity_from_texts(*texts: str | None) -> dict[str, str] | None:
+    """Prefer explicit phone evidence from the original user text before LLM rewrites."""
+    normalized_texts = [normalize_text(text) for text in texts if normalize_text(text)]
+    for text in normalized_texts:
+        phone = PHONE_RE.search(text)
+        if phone and (PHONE_LABEL_RE.search(text) or STANDALONE_PHONE_RE.fullmatch(text.strip())):
+            return {"type": "phone", "value": re.sub(r"\s+", "", phone.group(0))}
+    for text in normalized_texts:
+        identity = extract_identity(text)
+        if identity:
+            return identity
+    return None
+
+
+def explicit_phone_reference(text: str | None) -> bool:
+    raw = normalize_text(text)
+    return bool(PHONE_LABEL_RE.search(raw) or STANDALONE_PHONE_RE.fullmatch(raw.strip()))
 
 
 def extract_transaction_signal(text: str | None) -> dict[str, str] | None:

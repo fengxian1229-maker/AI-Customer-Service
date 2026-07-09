@@ -12,7 +12,7 @@ DEFAULT_TEMPLATE_PATH = Path(__file__).resolve().parents[3] / "data" / "replies"
 
 
 class ReplyRenderer:
-    def __init__(self, template_path: str | Path | None = None, *, fallback_language: str = "zh-Hans") -> None:
+    def __init__(self, template_path: str | Path | None = None, *, fallback_language: str = "es") -> None:
         self.template_path = Path(template_path) if template_path else DEFAULT_TEMPLATE_PATH
         self.fallback_language = normalize_language_code(fallback_language)
         self._templates = self._load_templates()
@@ -37,7 +37,7 @@ class ReplyRenderer:
             return normalized
         if self.fallback_language != "unknown" and self.fallback_language in self._templates:
             return self.fallback_language
-        return next(iter(self._templates), "zh-Hans")
+        return next(iter(self._templates), "es")
 
     def _template(self, language: str, intent: str) -> str:
         language_templates = self._templates.get(language) or {}

@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS conversation_states (
   last_outbound_message_id BIGINT UNSIGNED NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_chat_id (chat_id),
+  UNIQUE KEY uk_conversation_states_conversation_id (conversation_id),
+  KEY idx_conversation_states_chat_updated (chat_id, updated_at),
+  KEY idx_conversation_states_chat_thread (chat_id, current_thread_id),
   KEY idx_status (status),
   KEY idx_active_workflow (active_workflow)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

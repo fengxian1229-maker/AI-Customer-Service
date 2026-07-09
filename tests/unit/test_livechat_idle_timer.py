@@ -67,6 +67,23 @@ class FakeLiveChatClient:
         return {"success": True}
 
 
+class FakeFinalReplyService:
+    def __init__(self, text: str, *, raise_error: bool = False) -> None:
+        self.text = text
+        self.raise_error = raise_error
+        self.calls = []
+
+    async def compose(self, state: dict) -> dict:
+        self.calls.append(state)
+        if self.raise_error:
+            raise RuntimeError("final reply unavailable")
+        return {
+            **state,
+            "final_response_text": self.text,
+            "final_reply_result": {"status": "accepted", "confidence": 0.91},
+        }
+
+
 def make_conversation(slot_memory=None) -> dict:
     return {
         "conversation_id": "livechat:chat-1",
@@ -133,6 +150,92 @@ def test_idle_timer_sends_followup_after_120_seconds():
     assert slot_memory["idle_base_assistant_message_id"] == 9
     assert slot_memory["idle_followup_message_id"] == 100
     assert slot_memory["idle_followup_sent_at"] == "2026-07-03 09:00:00"
+
+
+def test_idle_timer_followup_uses_final_reply_language_text():
+    now = datetime(2026, 7, 3, 9, 0, 0)
+    repository = FakeIdleRepository(latest=make_latest_assistant(now - timedelta(seconds=120), message_id=9))
+    client = FakeLiveChatClient()
+    final_reply_service = FakeFinalReplyService("Are you still there? I can keep helping here.")
+
+    result = asyncio.run(
+        process_idle_conversation(
+            make_conversation({"last_reply_language": "en"}),
+            repository=repository,
+            sender_client=client,
+            followup_seconds=120,
+            close_seconds=120,
+            now=now,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert result["status"] == "FOLLOWUP_SENT"
+    assert client.sent_texts == [("chat-1", "thread-1", "Are you still there? I can keep helping here.")]
+    assert repository.inserted_messages[0]["text"] == "Are you still there? I can keep helping here."
+    assert final_reply_service.calls[0]["reply_language"] == "en"
+    assert final_reply_service.calls[0]["response_text_fallback"] == FOLLOWUP_TEXT
+    assert final_reply_service.calls[0]["node_reply_template"] == "idle_followup"
+
+
+def test_idle_timer_close_uses_final_reply_language_text():
+    now = datetime(2026, 7, 3, 9, 2, 1)
+    slot_memory = {
+        "last_reply_language": "es",
+        "idle_followup_sent_at": "2026-07-03 09:00:00",
+        "idle_followup_message_id": 100,
+        "idle_base_assistant_message_id": 9,
+    }
+    repository = FakeIdleRepository(latest=make_latest_assistant(datetime(2026, 7, 3, 9, 0, 0), message_id=100))
+    client = FakeLiveChatClient()
+    final_reply_service = FakeFinalReplyService("Cerraré este chat por ahora. Puedes escribirnos de nuevo cuando necesites ayuda.")
+
+    result = asyncio.run(
+        process_idle_conversation(
+            make_conversation(slot_memory),
+            repository=repository,
+            sender_client=client,
+            followup_seconds=120,
+            close_seconds=120,
+            now=now,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert result["status"] == "CLOSED"
+    assert client.sent_texts == [
+        ("chat-1", "thread-1", "Cerraré este chat por ahora. Puedes escribirnos de nuevo cuando necesites ayuda.")
+    ]
+    assert repository.inserted_messages[0]["text"] == "Cerraré este chat por ahora. Puedes escribirnos de nuevo cuando necesites ayuda."
+    assert final_reply_service.calls[0]["reply_language"] == "es"
+    assert final_reply_service.calls[0]["response_text_fallback"] == CLOSE_TEXT
+    assert final_reply_service.calls[0]["node_reply_template"] == "idle_close"
+
+
+def test_idle_timer_final_reply_failure_uses_fallback_text():
+    now = datetime(2026, 7, 3, 9, 0, 0)
+    repository = FakeIdleRepository(latest=make_latest_assistant(now - timedelta(seconds=120), message_id=9))
+    client = FakeLiveChatClient()
+    final_reply_service = FakeFinalReplyService("unused", raise_error=True)
+
+    result = asyncio.run(
+        process_idle_conversation(
+            make_conversation({"last_reply_language": "en"}),
+            repository=repository,
+            sender_client=client,
+            followup_seconds=120,
+            close_seconds=120,
+            now=now,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=True,
+        )
+    )
+
+    assert result["status"] == "FOLLOWUP_SENT"
+    assert client.sent_texts == [("chat-1", "thread-1", FOLLOWUP_TEXT)]
+    assert repository.inserted_messages[0]["text"] == FOLLOWUP_TEXT
 
 
 def test_idle_timer_persists_followup_send_failure_for_diagnostics():

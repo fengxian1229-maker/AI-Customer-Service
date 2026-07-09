@@ -116,9 +116,9 @@ async def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
             {
                 "language_detection_enabled": getattr(settings, "language_detection_enabled", True),
                 "language_detection_min_confidence": getattr(settings, "language_detection_min_confidence", 0.70),
-                "tenant_persona_default_language": getattr(settings, "tenant_persona_default_language", "zh-Hans"),
+                "tenant_persona_default_language": getattr(settings, "tenant_persona_default_language", "es"),
                 "tenant_supported_languages": getattr(settings, "tenant_supported_languages", "zh-Hans,zh-Hant,en,es,tl,th,my,ms"),
-                "language_fallback": getattr(settings, "language_fallback", "zh-Hans"),
+                "language_fallback": getattr(settings, "language_fallback", "es"),
                 "language_persist_to_slot_memory": getattr(settings, "language_persist_to_slot_memory", True),
             }
         )

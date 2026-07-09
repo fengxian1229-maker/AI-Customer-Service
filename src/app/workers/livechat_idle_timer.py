@@ -9,6 +9,8 @@ from app.channels.livechat.sender_client import LiveChatApiError, LiveChatSender
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import json_dumps, json_loads
+from app.services.final_reply_factory import build_final_reply_service_from_settings
+from app.services.user_visible_finalizer import finalize_user_visible_text
 
 
 FOLLOWUP_TEXT = "请问您还在吗？如果还有问题，可以继续告诉我，我会协助您处理。"
@@ -159,6 +161,8 @@ async def process_idle_conversations(
     close_seconds: int = DEFAULT_CLOSE_SECONDS,
     now: datetime | None = None,
     repository: LiveChatIdleTimerRepository | None = None,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
 ) -> list[dict]:
     repository = repository or LiveChatIdleTimerRepository(pool)
     now = now or datetime.now()
@@ -173,6 +177,8 @@ async def process_idle_conversations(
                 followup_seconds=followup_seconds,
                 close_seconds=close_seconds,
                 now=now,
+                final_reply_service=final_reply_service,
+                llm_final_reply_enabled=llm_final_reply_enabled,
             )
         )
     return results
@@ -185,6 +191,8 @@ async def process_idle_conversation(
     followup_seconds: int,
     close_seconds: int,
     now: datetime,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
 ) -> dict:
     conversation_id = conversation["conversation_id"]
     slot_memory = dict(conversation.get("slot_memory") or {})
@@ -220,6 +228,9 @@ async def process_idle_conversation(
             slot_memory=slot_memory,
             sent_at_key="idle_close_sent_at",
             message_id_key="idle_close_message_id",
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=llm_final_reply_enabled,
+            node_reply_template="idle_close",
         )
         if send_result["status"] != "CLOSE_TEXT_SENT":
             return send_result
@@ -242,6 +253,9 @@ async def process_idle_conversation(
         sent_at_key="idle_followup_sent_at",
         message_id_key="idle_followup_message_id",
         status="FOLLOWUP_SENT",
+        final_reply_service=final_reply_service,
+        llm_final_reply_enabled=llm_final_reply_enabled,
+        node_reply_template="idle_followup",
     )
 
 
@@ -255,12 +269,34 @@ async def _send_idle_text(
     sent_at_key: str,
     message_id_key: str,
     status: str = "CLOSE_TEXT_SENT",
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
+    node_reply_template: str = "idle_followup",
 ) -> dict:
+    finalized = await finalize_user_visible_text(
+        fallback_text=text,
+        final_reply_service=final_reply_service,
+        llm_final_reply_enabled=llm_final_reply_enabled,
+        tenant_id=conversation.get("tenant_id") or "default",
+        channel_type=conversation.get("channel_type") or "livechat",
+        conversation_id=conversation.get("conversation_id"),
+        chat_id=conversation.get("chat_id"),
+        thread_id=conversation.get("thread_id"),
+        slot_memory=slot_memory,
+        active_workflow=conversation.get("active_workflow"),
+        workflow_stage=conversation.get("workflow_stage"),
+        status=conversation.get("status"),
+        node_reply_template=node_reply_template,
+        reply_plan_kind=node_reply_template,
+        intent=node_reply_template,
+        metadata={"source": "livechat_idle_timer"},
+    )
+    send_text = finalized["text"] or text
     try:
         await sender_client.send_text(
             chat_id=conversation["chat_id"],
             thread_id=conversation.get("thread_id"),
-            text=text,
+            text=send_text,
         )
     except Exception as exc:
         if _is_already_closed_error(exc):
@@ -277,7 +313,7 @@ async def _send_idle_text(
         slot_memory["idle_last_failed_at"] = _format_datetime(now)
         await repository.update_slot_memory(conversation["conversation_id"], slot_memory)
         return _result(conversation, "FAILED_SEND_TEXT", error=str(exc))
-    message_id = await repository.insert_assistant_message(conversation, text=text, now=now)
+    message_id = await repository.insert_assistant_message(conversation, text=send_text, now=now)
     slot_memory[sent_at_key] = _format_datetime(now)
     if message_id is not None:
         slot_memory[message_id_key] = int(message_id)
@@ -373,6 +409,7 @@ async def run_once(args: argparse.Namespace) -> dict:
     settings = Settings()
     pool = await create_pool(settings)
     try:
+        final_reply_service = build_final_reply_service_from_settings(settings)
         sender_client = LiveChatSenderClient(
             settings.livechat_api_base,
             settings.livechat_account_id,
@@ -385,6 +422,8 @@ async def run_once(args: argparse.Namespace) -> dict:
             limit=args.limit,
             followup_seconds=args.followup_seconds,
             close_seconds=args.close_seconds,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=getattr(settings, "llm_final_reply_enabled", False),
         )
         return {"worker": "livechat_idle_timer", **summarize_results(results), "results": results}
     finally:

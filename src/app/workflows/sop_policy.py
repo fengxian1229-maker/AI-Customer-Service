@@ -65,8 +65,27 @@ def _has_verified_receipt_supplement(intent: str, attachments: list[dict[str, An
     if expected_kind is None:
         return False
     return any(
-        attachment.get("url")
-        and attachment.get("verified_receipt_attachment")
-        and str(attachment.get("receipt_kind") or "").lower() == expected_kind
+        _is_receipt_supplement(expected_kind, attachment)
         for attachment in attachments
     )
+
+
+def _is_receipt_supplement(expected_kind: str, attachment: dict[str, Any]) -> bool:
+    if not attachment.get("url") or not _is_image_attachment(attachment):
+        return False
+    opposite_kind = "withdrawal" if expected_kind == "deposit" else "deposit"
+    receipt_kind = str(attachment.get("receipt_kind") or "").lower()
+    if receipt_kind == opposite_kind:
+        return False
+    analysis = attachment.get("image_analysis")
+    if isinstance(analysis, dict) and str(analysis.get("receipt_kind") or "").lower() == opposite_kind:
+        return False
+    return True
+
+
+def _is_image_attachment(attachment: dict[str, Any]) -> bool:
+    content_type = str(attachment.get("content_type") or attachment.get("mime_type") or "").lower()
+    if content_type.startswith("image/"):
+        return True
+    name = str(attachment.get("name") or attachment.get("filename") or attachment.get("url") or "").lower()
+    return name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"))

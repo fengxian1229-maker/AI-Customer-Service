@@ -6,6 +6,7 @@ from app.graph.nodes import (
     make_intent_router_node,
     prepare_route_state,
     rewrite_question_node,
+    sop_node,
 )
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
@@ -87,6 +88,72 @@ def test_build_graph_state_preserves_image_attachment_metadata_and_candidates():
     assert state["attachments"][0]["content_type"] == "image/png"
     assert state["image_analysis"]["candidate_intents"] == ["deposit_missing_candidate"]
     assert state["image_candidate_only"] is True
+
+
+def test_sop_node_resolves_active_workflow_even_when_stage_is_collecting_slots():
+    result = sop_node(
+        {
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "collecting_slots",
+            "intent_result": {
+                "intent": "deposit_missing",
+                "route": "sop",
+                "workflow_relation": "current_workflow_resolution",
+                "preserve_active_workflow": False,
+            },
+            "slot_memory": {
+                "last_telegram_staff_reply_type": "resolution",
+                "telegram_case_id": "tg:53",
+                "telegram_message_id": 53,
+            },
+            "raw_user_input": "thanks",
+            "rewritten_question": "thanks",
+            "reply_language": "en",
+            "attachments": [],
+            "recent_messages": [
+                {
+                    "sender_role": "assistant",
+                    "text_content": "I have verified that your deposit has been successfully credited to your account.",
+                }
+            ],
+        }
+    )
+
+    assert result["commands"] == []
+    assert result["sop_action"] == "customer_confirmed_resolved"
+    assert result["workflow_stage"] == "completed"
+    assert result["active_workflow"] is None
+    assert result["slot_memory"]["customer_confirmed_resolved"] is True
+    assert result["response_text"].startswith("Thanks for letting us know")
+
+
+def test_sop_node_does_not_resolve_plain_thanks_without_resolution_context():
+    result = sop_node(
+        {
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "collecting_slots",
+            "intent_result": {
+                "intent": "deposit_missing",
+                "route": "sop",
+                "workflow_relation": "current_workflow_resolution",
+            },
+            "slot_memory": {},
+            "raw_user_input": "thanks",
+            "rewritten_question": "thanks",
+            "reply_language": "en",
+            "attachments": [],
+            "recent_messages": [
+                {
+                    "sender_role": "assistant",
+                    "text_content": "Please send your registered phone number and deposit screenshot.",
+                }
+            ],
+        }
+    )
+
+    assert result["active_workflow"] == "deposit_missing"
+    assert result["workflow_stage"] == "collecting_slots"
+    assert result["sop_action"] != "customer_confirmed_resolved"
 
 
 def test_image_only_deposit_candidate_asks_confirmation_without_entering_sop():

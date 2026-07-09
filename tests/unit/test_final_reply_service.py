@@ -66,7 +66,9 @@ def test_final_reply_prompt_requires_contextual_answer_planning():
     assert "answer that value directly" in FINAL_REPLY_SYSTEM_PROMPT
     assert "node_facts" in FINAL_REPLY_SYSTEM_PROMPT
     assert "reply_plan.allowed_facts" in FINAL_REPLY_SYSTEM_PROMPT
-    assert "Do not use internal organization labels" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "Do not use internal organization or system labels" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "后台" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "backend" in FINAL_REPLY_SYSTEM_PROMPT
 
 
 def test_final_reply_prompt_includes_lingxi_persona_and_compliance_bounds():
@@ -159,10 +161,10 @@ def test_final_reply_service_uses_llm_text_when_guardrails_pass():
 
     assert result["final_response_text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
     assert result["final_reply_result"]["status"] == "accepted"
-    assert provider.calls[0]["tenant_persona"]["default_language"] == "zh-Hans"
+    assert provider.calls[0]["tenant_persona"]["default_language"] == "es"
 
 
-def test_final_reply_service_rejects_internal_staff_label_for_customer_reply():
+def test_final_reply_service_audits_internal_staff_label_for_customer_reply():
     provider = FakeFinalReplyProvider(
         {
             "text": "关于您的充值问题，后台工作人员回复显示目前查询未到账。我们会持续跟进处理。",
@@ -196,8 +198,47 @@ def test_final_reply_service_rejects_internal_staff_label_for_customer_reply():
         )
     )
 
-    assert result["final_response_text"] == "后台回复显示目前查询未到账。我们会持续跟进处理。"
-    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_response_text"] == "关于您的充值问题，后台工作人员回复显示目前查询未到账。我们会持续跟进处理。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
+    assert "internal_organization_label" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_service_rejects_standalone_backend_label_for_customer_reply():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "后台回复你的存款已处理完成，请你确认账户余额。",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.91,
+            "safety_flags": [],
+            "used_facts": ["存款已处理完成"],
+            "reason": "staff update",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                raw_user_input="存款已处理完成",
+                rewritten_question="存款已处理完成",
+                workflow_stage="backend_replied",
+                response_text="已为您核实到这笔存款已处理完成，请您确认账户余额。",
+                response_text_fallback="已为您核实到这笔存款已处理完成，请您确认账户余额。",
+                node_reply_template="telegram_staff_reply",
+                reply_language="zh-Hans",
+                reply_plan={
+                    "kind": "telegram_staff_reply",
+                    "fallback_text": "已为您核实到这笔存款已处理完成，请您确认账户余额。",
+                    "allowed_facts": ["存款已处理完成"],
+                    "must_not_say": ["后台", "後台", "backend", "保证", "一定"],
+                },
+            )
+        )
+    )
+
+    assert result["final_response_text"] == "后台回复你的存款已处理完成，请你确认账户余额。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
     assert "internal_organization_label" in result["final_reply_result"]["violations"]
 
 
@@ -258,7 +299,7 @@ def test_final_reply_service_payload_preserves_backend_context():
 def test_final_reply_service_accepts_used_facts_from_backend_result():
     provider = FakeFinalReplyProvider(
         {
-            "text": "后台查询显示剩余流水约为 1375.09。",
+            "text": "查询结果显示剩余流水约为 1375.09。",
             "language": "zh-Hans",
             "tone": "polite",
             "confidence": 0.93,
@@ -272,12 +313,12 @@ def test_final_reply_service_accepts_used_facts_from_backend_result():
     result = asyncio.run(
         service.compose(
             base_state(
-                response_text="后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
-                response_text_fallback="后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
+                response_text="查询结果显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
+                response_text_fallback="查询结果显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
                 backend_result={"answer": "查询完成", "query": {"remaining_turnover": 1375.09}},
                 reply_plan={
                     "kind": "backend_query_result",
-                    "fallback_text": "后台查询显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
+                    "fallback_text": "查询结果显示当前可能仍有未完成流水要求，剩余流水约为 1375.09。",
                     "must_say_exact": ["1375.09"],
                     "allowed_facts": ["remaining_turnover=1375.09"],
                 },
@@ -359,7 +400,7 @@ def test_final_reply_service_still_rejects_backend_fact_in_low_risk_used_facts()
         )
     )
 
-    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
     assert "forbidden_backend_fact" in result["final_reply_result"]["violations"]
 
 
@@ -391,7 +432,7 @@ def test_final_reply_service_rejects_unverified_time_commitment_in_used_facts():
         )
     )
 
-    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
     assert "unverified_used_fact" in result["final_reply_result"]["violations"]
     assert "unverified_time_commitment" in result["final_reply_result"]["violations"]
 
@@ -425,7 +466,7 @@ def test_final_reply_service_rejects_backend_sync_claim_without_command_even_in_
         )
     )
 
-    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
     assert "unverified_backend_sync_claim" in result["final_reply_result"]["violations"]
     assert "unverified_used_fact" in result["final_reply_result"]["violations"]
 
@@ -441,7 +482,72 @@ def test_final_reply_service_falls_back_when_provider_raises():
     assert result["final_reply_result"]["fallback_reason"] == "exception"
 
 
-def test_final_reply_service_falls_back_when_output_adds_unverified_credited_fact():
+def test_final_reply_service_provider_exception_uses_english_fallback_when_available():
+    provider = FakeFinalReplyProvider(error=RuntimeError("model down"))
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                raw_user_input="Hello, problems with the deposit",
+                rewritten_question="Hello, problems with the deposit",
+                reply_language="en",
+                response_text=(
+                    "To help check this deposit, please provide your username or registered phone number "
+                    "and upload your own successful payment screenshot."
+                ),
+                response_text_fallback=(
+                    "To help check this deposit, please provide your username or registered phone number "
+                    "and upload your own successful payment screenshot."
+                ),
+            )
+        )
+    )
+
+    assert result["final_response_text"].startswith("To help check this deposit")
+    assert "为了帮你查询" not in result["final_response_text"]
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["fallback_reason"] == "exception"
+
+
+def test_final_reply_service_low_confidence_is_audited_without_fallback():
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "Please provide your username or registered phone number and upload your payment screenshot.",
+            "language": "en",
+            "tone": "polite",
+            "confidence": 0.2,
+            "safety_flags": [],
+            "used_facts": [],
+            "reason": "low confidence but usable text",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True, min_confidence=0.7)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                reply_language="en",
+                missing_slots=["account_or_phone", "deposit_screenshot"],
+                response_text="Please provide your username or registered phone number and upload your payment screenshot.",
+                response_text_fallback="Please provide your username or registered phone number and upload your payment screenshot.",
+                reply_plan={
+                    "kind": "ask_missing_slots",
+                    "fallback_text": "Please provide your username or registered phone number and upload your payment screenshot.",
+                    "missing_slots": ["account_or_phone", "deposit_screenshot"],
+                    "allowed_facts": ["Need customer to provide missing details"],
+                },
+            )
+        )
+    )
+
+    assert result["final_response_text"].startswith("Please provide your username")
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
+    assert result["final_reply_result"]["warning_reason"] == "low_confidence"
+    assert "low_confidence" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_service_audits_when_output_adds_unverified_credited_fact():
     provider = FakeFinalReplyProvider(
         {
             "text": "您好，您的款项已到账，请放心。",
@@ -456,16 +562,16 @@ def test_final_reply_service_falls_back_when_output_adds_unverified_credited_fac
 
     result = asyncio.run(service.compose(base_state()))
 
-    assert result["final_response_text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
-    assert result["final_reply_result"]["status"] == "fallback"
-    assert result["final_reply_result"]["fallback_reason"] == "guardrail_failed"
+    assert result["final_response_text"] == "您好，您的款项已到账，请放心。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
+    assert result["final_reply_result"]["warning_reason"] == "guardrail_audit"
     assert "forbidden_backend_fact" in result["final_reply_result"]["violations"]
 
 
 def test_final_reply_service_allows_credited_fact_from_staff_reply_plan():
     provider = FakeFinalReplyProvider(
         {
-            "text": "后台回复款项已到账，请刷新页面后确认账户余额。",
+            "text": "已为您核实到款项已到账，请刷新页面后确认账户余额。",
             "language": "zh",
             "tone": "polite",
             "confidence": 0.92,
@@ -479,11 +585,11 @@ def test_final_reply_service_allows_credited_fact_from_staff_reply_plan():
         service.compose(
             base_state(
                 workflow_stage="backend_replied",
-                response_text="后台已回复，我们会按照这个更新继续协助你处理。",
-                response_text_fallback="后台已回复，我们会按照这个更新继续协助你处理。",
+                response_text="已收到处理更新，我们会按照这个更新继续协助您处理。",
+                response_text_fallback="已收到处理更新，我们会按照这个更新继续协助您处理。",
                 reply_plan={
                     "kind": "telegram_staff_reply",
-                    "fallback_text": "后台已回复，我们会按照这个更新继续协助你处理。",
+                    "fallback_text": "已收到处理更新，我们会按照这个更新继续协助您处理。",
                     "allowed_facts": ["已经到账，刷新一下页面看看"],
                     "staff_reply_key_facts": [],
                     "must_not_say": ["保证", "一定"],
@@ -492,11 +598,11 @@ def test_final_reply_service_allows_credited_fact_from_staff_reply_plan():
         )
     )
 
-    assert result["final_response_text"] == "后台回复款项已到账，请刷新页面后确认账户余额。"
+    assert result["final_response_text"] == "已为您核实到款项已到账，请刷新页面后确认账户余额。"
     assert result["final_reply_result"]["status"] == "accepted"
 
 
-def test_final_reply_service_rejects_staff_reply_framed_as_customer_feedback():
+def test_final_reply_service_audits_staff_reply_framed_as_customer_feedback():
     provider = FakeFinalReplyProvider(
         {
             "text": "收到您的反馈。关于这笔订单手机号不一致的情况，后台已进行回复，我们将依据此更新继续为您处理。",
@@ -528,9 +634,9 @@ def test_final_reply_service_rejects_staff_reply_framed_as_customer_feedback():
         )
     )
 
-    assert result["final_response_text"] == "后台核实时发现手机号可能不一致，请你再次确认并发送正确的注册手机号，我们收到后会继续协助确认。"
-    assert result["final_reply_result"]["status"] == "fallback"
-    assert result["final_reply_result"]["fallback_reason"] == "guardrail_failed"
+    assert result["final_response_text"] == "收到您的反馈。关于这笔订单手机号不一致的情况，后台已进行回复，我们将依据此更新继续为您处理。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
+    assert result["final_reply_result"]["warning_reason"] == "guardrail_audit"
     assert "staff_reply_framed_as_customer_feedback" in result["final_reply_result"]["violations"]
 
 
@@ -549,12 +655,13 @@ def test_final_reply_service_falls_back_when_ask_missing_slots_omits_account():
 
     result = asyncio.run(service.compose(base_state()))
 
-    assert result["final_response_text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
+    assert result["final_response_text"] == "请上传存款付款截图。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
     assert "missing_required_phrase" in result["final_reply_result"]["violations"]
     assert "missing_slot_account_or_phone" in result["final_reply_result"]["violations"]
 
 
-def test_final_reply_service_human_handoff_disallows_claiming_agent_connected():
+def test_final_reply_service_audits_human_handoff_claiming_agent_connected():
     provider = FakeFinalReplyProvider(
         {
             "text": "真人客服已接入，会马上处理。",
@@ -583,11 +690,12 @@ def test_final_reply_service_human_handoff_disallows_claiming_agent_connected():
 
     result = asyncio.run(service.compose(state))
 
-    assert result["final_response_text"] == "我会为你转接真人客服继续协助。"
+    assert result["final_response_text"] == "真人客服已接入，会马上处理。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
     assert "forbidden_phrase" in result["final_reply_result"]["violations"]
 
 
-def test_final_reply_service_faq_cannot_add_policy_not_in_reply_plan_or_rag():
+def test_final_reply_service_audits_faq_policy_not_in_reply_plan_or_rag():
     provider = FakeFinalReplyProvider(
         {
             "text": "存款请按照页面提示操作，手续费全免。",
@@ -617,11 +725,12 @@ def test_final_reply_service_faq_cannot_add_policy_not_in_reply_plan_or_rag():
 
     result = asyncio.run(service.compose(state))
 
-    assert result["final_response_text"] == "存款请按照页面提示操作。"
+    assert result["final_response_text"] == "存款请按照页面提示操作，手续费全免。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
     assert "forbidden_phrase" in result["final_reply_result"]["violations"]
 
 
-def test_final_reply_service_rejects_internal_telegram_case_id():
+def test_final_reply_service_audits_internal_telegram_case_id():
     provider = FakeFinalReplyProvider(
         {
             "text": "好的，案件 tg:21 仍在确认中，有更新会通知你。",
@@ -650,11 +759,12 @@ def test_final_reply_service_rejects_internal_telegram_case_id():
 
     result = asyncio.run(service.compose(state))
 
-    assert result["final_response_text"] == "收到，案件仍在确认中，有更新会在这里通知你。"
+    assert result["final_response_text"] == "好的，案件 tg:21 仍在确认中，有更新会通知你。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
     assert "internal_telegram_identifier" in result["final_reply_result"]["violations"]
 
 
-def test_final_reply_service_rejects_backend_sync_claim_without_append_command():
+def test_final_reply_service_audits_backend_sync_claim_without_append_command():
     provider = FakeFinalReplyProvider(
         {
             "text": "好的，收到您的更正，已同步给后台继续核实，请稍等。",
@@ -684,7 +794,8 @@ def test_final_reply_service_rejects_backend_sync_claim_without_append_command()
 
     result = asyncio.run(service.compose(state))
 
-    assert result["final_response_text"] == "收到，案件仍在确认中，有更新会在这里通知你。"
+    assert result["final_response_text"] == "好的，收到您的更正，已同步给后台继续核实，请稍等。"
+    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
     assert "unverified_backend_sync_claim" in result["final_reply_result"]["violations"]
 
 

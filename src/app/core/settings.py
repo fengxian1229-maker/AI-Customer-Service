@@ -3,6 +3,8 @@ from urllib.parse import quote_plus
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.config.platforms import default_allowed_livechat_group_ids
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -97,9 +99,9 @@ class Settings(BaseSettings):
     livechat_thinking_indicator_enabled: bool = False
     language_detection_enabled: bool = True
     language_detection_min_confidence: float = 0.70
-    tenant_persona_default_language: str = "zh-Hans"
+    tenant_persona_default_language: str = "es"
     tenant_supported_languages: str = "zh-Hans,zh-Hant,en,es,tl,th,my,ms"
-    language_fallback: str = "zh-Hans"
+    language_fallback: str = "es"
     language_persist_to_slot_memory: bool = True
     tenant_persona_tone: str = "polite"
     tenant_persona_assistant_name: str | None = None
@@ -141,11 +143,12 @@ class Settings(BaseSettings):
 
     @property
     def livechat_allowed_group_id_set(self) -> set[int]:
-        return {
+        configured = {
             int(item.strip())
             for item in self.livechat_allowed_group_ids.split(",")
             if item.strip()
         }
+        return configured or default_allowed_livechat_group_ids(include_test=True)
 
     @property
     def mysql_checkpoint_dsn(self) -> str:

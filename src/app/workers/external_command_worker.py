@@ -271,6 +271,7 @@ async def _process_real_command(
             command,
             repository=repository,
             result_repository=result_repository,
+            conversation_repository=conversation_repository,
             emit_result=emit_result,
             execute_telegram=execute_telegram,
             settings=settings,
@@ -314,7 +315,7 @@ async def _process_real_command(
 
     sender_client_factory = sender_client_factory or _build_sender_client
     sender_client = sender_client_factory(settings)
-    target_group_id = settings.livechat_handoff_target_group_id
+    target_group_id = _resolve_handoff_target_group_id(command, settings)
     ignore_agents_availability = settings.livechat_handoff_ignore_agents_availability
     ignore_requester_presence = settings.livechat_handoff_ignore_requester_presence
     handoff_stage = dict((command.get("payload_json") or {}).get("human_handoff_stage") or {})
@@ -401,12 +402,18 @@ async def _process_real_telegram_command(
     command: dict,
     repository: ExternalCommandRepository,
     result_repository: ExternalCommandResultRepository | None,
+    conversation_repository: ConversationRepository | None,
     emit_result: bool,
     execute_telegram: bool,
     settings: Settings | None,
     telegram_client_factory,
     max_retries: int = 3,
 ) -> dict:
+    if await _telegram_command_blocked_by_human_active(command, conversation_repository):
+        reason = "conversation is HUMAN_ACTIVE; telegram command skipped"
+        await _mark_command_status(repository, command["id"], "SKIPPED_HUMAN_ACTIVE", reason, max_retries=max_retries)
+        return {"id": command["id"], "command_type": command["command_type"], "status": "SKIPPED_HUMAN_ACTIVE", "error": reason}
+
     block_reason = _telegram_block_reason(command, settings, execute_telegram)
     if block_reason:
         status = "SKIPPED_DISABLED" if block_reason == "--execute-telegram is required" else "FAILED_CONFIG"
@@ -471,6 +478,19 @@ async def _process_real_telegram_command(
     if emit_result:
         item["result_insert"] = result_insert
     return item
+
+
+async def _telegram_command_blocked_by_human_active(
+    command: dict,
+    conversation_repository: ConversationRepository | None,
+) -> bool:
+    if conversation_repository is None or not hasattr(conversation_repository, "get_by_conversation_id"):
+        return False
+    conversation_id = command.get("conversation_id")
+    if not conversation_id:
+        return False
+    conversation = await conversation_repository.get_by_conversation_id(conversation_id)
+    return str((conversation or {}).get("status") or "").upper() == "HUMAN_ACTIVE"
 
 
 async def _process_real_backend_query_command(
@@ -572,6 +592,7 @@ async def _process_real_pending_reply_lookup_command(
         tenant_id=command.get("tenant_id") or "default",
         current_conversation_id=command.get("conversation_id"),
     )
+    _copy_user_visible_context_to_result(payload, result_json)
     result_insert = None
     if emit_result:
         result_insert = await result_repository.insert_idempotent(
@@ -689,9 +710,27 @@ def _handoff_block_reason(command: dict, settings: Settings | None, execute_huma
         return "livechat_handoff_enabled is false"
     if not command.get("chat_id"):
         return "command.chat_id is required"
-    if settings.livechat_handoff_target_group_id is None:
-        return "livechat_handoff_target_group_id is required"
+    try:
+        target_group_id = _resolve_handoff_target_group_id(command, settings)
+    except ValueError as exc:
+        return str(exc)
+    if target_group_id is None:
+        return "livechat_handoff_target_group_id is required when command.payload_json.livechat_group_id is missing"
     return None
+
+
+def _resolve_handoff_target_group_id(command: dict, settings: Settings) -> int | None:
+    payload = command.get("payload_json") or {}
+    payload_group_id = payload.get("livechat_group_id")
+    if payload_group_id is not None and str(payload_group_id).strip() != "":
+        try:
+            target_group_id = int(payload_group_id)
+        except (TypeError, ValueError):
+            raise ValueError("command.payload_json.livechat_group_id must be a positive integer")
+        if target_group_id <= 0:
+            raise ValueError("command.payload_json.livechat_group_id must be a positive integer")
+        return target_group_id
+    return settings.livechat_handoff_target_group_id
 
 
 def classify_handoff_error(exc: Exception) -> str:
@@ -822,6 +861,10 @@ def _build_result_record(command: dict, result_type: str, result_json: dict, sta
 
 
 def _copy_backend_context_to_result(command_payload: dict, result_json: dict) -> None:
+    _copy_user_visible_context_to_result(command_payload, result_json)
+
+
+def _copy_user_visible_context_to_result(command_payload: dict, result_json: dict) -> None:
     for key in (
         "reply_language",
         "conversation_language",

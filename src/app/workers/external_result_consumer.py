@@ -19,6 +19,7 @@ from app.db.repositories import (
 from app.services.final_reply_factory import build_final_reply_service_from_settings
 from app.services.message_history import build_external_result_summary_message
 from app.services.outbox import build_text_outbox
+from app.services.user_visible_finalizer import finalize_user_visible_text
 from app.services.reply_intents import CustomerReplyIntent, build_customer_reply
 from app.services.reply_renderer import render_customer_reply
 from app.workflows.final_reply_policy import build_reply_plan
@@ -283,7 +284,7 @@ def build_result_handler(row: dict) -> dict:
             result_json.get("reply_language")
             or result_json.get("conversation_language")
             or result_json.get("detected_language")
-            or "zh-Hans"
+            or "es"
         )
         if result_json.get("status") == "failed":
             reply_intent = CustomerReplyIntent.BACKEND_QUERY_FAILED
@@ -358,6 +359,14 @@ async def _apply_backend_final_reply(
     final_reply_service=None,
     llm_final_reply_enabled: bool = False,
 ) -> dict:
+    if row.get("result_type") == "pending_reply.lookup.result":
+        return await _apply_pending_reply_final_reply(
+            row,
+            handler,
+            recent_messages=recent_messages,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=llm_final_reply_enabled,
+        )
     if row.get("result_type") != "backend.query.result":
         return handler
 
@@ -403,6 +412,57 @@ async def _apply_backend_final_reply(
     return updated
 
 
+async def _apply_pending_reply_final_reply(
+    row: dict,
+    handler: dict,
+    *,
+    recent_messages: list[dict] | None = None,
+    final_reply_service=None,
+    llm_final_reply_enabled: bool = False,
+) -> dict:
+    fallback_text = str(handler.get("text") or "").strip()
+    if not fallback_text:
+        return handler
+    result_json = row.get("result_json") or {}
+    graph_state = dict(handler.get("graph_state") or {})
+    slot_memory = dict(graph_state.get("slot_memory") or {})
+    finalized = await finalize_user_visible_text(
+        fallback_text=fallback_text,
+        final_reply_service=final_reply_service,
+        llm_final_reply_enabled=llm_final_reply_enabled,
+        tenant_id=row.get("tenant_id") or "default",
+        channel_type="livechat",
+        conversation_id=row.get("conversation_id"),
+        chat_id=row.get("chat_id"),
+        thread_id=row.get("thread_id"),
+        raw_user_input=result_json.get("raw_user_input"),
+        recent_messages=recent_messages,
+        reply_language=result_json.get("reply_language"),
+        conversation_language=result_json.get("conversation_language"),
+        detected_language=result_json.get("detected_language"),
+        slot_memory=slot_memory,
+        active_workflow=graph_state.get("active_workflow"),
+        workflow_stage=graph_state.get("workflow_stage"),
+        status=graph_state.get("status"),
+        route="sop",
+        intent="pending_reply_lookup",
+        node_reply_template="pending_reply_lookup",
+        reply_plan_kind="pending_reply_lookup",
+        allowed_facts=[fallback_text],
+        metadata={"source": "pending_reply_lookup", "status": result_json.get("status")},
+    )
+    final_state = finalized["state"]
+    updated_graph_state = {
+        **graph_state,
+        "response_text_fallback": fallback_text,
+        "final_response_text": finalized["text"],
+        "final_reply_result": final_state.get("final_reply_result"),
+    }
+    updated = {**handler, "text": finalized["text"], "graph_state": updated_graph_state}
+    updated["summary_message"] = build_external_result_summary_message(row, updated)
+    return updated
+
+
 def _build_backend_final_reply_state(
     row: dict,
     handler: dict,
@@ -416,7 +476,7 @@ def _build_backend_final_reply_state(
         result_json.get("reply_language")
         or result_json.get("conversation_language")
         or result_json.get("detected_language")
-        or "zh-Hans"
+        or "es"
     )
     return {
         "tenant_id": row.get("tenant_id") or "default",

@@ -11,10 +11,12 @@ Add the webhook secret and group allow-list to `.env`:
 ```dotenv
 LIVECHAT_WEBHOOK_ENABLED=true
 LIVECHAT_WEBHOOK_SECRET=replace-with-the-secret-from-text-console
-LIVECHAT_ALLOWED_GROUP_IDS=23
+LIVECHAT_ALLOWED_GROUP_IDS=2,12,11,13,24,25,28,23
 WEBHOOK_SERVER_HOST=0.0.0.0
 WEBHOOK_SERVER_PORT=8000
 ```
+
+If `LIVECHAT_ALLOWED_GROUP_IDS` is left blank, the application defaults to the official platform groups `2,12,11,13,24,25,28` plus the `23` test group.
 
 The server also needs the existing MySQL settings. If `incoming_event` payloads do not include group data, the server may call `get_chat`, so keep the existing LiveChat API settings available too.
 
@@ -64,7 +66,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/webhooks/livechat \
     "payload": {
       "chat_id": "chat-1",
       "thread_id": "thread-1",
-      "access": {"group_ids": [23]},
+      "access": {"group_ids": [28]},
       "event": {
         "id": "event-1",
         "type": "message",
