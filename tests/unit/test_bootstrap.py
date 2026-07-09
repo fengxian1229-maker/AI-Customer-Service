@@ -351,3 +351,46 @@ def test_bootstrap_adds_missing_workflow_stage_for_mysql():
     asyncio.run(ensure_conversation_states_compat(cur))
 
     assert "ALTER TABLE conversation_states ADD COLUMN workflow_stage VARCHAR(128) NULL" in cur.statements
+
+
+def test_bootstrap_drops_legacy_chat_unique_before_adding_conversation_unique():
+    import asyncio
+
+    from app.db.bootstrap import ensure_conversation_states_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.statements = []
+            self.indexes = {"uk_chat_id"}
+
+        async def execute(self, sql):
+            self.statements.append(sql)
+            if sql == "ALTER TABLE conversation_states DROP INDEX uk_chat_id":
+                self.indexes.remove("uk_chat_id")
+            if sql.startswith("CREATE UNIQUE INDEX uk_conversation_states_conversation_id"):
+                self.indexes.add("uk_conversation_states_conversation_id")
+            if sql.startswith("CREATE INDEX idx_conversation_states_chat_updated"):
+                self.indexes.add("idx_conversation_states_chat_updated")
+            if sql.startswith("CREATE INDEX idx_conversation_states_chat_thread"):
+                self.indexes.add("idx_conversation_states_chat_thread")
+
+        async def fetchall(self):
+            if self.statements[-1] == "SHOW COLUMNS FROM conversation_states":
+                return [("conversation_id",), ("status",), ("workflow_stage",)]
+            if self.statements[-1] == "SHOW INDEX FROM conversation_states":
+                return [(None, None, name) for name in sorted(self.indexes)]
+            return []
+
+    cur = FakeCursor()
+
+    asyncio.run(ensure_conversation_states_compat(cur))
+
+    drop_pos = cur.statements.index("ALTER TABLE conversation_states DROP INDEX uk_chat_id")
+    create_pos = next(
+        i
+        for i, statement in enumerate(cur.statements)
+        if statement.startswith("CREATE UNIQUE INDEX uk_conversation_states_conversation_id")
+    )
+    assert drop_pos < create_pos
+    assert "uk_chat_id" not in cur.indexes
+    assert "uk_conversation_states_conversation_id" in cur.indexes

@@ -24,6 +24,10 @@ THREAD_CONTINUABLE_WORKFLOW_STAGES = {
 THREAD_CONTINUABLE_STATUSES = {"WAITING_EXTERNAL"}
 
 
+class ConversationStateSchemaError(RuntimeError):
+    pass
+
+
 class InboundEventRepository:
     def __init__(self, pool) -> None:
         self.pool = pool
@@ -455,6 +459,11 @@ class ConversationRepository:
             await cur.execute(insert_sql, (conversation_id, chat_id, thread_id))
             await cur.execute(select_sql, (conversation_id,))
             row = await cur.fetchone()
+            if thread_id and row is None:
+                raise ConversationStateSchemaError(
+                    "conversation_states did not persist the thread-scoped conversation_id "
+                    f"{conversation_id!r}; check for legacy unique indexes such as uk_chat_id"
+                )
             previous = None
             if thread_id:
                 await cur.execute(previous_sql, (chat_id, conversation_id))

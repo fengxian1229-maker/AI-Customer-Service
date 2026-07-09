@@ -76,6 +76,37 @@ def test_sop_node_prefers_dialogue_planner_over_slot_extractor():
     assert result["slot_memory"]["account_or_phone"] == "13800138000"
 
 
+def test_sop_node_phone_update_replaces_spurious_account_alias():
+    service = PlannerOnlyService(
+        {
+            "intent_relation": "current_sop_supplement",
+            "slot_updates": {"phone": "3135426895"},
+            "slot_confidence": {"phone": 1.0},
+            "missing_slots": [],
+            "should_ask_confirmation": False,
+            "reply_draft": "",
+            "reason": "phone supplied",
+        }
+    )
+    node = make_sop_node(service, llm_sop_slot_enabled=True)
+
+    result = asyncio.run(
+        node(
+            _sop_state(
+                raw_user_input="3135426895",
+                rewritten_question="El usuario proporciona su número de teléfono registrado: 3135426895.",
+                intent_result={"intent": "withdrawal_missing", "route": "sop"},
+                slot_memory={"account_or_phone": "indica", "identity_kind": "username"},
+                attachments=[],
+            )
+        )
+    )
+
+    assert result["slot_memory"]["phone"] == "3135426895"
+    assert result["slot_memory"]["account_or_phone"] == "3135426895"
+    assert result["slot_memory"]["identity_kind"] == "phone"
+
+
 def test_sop_node_drops_unknown_and_protected_planner_slots():
     service = PlannerOnlyService(
         {

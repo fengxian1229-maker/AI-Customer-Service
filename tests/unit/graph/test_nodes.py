@@ -524,6 +524,48 @@ def test_without_active_workflow_greeting_routes_to_casual_chat():
     assert result["reply_plan"]["kind"] == "casual_chat"
 
 
+def test_sop_node_backend_replied_phone_supplement_appends_to_case():
+    result = sop_node(
+        {
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "backend_replied",
+            "status": "AI_ACTIVE",
+            "route": "sop",
+            "intent_result": {
+                "intent": "withdrawal_missing",
+                "route": "sop",
+                "workflow_relation": "current_sop_supplement",
+                "preserve_active_workflow": True,
+            },
+            "slot_memory": {
+                "account_or_phone": "indica",
+                "identity_kind": "username",
+                "telegram_case_id": "tg:59117",
+                "telegram_message_id": 59117,
+                "telegram_target_chat_id": "-1003181576378",
+                "telegram_message_thread_id": 36735,
+            },
+            "raw_user_input": "3135426895",
+            "rewritten_question": "El usuario proporciona su número de teléfono registrado: 3135426895.",
+            "reply_language": "es",
+            "attachments": [],
+            "llm_sop_dialogue_plan": {
+                "status": "accepted",
+                "intent_relation": "current_sop_supplement",
+                "slot_updates": {"phone": "3135426895"},
+                "slot_confidence": {"phone": 1.0},
+                "reason": "phone supplied",
+            },
+        }
+    )
+
+    assert result["slot_memory"]["phone"] == "3135426895"
+    assert result["slot_memory"]["account_or_phone"] == "3135426895"
+    assert result["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE
+    assert result["commands"][0]["payload"]["telegram_case_id"] == "tg:59117"
+    assert result["commands"][0]["payload"]["supplement"]["slot_updates"] == {"phone": "3135426895"}
+
+
 def test_conversation_memory_lookup_uses_recent_customer_message():
     result = intent_router_node(
         {

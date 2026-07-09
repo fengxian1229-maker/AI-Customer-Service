@@ -36,7 +36,13 @@ EXTERNAL_COMMAND_TYPES = {
 def _deepcopy_jsonish(value):
     return copy.deepcopy(value)
 
-ACTIVE_WORKFLOW_GUARD_STAGES = {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}
+ACTIVE_WORKFLOW_GUARD_STAGES = {
+    "waiting_backend",
+    "backend_querying",
+    "backend_replied",
+    "collecting_slots",
+    "lookup_pending_reply",
+}
 INTRO_EVENT_TYPES = {"CHAT_STARTED", "THREAD_STARTED"}
 FAST_NAV_BUTTON_IDS = set(MENU_BY_NAV_BUTTON) | {"route_main", "route_previous"}
 PREVIEW_ALLOWED_ROUTES = {"faq", "final_reply"}

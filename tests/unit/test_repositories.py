@@ -1,7 +1,10 @@
 from datetime import datetime
 import json
 
+import pytest
+
 from app.db.repositories import (
+    ConversationStateSchemaError,
     ConversationRepository,
     ConversationMessageRepository,
     ExternalCommandRepository,
@@ -202,6 +205,20 @@ def test_conversation_thread_state_inheritance_only_allows_unfinished_workflows(
             },
         )
         assert not_inherited == fresh
+
+
+def test_conversation_get_or_create_raises_when_thread_state_not_persisted():
+    import asyncio
+
+    cursor = SequentialCursor(fetchone_results=[None])
+    repository = ConversationRepository(FakePool(cursor))
+
+    with pytest.raises(ConversationStateSchemaError, match="legacy unique indexes"):
+        asyncio.run(repository.get_or_create("chat-1", "thread-1"))
+
+    assert cursor.executions[0][1] == ("livechat:chat-1:thread-1", "chat-1", "thread-1")
+    assert "WHERE conversation_id = %s" in cursor.executions[1][0]
+    assert cursor.executions[1][1] == ("livechat:chat-1:thread-1",)
 
 
 async def run_insert(rowcount: int):

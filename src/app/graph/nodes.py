@@ -35,7 +35,13 @@ LLM_AUTHORITATIVE_SOURCES = {
     "llm_rewrite_authoritative",
 }
 
-ACTIVE_WORKFLOW_GUARD_STAGES = {"waiting_backend", "backend_querying", "collecting_slots", "lookup_pending_reply"}
+ACTIVE_WORKFLOW_GUARD_STAGES = {
+    "waiting_backend",
+    "backend_querying",
+    "backend_replied",
+    "collecting_slots",
+    "lookup_pending_reply",
+}
 
 
 def build_graph_state_from_event(
@@ -574,7 +580,7 @@ def sop_node(state: GraphState) -> GraphState:
     if state.get("active_workflow") and _current_workflow_resolution_relation(state):
         if has_workflow_resolution_signal(state):
             return handle_waiting_backend(state)
-    if state.get("workflow_stage") in {"waiting_backend", "backend_querying", "waiting_customer_supplement"}:
+    if state.get("workflow_stage") in {"waiting_backend", "backend_querying", "backend_replied", "waiting_customer_supplement"}:
         return handle_waiting_backend(state)
     return run_sop(state)
 

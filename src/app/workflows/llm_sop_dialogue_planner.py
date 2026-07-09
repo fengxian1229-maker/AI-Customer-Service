@@ -88,9 +88,10 @@ def apply_llm_sop_plan(state: dict[str, Any], intent: str, llm_plan: dict[str, A
             continue
         slot_updates[key] = value
 
+    previous_slot_memory = dict(slot_memory)
     slot_memory.update(slot_updates)
     _merge_attachment_slots(intent, slot_memory, state.get("attachments") or [])
-    _sync_legacy_aliases(intent, slot_memory)
+    _sync_legacy_aliases(intent, slot_memory, slot_updates=slot_updates, previous_slot_memory=previous_slot_memory)
     if intent in IMAGE_COLLECTION_SOPS:
         _drop_order_slots(slot_memory)
     missing_slots = compute_missing_slots(intent, slot_memory)
@@ -247,16 +248,68 @@ def _is_image_attachment(attachment: dict[str, Any]) -> bool:
     return name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"))
 
 
-def _sync_legacy_aliases(intent: str, slot_memory: dict[str, Any]) -> None:
+def _sync_legacy_aliases(
+    intent: str,
+    slot_memory: dict[str, Any],
+    *,
+    slot_updates: dict[str, Any] | None = None,
+    previous_slot_memory: dict[str, Any] | None = None,
+) -> None:
     screenshot_key = "deposit_screenshot" if intent == "deposit_missing" else "withdrawal_screenshot"
-    if slot_memory.get("phone") and not slot_memory.get("account_or_phone"):
+    updates = dict(slot_updates or {})
+    previous = dict(previous_slot_memory or {})
+    if slot_memory.get("phone") and (
+        not slot_memory.get("account_or_phone")
+        or _should_replace_account_or_phone_with_phone(slot_memory, updates, previous)
+    ):
         slot_memory["account_or_phone"] = slot_memory["phone"]
+        slot_memory["identity_kind"] = "phone"
     if slot_memory.get("receipt_screenshot"):
         slot_memory.setdefault(screenshot_key, slot_memory["receipt_screenshot"])
     elif slot_memory.get(screenshot_key):
         slot_memory.setdefault("receipt_screenshot", slot_memory[screenshot_key])
     if slot_memory.get("payment_channel"):
         slot_memory.setdefault("channel", slot_memory["payment_channel"])
+
+
+def _should_replace_account_or_phone_with_phone(
+    slot_memory: dict[str, Any],
+    slot_updates: dict[str, Any],
+    previous_slot_memory: dict[str, Any],
+) -> bool:
+    if not slot_updates.get("phone") or slot_updates.get("account_or_phone"):
+        return False
+    current_account = str(slot_memory.get("account_or_phone") or "").strip()
+    if not current_account:
+        return True
+    if str(slot_memory.get("identity_kind") or "").lower() == "phone":
+        return True
+    if current_account != str(previous_slot_memory.get("account_or_phone") or "").strip():
+        return False
+    return _looks_like_spurious_account_or_phone(current_account)
+
+
+def _looks_like_spurious_account_or_phone(value: str) -> bool:
+    lowered = str(value or "").strip().lower()
+    if not lowered:
+        return True
+    if lowered.isdigit() or any(ch.isdigit() for ch in lowered):
+        return False
+    spurious_words = {
+        "indica",
+        "indicar",
+        "pregunta",
+        "solicita",
+        "proporciona",
+        "usuario",
+        "cliente",
+        "retiro",
+        "deposito",
+        "depósito",
+        "recibida",
+        "recibido",
+    }
+    return lowered in spurious_words
 
 
 def _drop_order_slots(slot_memory: dict[str, Any]) -> None:
