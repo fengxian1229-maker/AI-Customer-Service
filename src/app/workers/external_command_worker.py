@@ -18,6 +18,7 @@ from app.services.telegram_case_card import build_telegram_case_append, build_te
 from app.services.telegram_target_resolver import resolve_telegram_target
 from app.backends.factory import BackendProviderFactory
 from app.backends.resolver import TenantBackendConfigResolver
+from app.llm.gemini_model import build_gemini_chat_model
 
 
 SUPPORTED_COMMAND_TYPES = {
@@ -94,6 +95,7 @@ async def process_pending_commands(
     settings: Settings | None = None,
     sender_client_factory=None,
     telegram_client_factory=None,
+    telegram_append_translator=None,
     pending_reply_lookup_service=None,
     worker_id: str | None = None,
     lease_seconds: int = 60,
@@ -142,6 +144,7 @@ async def process_pending_commands(
                     settings=settings,
                     sender_client_factory=sender_client_factory,
                     telegram_client_factory=telegram_client_factory,
+                    telegram_append_translator=telegram_append_translator,
                     pending_reply_lookup_service=pending_reply_lookup_service,
                     max_retries=max_retries,
                 )
@@ -161,6 +164,7 @@ async def process_pending_commands(
                     settings=settings,
                     sender_client_factory=sender_client_factory,
                     telegram_client_factory=telegram_client_factory,
+                    telegram_append_translator=telegram_append_translator,
                     pending_reply_lookup_service=pending_reply_lookup_service,
                     max_retries=max_retries,
                 )
@@ -193,6 +197,7 @@ async def _process_one_pending_command(
     settings: Settings | None,
     sender_client_factory,
     telegram_client_factory,
+    telegram_append_translator,
     pending_reply_lookup_service,
     max_retries: int,
 ) -> dict:
@@ -221,6 +226,7 @@ async def _process_one_pending_command(
             settings=settings,
             sender_client_factory=sender_client_factory,
             telegram_client_factory=telegram_client_factory,
+            telegram_append_translator=telegram_append_translator,
             pending_reply_lookup_service=pending_reply_lookup_service,
             max_retries=max_retries,
         )
@@ -262,6 +268,7 @@ async def _process_real_command(
     settings: Settings | None,
     sender_client_factory,
     telegram_client_factory,
+    telegram_append_translator,
     pending_reply_lookup_service,
     max_retries: int = 3,
 ) -> dict:
@@ -276,6 +283,7 @@ async def _process_real_command(
             execute_telegram=execute_telegram,
             settings=settings,
             telegram_client_factory=telegram_client_factory,
+            telegram_append_translator=telegram_append_translator,
             max_retries=max_retries,
         )
     if command_type == "backend.query":
@@ -407,6 +415,7 @@ async def _process_real_telegram_command(
     execute_telegram: bool,
     settings: Settings | None,
     telegram_client_factory,
+    telegram_append_translator=None,
     max_retries: int = 3,
 ) -> dict:
     if await _telegram_command_blocked_by_human_active(command, conversation_repository):
@@ -446,22 +455,25 @@ async def _process_real_telegram_command(
                 "target_source": target.get("target_source"),
                 "delivery_mode": "text_with_attachments",
                 "attachment_results": delivery.get("attachment_results", []),
+                "card_text": card["card_text"],
                 "intent": intent,
                 "active_workflow": payload.get("active_workflow") or intent,
             }
         else:
             reply_to_message_id = payload.get("telegram_message_id") or (payload.get("slot_memory") or {}).get("telegram_message_id")
+            _translate_append_supplement_text(payload, settings, telegram_append_translator)
             append = build_telegram_case_append(command, target, reply_to_message_id=reply_to_message_id)
             delivery = client.append_to_case(append)
             result_type = "telegram.append_to_case.result"
             result_json = {
-                "status": "appended",
+                "status": delivery.get("status") or "edited",
                 "telegram_message_id": delivery["message_id"],
                 "reply_to_message_id": delivery.get("reply_to_message_id") or payload.get("telegram_message_id"),
                 "target_chat_id": target["chat_id"],
                 "message_thread_id": target.get("message_thread_id"),
                 "target_source": target.get("target_source"),
                 "attachment_results": delivery.get("attachment_results", []),
+                "card_text": delivery.get("card_text") or append["text"],
                 "intent": intent,
                 "active_workflow": payload.get("active_workflow") or intent,
             }
@@ -840,6 +852,57 @@ def _build_telegram_client(settings: Settings) -> TelegramSenderClient:
         attachment_max_bytes=settings.telegram_attachment_max_bytes,
         upload_attachments_via_download=settings.telegram_upload_attachments_via_download,
     )
+
+
+class GeminiEnglishTranslator:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self._model = None
+
+    def translate(self, text: str) -> str:
+        if not str(text or "").strip():
+            return text
+        if self._model is None:
+            self._model = build_gemini_chat_model(self.settings)
+        prompt = (
+            "Translate the following customer supplement into English for an internal Telegram support case. "
+            "Preserve account IDs, phone numbers, order IDs, amounts, URLs, filenames, and brand names exactly. "
+            "Return only the translated text.\n\n"
+            f"{text}"
+        )
+        response = self._model.invoke(prompt)
+        return str(getattr(response, "content", response) or text)
+
+
+def _translate_append_supplement_text(payload: dict, settings: Settings | None, translator=None) -> None:
+    supplement = payload.get("supplement")
+    if not isinstance(supplement, dict):
+        return
+    text = _plain_supplement_text(supplement.get("text"))
+    supplement["text"] = text
+    if not text.strip():
+        return
+    translator = translator or (GeminiEnglishTranslator(settings) if settings is not None else None)
+    if translator is None:
+        supplement["translation_unavailable"] = True
+        return
+    try:
+        translated = str(translator.translate(text) or "").strip()
+    except Exception:
+        supplement["translation_unavailable"] = True
+        return
+    if translated:
+        supplement["text"] = translated
+
+
+def _plain_supplement_text(value) -> str:
+    if isinstance(value, list):
+        return "\n".join(part for part in (_plain_supplement_text(item) for item in value) if part).strip()
+    if isinstance(value, dict):
+        if "text" in value:
+            return _plain_supplement_text(value.get("text"))
+        return ""
+    return str(value or "").strip()
 
 
 def _build_result_record(command: dict, result_type: str, result_json: dict, status: str | None = None) -> dict:

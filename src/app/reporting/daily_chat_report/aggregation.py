@@ -24,6 +24,18 @@ MANUAL_HANDOFF_PATTERNS = (
     "agente humano",
     "atención humana",
 )
+ROBOT_HANDOFF_TEXT_PATTERNS = (
+    "transferring you to a live agent",
+    "transfer you to a live agent",
+    "transfer you to an agent",
+    "transferring to human support",
+    "estoy transfiriendo",
+    "transferir",
+    "轉接真人",
+    "轉真人",
+    "转接真人",
+    "转真人",
+)
 
 
 def aggregate_threads(
@@ -37,6 +49,7 @@ def aggregate_threads(
     require_agent_participation: bool = False,
     force_category: ReportCategory | None = None,
     force_category_reason: str | None = None,
+    bot_name: str = "Ai Jtest",
 ) -> list[ReportThread]:
     metadata_by_thread = _metadata_by_thread(metadata_rows)
     commands_by_thread = _rows_by_thread(command_rows)
@@ -71,6 +84,7 @@ def aggregate_threads(
                 messages,
                 commands=commands_by_thread.get(key, []),
                 states=states_by_thread.get(key, []),
+                bot_name=bot_name,
             )
         threads.append(
             ReportThread(
@@ -106,11 +120,12 @@ def classify_thread(
     *,
     commands: list[dict[str, Any]],
     states: list[dict[str, Any]],
+    bot_name: str = "Ai Jtest",
 ) -> tuple[ReportCategory, str]:
-    if _has_robot_handoff_signal(commands, states):
+    if _has_robot_handoff_signal(commands, states) or _has_robot_handoff_message(messages):
         return (
             ReportCategory.ROBOT_HANDOFF,
-            "Ai Jtest 判定問題需要真人客服，或系統紀錄顯示由 Ai Jtest 轉接。",
+            f"{bot_name} 判定問題需要真人客服，或系統紀錄顯示由 {bot_name} 轉接。",
         )
     if _has_customer_manual_handoff_signal(messages):
         return (
@@ -147,6 +162,16 @@ def _has_customer_manual_handoff_signal(messages: list[ReportMessage]) -> bool:
             continue
         normalized = str(message.text_content or "").strip().lower()
         if any(pattern.lower() in normalized for pattern in MANUAL_HANDOFF_PATTERNS):
+            return True
+    return False
+
+
+def _has_robot_handoff_message(messages: list[ReportMessage]) -> bool:
+    for message in messages:
+        if message.sender_role == "customer":
+            continue
+        normalized = str(message.text_content or "").strip().lower()
+        if any(pattern.lower() in normalized for pattern in ROBOT_HANDOFF_TEXT_PATTERNS):
             return True
     return False
 

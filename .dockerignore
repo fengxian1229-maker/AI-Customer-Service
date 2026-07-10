@@ -5,8 +5,6 @@ __pycache__
 .pytest_cache
 .mypy_cache
 .ruff_cache
-.env
-deploy/production.env
 logs
 *.pid
 *.log
@@ -14,3 +12,4 @@ backups
 bot66tornado/node
 bot66tornado/node_modules
 bot66tornado/.env
+.env

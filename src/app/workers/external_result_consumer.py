@@ -224,6 +224,7 @@ def build_result_handler(row: dict) -> dict:
                     "telegram_message_id": result_json.get("telegram_message_id"),
                     "telegram_target_chat_id": result_json.get("target_chat_id"),
                     "telegram_message_thread_id": result_json.get("message_thread_id"),
+                    "telegram_case_card_text": result_json.get("card_text"),
                     "telegram_case_status": "created",
                 },
             },
@@ -231,7 +232,7 @@ def build_result_handler(row: dict) -> dict:
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)
         return resolved
     if result_type == "telegram.append_to_case.result":
-        if result_json.get("status") not in {"appended", "success", "MOCKED"}:
+        if result_json.get("status") not in {"appended", "edited", "success", "MOCKED"}:
             raise ValueError("telegram.append_to_case.result failed")
         resolved = {
             "text": result_json.get("message") or "补充资料已收到，我们会继续跟进，请稍候。",
@@ -244,6 +245,7 @@ def build_result_handler(row: dict) -> dict:
                 "slot_memory": {
                     "telegram_append_status": result_json.get("status"),
                     "last_telegram_append_message_id": result_json.get("telegram_message_id"),
+                    "telegram_case_card_text": result_json.get("card_text"),
                 },
             },
         }

@@ -2135,6 +2135,7 @@ def test_gateway_faq_multiblock_uses_reply_language_for_outbound_plan(monkeypatc
     monkeypatch.setattr(gateway_module, "build_faq_outbound_plan_from_rag_context", fake_build_plan_from_rag_context)
     service = GatewayService()
     event = make_inbound_event()
+    event.payload_json = {**(event.payload_json or {}), "platform": "PAG99"}
 
     rows = asyncio.run(
         service._build_outbound_messages(
@@ -2147,6 +2148,7 @@ def test_gateway_faq_multiblock_uses_reply_language_for_outbound_plan(monkeypatc
                 "route": "faq",
                 "reply_language": "tl",
                 "rewrite_result": {"language": "zh-Hans"},
+                "slot_memory": {"platform": "ZAP69"},
                 "rag_context": {"answer_blocks": [{"type": "text", "text": "FAQ text"}]},
                 "commands": [],
             },
@@ -2154,8 +2156,44 @@ def test_gateway_faq_multiblock_uses_reply_language_for_outbound_plan(monkeypatc
     )
 
     assert captured["language"] == "tl"
-    assert captured["platform"] == "CON777"
+    assert captured["platform"] == "ZAP69"
     assert rows[0]["payload_json"]["text"] == "FAQ text"
+
+
+def test_gateway_faq_multiblock_uses_event_platform_for_tutorial_asset():
+    service = GatewayService()
+    event = make_inbound_event()
+    event.payload_json = {**(event.payload_json or {}), "platform": "ZAP69"}
+
+    rows = asyncio.run(
+        service._build_outbound_messages(
+            77,
+            event,
+            "livechat:chat-1",
+            {
+                "tenant_id": "default",
+                "channel_type": "livechat",
+                "route": "faq",
+                "reply_language": "zh",
+                "rag_context": {
+                    "answer_blocks": [
+                        {
+                            "type": "image",
+                            "asset_key": "withdrawal_howto",
+                            "platform_asset_map": {
+                                "CON777": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
+                                "ZAP69": "bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg",
+                                "default": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
+                            },
+                        },
+                    ]
+                },
+                "commands": [],
+            },
+        )
+    )
+
+    assert rows[0]["payload_json"]["asset_ref"] == "bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg"
 
 
 def test_gateway_faq_multiblock_finalizes_each_text_block_and_preserves_media():

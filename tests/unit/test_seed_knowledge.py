@@ -155,26 +155,37 @@ def test_seed_knowledge_loads_multimodal_seed_file():
 
     assert result["documents"] == 4
     assert result["inserted"] == 4
-    tutorial_asset_refs = {
-        "deposit_howto": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
-        "withdrawal_howto": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
-        "forgot_password_howto": "bot66tornado/assets/tutorials/CON777/forgot-password.jpg",
+    tutorial_filenames = {
+        "deposit_howto": "deposit.jpg",
+        "withdrawal_howto": "withdrawal.jpg",
+        "forgot_password_howto": "forgot-password.jpg",
     }
+    platforms = ("JUE999", "GNA777", "JG7", "PAG99", "CUM777", "CON777", "ZAP69")
     for document in repository.inserted:
         intent_id = document["metadata_json"]["intent_id"]
-        if intent_id not in tutorial_asset_refs:
+        if intent_id not in tutorial_filenames:
             continue
         assert [block["type"] for block in document["answer_blocks"]] == ["image", "text"]
+        filename = tutorial_filenames[intent_id]
         assert document["answer_blocks"][0]["platform_asset_map"] == {
-            "CON777": tutorial_asset_refs[intent_id],
-            "default": tutorial_asset_refs[intent_id],
+            **{
+                platform: f"bot66tornado/assets/tutorials/{platform}/{filename}"
+                for platform in platforms
+            },
+            "default": f"bot66tornado/assets/tutorials/CON777/{filename}",
         }
 
     deposit = repository.inserted[0]
     assert deposit["question_aliases"]
     assert [block["type"] for block in deposit["answer_blocks"]] == ["image", "text"]
     assert deposit["answer_blocks"][0]["platform_asset_map"] == {
+        "JUE999": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+        "GNA777": "bot66tornado/assets/tutorials/GNA777/deposit.jpg",
+        "JG7": "bot66tornado/assets/tutorials/JG7/deposit.jpg",
+        "PAG99": "bot66tornado/assets/tutorials/PAG99/deposit.jpg",
+        "CUM777": "bot66tornado/assets/tutorials/CUM777/deposit.jpg",
         "CON777": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
+        "ZAP69": "bot66tornado/assets/tutorials/ZAP69/deposit.jpg",
         "default": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
     }
     assert deposit["metadata_json"]["intent_id"] == "deposit_howto"

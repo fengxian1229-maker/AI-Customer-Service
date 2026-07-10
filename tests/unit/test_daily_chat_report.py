@@ -176,7 +176,112 @@ def test_classifies_customer_manual_handoff_from_customer_text_without_robot_sig
     assert "主動選擇人工服務" in threads[0].category_reason
 
 
-def test_lingxi_report_requires_agent_participation_and_uses_customer_name_for_customer_messages():
+def test_lingxi_robot_handoff_reason_uses_lingxi_name():
+    from app.reporting.daily_chat_report.aggregation import aggregate_threads
+    from app.reporting.daily_chat_report.models import ReportCategory
+
+    threads = aggregate_threads(
+        [
+            {
+                "id": 1,
+                "conversation_id": "livechat:chat-1:thread-1",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "customer",
+                "message_type": "text",
+                "text_content": "Necesito ayuda",
+                "attachment_refs": [],
+                "source": "lingxi_dialogue_messages2",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 0),
+                "created_at": datetime(2026, 7, 9, 1, 0, 0),
+            }
+        ],
+        metadata_rows=[
+            {
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "payload_json": {
+                    "livechat_group_id": 25,
+                    "lingxi_agent_participated": True,
+                    "lingxi_agent_names": ["Cess"],
+                },
+            }
+        ],
+        command_rows=[
+            {
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "command_type": "livechat.handoff_to_human",
+                "payload_json": {},
+            }
+        ],
+        state_rows=[],
+        allowed_group_ids={25},
+        excluded_group_ids=set(),
+        require_agent_participation=True,
+        bot_name="LingXi",
+    )
+
+    assert threads[0].category == ReportCategory.ROBOT_HANDOFF
+    assert "LingXi 判定問題需要真人客服" in threads[0].category_reason
+
+
+def test_lingxi_robot_handoff_can_be_classified_from_transcript_text():
+    from app.reporting.daily_chat_report.aggregation import aggregate_threads
+    from app.reporting.daily_chat_report.models import ReportCategory
+
+    threads = aggregate_threads(
+        [
+            {
+                "id": 1,
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "agent",
+                "speaker_name": "LingXi",
+                "message_type": "text",
+                "text_content": "I'm transferring you to a live agent.",
+                "attachment_refs": [],
+                "source": "lingxi_dialogue_messages2",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 0),
+                "created_at": datetime(2026, 7, 9, 1, 0, 0),
+            },
+            {
+                "id": 2,
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "agent",
+                "speaker_name": "Cess",
+                "message_type": "text",
+                "text_content": "Hola, soy soporte.",
+                "attachment_refs": [],
+                "source": "lingxi_dialogue_messages2",
+                "occurred_at": datetime(2026, 7, 9, 1, 1, 0),
+                "created_at": datetime(2026, 7, 9, 1, 1, 0),
+            },
+        ],
+        metadata_rows=[
+            {
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "payload_json": {
+                    "livechat_group_id": 25,
+                    "lingxi_agent_participated": True,
+                    "lingxi_agent_names": ["Cess"],
+                },
+            }
+        ],
+        command_rows=[],
+        state_rows=[],
+        allowed_group_ids={25},
+        excluded_group_ids=set(),
+        require_agent_participation=True,
+        bot_name="LingXi",
+    )
+
+    assert threads[0].category == ReportCategory.ROBOT_HANDOFF
+
+
+def test_lingxi_report_requires_agent_participation_but_keeps_three_category_classification():
     from app.reporting.daily_chat_report.aggregation import aggregate_threads
     from app.reporting.daily_chat_report.formatting import speaker_label
     from app.reporting.daily_chat_report.models import ReportCategory
@@ -253,12 +358,10 @@ def test_lingxi_report_requires_agent_participation_and_uses_customer_name_for_c
         allowed_group_ids={25},
         excluded_group_ids=set(),
         require_agent_participation=True,
-        force_category=ReportCategory.LINGXI_AGENT_PARTICIPATED,
-        force_category_reason="LingXi 客服已參與對話；本報表只收錄此類聊天。",
     )
 
     assert len(threads) == 1
-    assert threads[0].category == ReportCategory.LINGXI_AGENT_PARTICIPATED
+    assert threads[0].category == ReportCategory.CUSTOMER_MANUAL_HANDOFF
     assert threads[0].messages[0].speaker_name == "Cliente"
     assert threads[0].messages[1].speaker_name == "Cess"
     assert speaker_label(threads[0].messages[1]) == "LingXi（Cess）"
@@ -341,6 +444,58 @@ def test_pdf_renderer_outputs_expected_report_text(tmp_path):
     assert "Chat ID：chat-1" in text
 
 
+def test_lingxi_pdf_renderer_outputs_three_category_sections(tmp_path):
+    from pypdf import PdfReader
+
+    from app.reporting.daily_chat_report.models import ReportCategory, ReportMessage, ReportThread
+    from app.reporting.daily_chat_report.pdf_renderer import render_daily_chat_report_pdf
+    from app.reporting.daily_chat_report.translation import NullTranslator
+
+    output = tmp_path / "lingxi-report.pdf"
+    thread = ReportThread(
+        chat_id="chat-1",
+        thread_id="thread-1",
+        customer_name="Cliente",
+        group_id=25,
+        platform="CON777",
+        start_at=datetime(2026, 7, 9, 1, 0, 0),
+        end_at=datetime(2026, 7, 9, 1, 1, 0),
+        category=ReportCategory.CUSTOMER_MANUAL_HANDOFF,
+        category_reason="真人客服已參與對話，且未發現機器人判定轉接訊號。",
+        messages=[
+            ReportMessage(
+                id=1,
+                chat_id="chat-1",
+                thread_id="thread-1",
+                sender_role="agent",
+                speaker_name="Cess",
+                message_type="text",
+                text_content="hello",
+                attachment_refs=[],
+                source="lingxi_dialogue_messages2",
+                occurred_at=datetime(2026, 7, 9, 1, 0, 0),
+                created_at=datetime(2026, 7, 9, 1, 0, 0),
+            )
+        ],
+    )
+
+    render_daily_chat_report_pdf(
+        [thread],
+        start_at=datetime(2026, 7, 9, 0, 0, 0),
+        end_at=datetime(2026, 7, 10, 0, 0, 0),
+        output_path=output,
+        translator=NullTranslator(),
+    )
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output)).pages)
+    assert "LingXi 正式群組對話紀錄（繁體中文，三分類）" in text
+    assert "本版只保留三類：機器人獨立完成、機器人判定轉真人、客戶手動轉真人。" in text
+    assert "LingXi客服參與" not in text
+    assert "機器人獨立完成（0 筆）" in text
+    assert "機器人判定轉真人（0 筆）" in text
+    assert "客戶手動轉真人（1 筆）" in text
+
+
 def test_audit_repository_prevents_duplicate_send():
     from app.reporting.daily_chat_report.repository import DailyChatReportAuditRepository, _thread_key
 
@@ -412,9 +567,9 @@ def test_report_filename_uses_lingxi_date_range():
 
     from app.reporting.daily_chat_report.runner import _date_windows, _report_filename
 
-    windows = _date_windows(date(2026, 7, 8), "Asia/Shanghai")
+    windows = _date_windows(date(2026, 7, 9), "Asia/Shanghai")
 
-    assert _report_filename(date(2026, 7, 8), windows["display_start_at"], windows["display_end_at"]) == "LingXi正式群組對話紀錄_20260708.pdf"
+    assert _report_filename(date(2026, 7, 9), windows["display_start_at"], windows["display_end_at"]) == "LingXi_正式群組對話紀錄_20260709-20260710.pdf"
 
 
 def test_threads_for_display_timezone_converts_message_times_from_utc():

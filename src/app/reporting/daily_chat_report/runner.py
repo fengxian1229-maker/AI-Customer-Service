@@ -11,7 +11,6 @@ from app.config.platforms import default_allowed_livechat_group_ids
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.reporting.daily_chat_report.aggregation import aggregate_threads
-from app.reporting.daily_chat_report.models import ReportCategory
 from app.reporting.daily_chat_report.pdf_renderer import render_daily_chat_report_pdf
 from app.reporting.daily_chat_report.repository import (
     DailyChatReportAuditRepository,
@@ -67,8 +66,7 @@ async def run(argv: list[str] | None = None) -> dict:
             allowed_group_ids=_parse_group_ids(settings.daily_chat_report_group_ids, default_allowed_livechat_group_ids(include_test=False)),
             excluded_group_ids=_parse_group_ids(settings.daily_chat_report_excluded_group_ids, {23}),
             require_agent_participation=source == "lingxi",
-            force_category=ReportCategory.LINGXI_AGENT_PARTICIPATED if source == "lingxi" else None,
-            force_category_reason="LingXi 客服已參與對話；本報表只收錄此類聊天。" if source == "lingxi" else None,
+            bot_name="LingXi" if source == "lingxi" else "Ai Jtest",
         )
         threads = _threads_for_display_timezone(threads, settings.daily_chat_report_timezone)
         translator = NullTranslator() if args.no_translate else GeminiTraditionalChineseTranslator(settings)
@@ -117,7 +115,7 @@ async def run(argv: list[str] | None = None) -> dict:
                 response = client.send_document(
                     chat_id=target_chat_id,
                     document_path=str(output_path),
-                    caption=f"LingXi 正式群組對話紀錄 {report_date:%Y%m%d}｜總數：{len(threads)}",
+                    caption=f"LingXi 正式群組對話紀錄 {windows['display_start_at']:%Y%m%d}-{windows['display_end_at']:%Y%m%d}｜總數：{len(threads)}",
                     message_thread_id=message_thread_id,
                 )
                 telegram_message_id = ((response.get("result") or {}).get("message_id"))
@@ -178,7 +176,7 @@ def _date_windows(report_date: date, timezone_name: str) -> dict[str, datetime]:
 
 
 def _report_filename(report_date: date, start_at: datetime, end_at: datetime) -> str:
-    return f"LingXi正式群組對話紀錄_{report_date:%Y%m%d}.pdf"
+    return f"LingXi_正式群組對話紀錄_{start_at:%Y%m%d}-{end_at:%Y%m%d}.pdf"
 
 
 def _parse_group_ids(raw: str | None, default: set[int]) -> set[int]:

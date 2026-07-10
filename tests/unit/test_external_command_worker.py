@@ -658,9 +658,18 @@ def test_external_command_worker_real_telegram_append_uses_existing_message_id()
 
         def append_to_case(self, append):
             self.append = append
-            return {"ok": True, "message_id": 556, "reply_to_message_id": append["reply_to_message_id"], "attachment_results": []}
+            return {"ok": True, "status": "edited", "message_id": append["reply_to_message_id"], "reply_to_message_id": append["reply_to_message_id"], "attachment_results": []}
+
+    class FakeTranslator:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def translate(self, text: str) -> str:
+            self.calls.append(text)
+            return "Transaction ID TX123456"
 
     client = FakeTelegramClient()
+    translator = FakeTranslator()
     result_repository = FakeResultRepository()
     settings = Settings(
         livechat_agent_access_token="token",
@@ -679,16 +688,170 @@ def test_external_command_worker_real_telegram_append_uses_existing_message_id()
             emit_result=True,
             settings=settings,
             telegram_client_factory=lambda _settings: client,
+            telegram_append_translator=translator,
             worker_id="worker-a",
         )
     )
 
     assert client.append["reply_to_message_id"] == 123
+    assert "Supplement text: Transaction ID TX123456" in client.append["text"]
+    assert translator.calls == ["TX123456"]
     result_json = result_repository.inserted[0]["result_json"]
-    assert result_json["telegram_message_id"] == 556
+    assert result_json["status"] == "edited"
+    assert result_json["telegram_message_id"] == 123
     assert result_json["reply_to_message_id"] == 123
     assert result_json["target_chat_id"] == "-100test"
     assert result_json["active_workflow"] == "deposit_missing"
+
+
+def test_external_command_worker_real_telegram_append_marks_translation_failure():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 53,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 153,
+                    "command_type": "telegram.append_to_case",
+                    "payload_json": {
+                        "intent": "deposit_missing",
+                        "active_workflow": "deposit_missing",
+                        "telegram_case_id": "tg:123",
+                        "telegram_message_id": 123,
+                        "telegram_target_chat_id": "-100test",
+                        "slot_memory": {"telegram_case_id": "tg:123", "telegram_message_id": 123},
+                        "supplement": {"text": "交易号 TX123456", "attachment_urls": []},
+                    },
+                }
+            ]
+
+        async def mark_sent(self, command_id: int) -> None:
+            pass
+
+    class FakeTelegramClient:
+        def __init__(self) -> None:
+            self.append = None
+
+        def append_to_case(self, append):
+            self.append = append
+            return {"ok": True, "status": "edited", "message_id": 123, "reply_to_message_id": 123, "attachment_results": []}
+
+    class FailingTranslator:
+        def translate(self, text: str) -> str:
+            raise RuntimeError("translator down")
+
+    client = FakeTelegramClient()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        telegram_sop_enabled=True,
+        telegram_bot_token="secret",
+        telegram_test_group="-100test",
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            FakeCommandRepository(),
+            dry_run=False,
+            execute_telegram=True,
+            settings=settings,
+            telegram_client_factory=lambda _settings: client,
+            telegram_append_translator=FailingTranslator(),
+            worker_id="worker-a",
+        )
+    )
+
+    assert result[0]["status"] == "SENT"
+    assert "Supplement text: 交易号 TX123456" in client.append["text"]
+    assert "Translation unavailable" in client.append["text"]
+
+
+def test_external_command_worker_translates_only_text_from_livechat_blocks():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 54,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 154,
+                    "command_type": "telegram.append_to_case",
+                    "payload_json": {
+                        "intent": "deposit_missing",
+                        "active_workflow": "deposit_missing",
+                        "telegram_case_id": "tg:123",
+                        "telegram_message_id": 123,
+                        "telegram_target_chat_id": "-100test",
+                        "slot_memory": {"telegram_case_id": "tg:123", "telegram_message_id": 123},
+                        "supplement": {
+                            "text": [
+                                {
+                                    "type": "text",
+                                    "text": "请快点处理",
+                                    "extras": {"signature": "secret"},
+                                }
+                            ],
+                            "attachment_urls": [],
+                        },
+                    },
+                }
+            ]
+
+        async def mark_sent(self, command_id: int) -> None:
+            pass
+
+    class FakeTelegramClient:
+        def __init__(self) -> None:
+            self.append = None
+
+        def append_to_case(self, append):
+            self.append = append
+            return {"ok": True, "status": "edited", "message_id": 123, "reply_to_message_id": 123, "attachment_results": []}
+
+    class FakeTranslator:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def translate(self, text: str) -> str:
+            self.calls.append(text)
+            return "Please handle this faster."
+
+    client = FakeTelegramClient()
+    translator = FakeTranslator()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        telegram_sop_enabled=True,
+        telegram_bot_token="secret",
+        telegram_test_group="-100test",
+    )
+
+    asyncio.run(
+        process_pending_commands(
+            FakeCommandRepository(),
+            dry_run=False,
+            execute_telegram=True,
+            settings=settings,
+            telegram_client_factory=lambda _settings: client,
+            telegram_append_translator=translator,
+            worker_id="worker-a",
+        )
+    )
+
+    assert translator.calls == ["请快点处理"]
+    assert "Supplement text: Please handle this faster." in client.append["text"]
+    assert "signature" not in client.append["text"]
 
 
 def test_external_command_worker_real_handoff_disabled_does_not_call_livechat():

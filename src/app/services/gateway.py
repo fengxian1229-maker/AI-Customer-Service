@@ -36,6 +36,18 @@ EXTERNAL_COMMAND_TYPES = {
 def _deepcopy_jsonish(value):
     return copy.deepcopy(value)
 
+
+def platform_for_faq_delivery(graph_state: dict | None, event: InboundEvent | None) -> str:
+    graph_state = graph_state or {}
+    slot_memory = graph_state.get("slot_memory") if isinstance(graph_state.get("slot_memory"), dict) else {}
+    event_payload = event.payload_json if event is not None and isinstance(event.payload_json, dict) else {}
+    for value in (slot_memory.get("platform"), event_payload.get("platform")):
+        platform = str(value or "").strip().upper()
+        if platform:
+            return platform
+    return "CON777"
+
+
 ACTIVE_WORKFLOW_GUARD_STAGES = {
     "waiting_backend",
     "backend_querying",
@@ -1788,7 +1800,7 @@ class GatewayService:
                 tenant_id=graph_state.get("tenant_id") or "default",
                 conversation_id=conversation_id,
                 inbound_event_id=inbound_event_id,
-                platform="CON777",
+                platform=platform_for_faq_delivery(graph_state, event),
                 channel_type=graph_state.get("channel_type") or "livechat",
                 language=graph_state.get("reply_language") or self._default_reply_language(),
             )

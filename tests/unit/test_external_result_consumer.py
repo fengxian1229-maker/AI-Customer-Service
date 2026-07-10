@@ -405,6 +405,22 @@ def test_result_consumer_append_to_case_generates_supplement_reply():
     assert "补充资料已收到" in outbound_repository.inserted[0]["payload_json"]["text"]
 
 
+def test_result_consumer_append_to_case_accepts_edited_status():
+    result = make_result("telegram.append_to_case.result", command_type="telegram.append_to_case")
+    result["result_json"] = {
+        "status": "edited",
+        "telegram_message_id": 123,
+        "reply_to_message_id": 123,
+        "card_text": "edited card",
+        "active_workflow": "deposit_missing",
+    }
+
+    _processed, _result_repository, conversation_repository, outbound_repository = run_consumer_for(result)
+
+    assert "补充资料已收到" in outbound_repository.inserted[0]["payload_json"]["text"]
+    assert conversation_repository.updated[0][1]["slot_memory"]["telegram_case_card_text"] == "edited card"
+
+
 def test_result_consumer_backend_query_does_not_fabricate_backend_facts():
     _processed, _result_repository, _conversation_repository, outbound_repository = run_consumer_for(
         make_result("backend.query.mock_result")

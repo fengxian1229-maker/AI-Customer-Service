@@ -124,6 +124,16 @@ def test_renderer_preview_uses_default_multimodal_seed_deposit_howto():
     assert len(preview) == 2
 
 
+def test_renderer_preview_uses_default_multimodal_seed_platform_asset_ref():
+    seed_path = Path(__file__).resolve().parents[2] / "data" / "knowledge" / "default_multimodal_faq_seed.json"
+    seed_rows = json.loads(seed_path.read_text(encoding="utf-8"))
+    deposit = next(row for row in seed_rows if row["metadata_json"]["intent_id"] == "deposit_howto")
+
+    preview = render_answer_blocks_preview(deposit["answer_blocks"], platform="PAG99")
+
+    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/PAG99/deposit.jpg"
+
+
 @pytest.mark.parametrize(
     ("blocks", "message"),
     [

@@ -89,6 +89,24 @@ class TelegramSenderClient:
             },
         )
 
+    def edit_message_text(
+        self,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        message_thread_id: int | None = None,
+    ) -> dict[str, Any]:
+        return self.request(
+            "editMessageText",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "message_thread_id": message_thread_id,
+                "disable_web_page_preview": True,
+            },
+        )
+
     def send_photo_from_url(
         self,
         chat_id: str,
@@ -363,13 +381,14 @@ class TelegramSenderClient:
         return {"ok": True, "message_id": message_id, "attachment_results": attachment_results}
 
     def append_to_case(self, append: dict[str, Any]) -> dict[str, Any]:
-        update = self.send_message(
+        edit_message_id = append.get("edit_message_id") or append.get("reply_to_message_id")
+        update = self.edit_message_text(
             append["chat_id"],
+            int(edit_message_id),
             append["text"],
             message_thread_id=append.get("thread_id"),
-            reply_to_message_id=append.get("reply_to_message_id"),
         )
-        message_id = update["result"]["message_id"]
+        message_id = update.get("result", {}).get("message_id") or edit_message_id
         reply_to = append.get("reply_to_message_id") or message_id
         attachment_results = []
         for attachment in append.get("attachments") or []:
@@ -382,7 +401,14 @@ class TelegramSenderClient:
                     reply_to_message_id=reply_to,
                 )
             )
-        return {"ok": True, "message_id": message_id, "reply_to_message_id": reply_to, "attachment_results": attachment_results}
+        return {
+            "ok": True,
+            "status": "edited",
+            "message_id": message_id,
+            "reply_to_message_id": reply_to,
+            "card_text": append["text"],
+            "attachment_results": attachment_results,
+        }
 
 
 def _safe_json(raw: bytes) -> dict[str, Any]:

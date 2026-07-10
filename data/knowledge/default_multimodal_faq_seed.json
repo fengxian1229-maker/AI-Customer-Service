@@ -24,7 +24,13 @@
         "caption": "",
         "position": "before",
         "platform_asset_map": {
+          "JUE999": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+          "GNA777": "bot66tornado/assets/tutorials/GNA777/deposit.jpg",
+          "JG7": "bot66tornado/assets/tutorials/JG7/deposit.jpg",
+          "PAG99": "bot66tornado/assets/tutorials/PAG99/deposit.jpg",
+          "CUM777": "bot66tornado/assets/tutorials/CUM777/deposit.jpg",
           "CON777": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
+          "ZAP69": "bot66tornado/assets/tutorials/ZAP69/deposit.jpg",
           "default": "bot66tornado/assets/tutorials/CON777/deposit.jpg"
         }
       },
@@ -70,7 +76,13 @@
         "caption": "",
         "position": "before",
         "platform_asset_map": {
+          "JUE999": "bot66tornado/assets/tutorials/JUE999/withdrawal.jpg",
+          "GNA777": "bot66tornado/assets/tutorials/GNA777/withdrawal.jpg",
+          "JG7": "bot66tornado/assets/tutorials/JG7/withdrawal.jpg",
+          "PAG99": "bot66tornado/assets/tutorials/PAG99/withdrawal.jpg",
+          "CUM777": "bot66tornado/assets/tutorials/CUM777/withdrawal.jpg",
           "CON777": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
+          "ZAP69": "bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg",
           "default": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg"
         }
       },
@@ -116,7 +128,13 @@
         "caption": "",
         "position": "before",
         "platform_asset_map": {
+          "JUE999": "bot66tornado/assets/tutorials/JUE999/forgot-password.jpg",
+          "GNA777": "bot66tornado/assets/tutorials/GNA777/forgot-password.jpg",
+          "JG7": "bot66tornado/assets/tutorials/JG7/forgot-password.jpg",
+          "PAG99": "bot66tornado/assets/tutorials/PAG99/forgot-password.jpg",
+          "CUM777": "bot66tornado/assets/tutorials/CUM777/forgot-password.jpg",
           "CON777": "bot66tornado/assets/tutorials/CON777/forgot-password.jpg",
+          "ZAP69": "bot66tornado/assets/tutorials/ZAP69/forgot-password.jpg",
           "default": "bot66tornado/assets/tutorials/CON777/forgot-password.jpg"
         }
       },

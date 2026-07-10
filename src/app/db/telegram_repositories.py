@@ -91,14 +91,15 @@ class TelegramCaseRepository:
         if not case:
             return None
         async with self.pool.acquire() as conn:
-            await self._insert_case_message_on_connection(
-                conn,
-                telegram_case_id=case["id"],
-                telegram_chat_id=str(target_chat_id),
-                telegram_message_thread_id=result_json.get("message_thread_id"),
-                telegram_message_id=int(message_id),
-                message_kind="append",
-            )
+            if result_json.get("status") != "edited":
+                await self._insert_case_message_on_connection(
+                    conn,
+                    telegram_case_id=case["id"],
+                    telegram_chat_id=str(target_chat_id),
+                    telegram_message_thread_id=result_json.get("message_thread_id"),
+                    telegram_message_id=int(message_id),
+                    message_kind="append",
+                )
             for attachment_id in _attachment_message_ids(result_json):
                 await self._insert_case_message_on_connection(
                     conn,

@@ -38,7 +38,7 @@ def render_daily_chat_report_pdf(
         bottomMargin=0.55 * inch,
     )
     story = [
-        Paragraph("LingXi 正式群組對話紀錄（繁體中文）", styles["TitleCn"]),
+        Paragraph("LingXi 正式群組對話紀錄（繁體中文，三分類）", styles["TitleCn"]),
         Paragraph(f"{datetime_label(start_at)} 至 {datetime_label(end_at)}｜資料庫匯出", styles["Centered"]),
         Spacer(1, 10),
         Paragraph(_scope_text(threads), styles["BodyCn"]),
@@ -148,7 +148,7 @@ def _category_order(threads: list[ReportThread]):
 def _category_definition(category: ReportCategory) -> str:
     definitions = {
         ReportCategory.BOT_COMPLETED: "未由真人接管；包含自助教學、收件送後台、等待客戶補資料、等待後台結果、僅開啟選單或無有效問題。",
-        ReportCategory.ROBOT_HANDOFF: "Ai Jtest 判定問題需要真人客服，或系統紀錄顯示由 Ai Jtest 轉接。",
+        ReportCategory.ROBOT_HANDOFF: "LingXi 判定問題需要真人客服，或系統紀錄顯示由 LingXi 轉接。",
         ReportCategory.CUSTOMER_MANUAL_HANDOFF: "客戶主動選擇人工服務，或真人客服在沒有機器人判定轉接的情況下接管。",
         ReportCategory.LINGXI_AGENT_PARTICIPATED: "LingXi 客服已參與對話；本報表只收錄此類聊天。",
     }
