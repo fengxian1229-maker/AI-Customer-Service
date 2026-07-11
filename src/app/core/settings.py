@@ -44,10 +44,11 @@ class Settings(BaseSettings):
     daily_chat_report_enabled: bool = False
     daily_chat_report_source: str = "lingxi"
     daily_chat_report_lingxi_database: str = "lingxi_qa"
-    daily_chat_report_time: str = "08:00"
+    daily_chat_report_time: str = "09:00"
     daily_chat_report_timezone: str = "Asia/Shanghai"
     daily_chat_report_target_chat_id: str | None = None
     daily_chat_report_message_thread_id: int | None = None
+    daily_chat_report_telegram_bot_token: str | None = None
     daily_chat_report_group_ids: str = "2,11,12,13,24,25,28"
     daily_chat_report_excluded_group_ids: str = "23"
     daily_chat_report_output_dir: str = "output/reports"
@@ -142,6 +143,18 @@ class Settings(BaseSettings):
             if value <= 0:
                 raise ValueError("livechat_handoff_target_group_id must be a positive integer")
             return value
+        return value
+
+    @field_validator("daily_chat_report_message_thread_id", mode="before")
+    @classmethod
+    def parse_daily_chat_report_message_thread_id(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            value = int(stripped)
         return value
 
     @property

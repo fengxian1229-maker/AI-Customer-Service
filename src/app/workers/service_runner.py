@@ -32,6 +32,7 @@ from app.workers import (
 
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+MAX_RETAINED_ERRORS = 100
 WORKER_NAMES = [
     "polling_receiver",
     "gateway_consumer",
@@ -94,6 +95,7 @@ class ServiceRunnerContext:
 class RunnerSummary:
     workers: dict[str, dict] = field(default_factory=lambda: {name: _empty_worker_summary() for name in WORKER_NAMES})
     errors: list[dict] = field(default_factory=list)
+    errors_total: int = 0
 
     def record_success(self, name: str, result: dict, elapsed_ms: float) -> None:
         worker = self.workers.setdefault(name, _empty_worker_summary())
@@ -114,6 +116,9 @@ class RunnerSummary:
             "elapsed_ms": elapsed_ms,
         }
         self.errors.append(error)
+        self.errors_total += 1
+        if len(self.errors) > MAX_RETAINED_ERRORS:
+            del self.errors[: len(self.errors) - MAX_RETAINED_ERRORS]
         return error
 
     def to_result(self, status: str, shutdown_reason: str | None = None) -> dict:
@@ -124,6 +129,7 @@ class RunnerSummary:
             "shutdown_reason": shutdown_reason,
             "workers": self.workers,
             "errors": self.errors,
+            "errors_total": self.errors_total,
         }
 
 
@@ -608,7 +614,7 @@ async def run_all_workers(context: ServiceRunnerContext) -> dict:
         stop_waiter.cancel()
         await asyncio.gather(stop_waiter, return_exceptions=True)
         remove_signal_handlers(loop, registered_signals)
-    if context.config.stop_on_error and summary.errors:
+    if context.config.stop_on_error and summary.errors_total:
         status = "STOPPED_ON_ERROR"
     elif status == "OK" and str(shutdown_reason.get("value") or "").startswith("signal:"):
         status = "CANCELLED"
@@ -618,7 +624,7 @@ async def run_all_workers(context: ServiceRunnerContext) -> dict:
         status=status,
         shutdown_reason=shutdown_reason["value"],
         worker_iterations={name: data["iterations"] for name, data in summary.workers.items()},
-        errors_count=len(summary.errors),
+        errors_count=summary.errors_total,
     )
     return result
 

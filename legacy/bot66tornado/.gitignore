@@ -3,7 +3,7 @@
 .env.*
 !.env.example
 
-runtime/
+/runtime/
 reports/
 
 node_modules/

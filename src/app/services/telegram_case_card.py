@@ -1,3 +1,4 @@
+import ast
 from datetime import datetime, timezone
 from typing import Any
 
@@ -89,7 +90,22 @@ def _plain_text(value) -> str:
         if "text" in value:
             return _plain_text(value.get("text"))
         return ""
+    if isinstance(value, str):
+        parsed = _parse_text_structure(value)
+        if parsed is not None:
+            return _plain_text(parsed)
+        return value.strip()
     return str(value or "").strip()
+
+
+def _parse_text_structure(value: str):
+    raw = value.strip()
+    if not (raw.startswith("[") or raw.startswith("{")):
+        return None
+    try:
+        return ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        return None
 
 
 def _title(intent: str) -> str:

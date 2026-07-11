@@ -78,23 +78,23 @@ Polling 只负责收取 LiveChat 事件、标准化并写入 `inbound_events`。
 请先参考旧版目录：
 
 ```text
-bot66tornado/
+legacy/bot66tornado/
 ```
 
 重点阅读：
 
 ```text
-bot66tornado/README.md
-bot66tornado/docs/status.md
-bot66tornado/docs/migration-map.md
-bot66tornado/scripts/route-gate.js
-bot66tornado/src/core/state-machine.js
-bot66tornado/src/core/extractors.js
-bot66tornado/src/core/waiting-backend-classifier.js
-bot66tornado/src/content/menus.js
-bot66tornado/src/content/templates.js
-bot66tornado/src/adapters/telegram-card.js
-bot66tornado/src/adapters/staff-reply-processor.js
+legacy/bot66tornado/README.md
+legacy/bot66tornado/docs/status.md
+legacy/bot66tornado/docs/migration-map.md
+legacy/bot66tornado/scripts/route-gate.js
+legacy/bot66tornado/src/core/state-machine.js
+legacy/bot66tornado/src/core/extractors.js
+legacy/bot66tornado/src/core/waiting-backend-classifier.js
+legacy/bot66tornado/src/content/menus.js
+legacy/bot66tornado/src/content/templates.js
+legacy/bot66tornado/src/adapters/telegram-card.js
+legacy/bot66tornado/src/adapters/staff-reply-processor.js
 ```
 
 旧版已经验证的核心业务路径：

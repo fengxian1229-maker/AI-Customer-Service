@@ -6,7 +6,7 @@ P10-A.1 adds a tenant-aware backend provider boundary and the first read-only pr
 
 ## direct-query.js Mapping
 
-`bot66tornado/direct-query.js` is treated as observed internal HTTP API behavior, not as an official SDK and not as browser automation. The Python TAC client reimplements the read-only behavior instead of moving the Node.js script into `src/app`.
+`legacy/bot66tornado/direct-query.js` is treated as observed internal HTTP API behavior, not as an official SDK and not as browser automation. The Python TAC client reimplements the read-only behavior instead of moving the Node.js script into `src/app`.
 
 Implemented parity:
 

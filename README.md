@@ -3,6 +3,18 @@ AI Customer Service MVP
 
 Polling-first LiveChat/Text.com customer-service MVP.
 
+Repository Layout
+-----------------
+
+The production Python service lives exclusively under `src/app/`. Tests use
+the `src` layout configured in `pyproject.toml`; there is no root-level Python
+compatibility package or second runtime entry point.
+
+The previous Node.js prototype is retained under `legacy/bot66tornado/` for
+historical reference and emergency comparison only. It is not part of the
+Python service runtime. Its own README and commands must be run from that
+legacy directory.
+
 Current scope:
 
 - Poll LiveChat Agent Chat API for allowed groups.

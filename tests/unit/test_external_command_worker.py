@@ -854,6 +854,82 @@ def test_external_command_worker_translates_only_text_from_livechat_blocks():
     assert "signature" not in client.append["text"]
 
 
+def test_external_command_worker_translates_only_text_from_stringified_livechat_blocks():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 55,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": 155,
+                    "command_type": "telegram.append_to_case",
+                    "payload_json": {
+                        "intent": "deposit_missing",
+                        "active_workflow": "deposit_missing",
+                        "telegram_case_id": "tg:123",
+                        "telegram_message_id": 123,
+                        "telegram_target_chat_id": "-100test",
+                        "slot_memory": {"telegram_case_id": "tg:123", "telegram_message_id": 123},
+                        "supplement": {
+                            "text": "[{'type': 'text', 'text': '请快点处理', 'extras': {'signature': 'secret'}}]",
+                            "attachment_urls": [],
+                        },
+                    },
+                }
+            ]
+
+        async def mark_sent(self, command_id: int) -> None:
+            pass
+
+    class FakeTelegramClient:
+        def __init__(self) -> None:
+            self.append = None
+
+        def append_to_case(self, append):
+            self.append = append
+            return {"ok": True, "status": "edited", "message_id": 123, "reply_to_message_id": 123, "attachment_results": []}
+
+    class FakeTranslator:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def translate(self, text: str) -> str:
+            self.calls.append(text)
+            return "[{'type': 'text', 'text': 'Please handle this faster.', 'extras': {'signature': 'secret'}}]"
+
+    client = FakeTelegramClient()
+    translator = FakeTranslator()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        telegram_sop_enabled=True,
+        telegram_bot_token="secret",
+        telegram_test_group="-100test",
+    )
+
+    asyncio.run(
+        process_pending_commands(
+            FakeCommandRepository(),
+            dry_run=False,
+            execute_telegram=True,
+            settings=settings,
+            telegram_client_factory=lambda _settings: client,
+            telegram_append_translator=translator,
+            worker_id="worker-a",
+        )
+    )
+
+    assert translator.calls == ["请快点处理"]
+    assert "Supplement text: Please handle this faster." in client.append["text"]
+    assert "signature" not in client.append["text"]
+
+
 def test_external_command_worker_real_handoff_disabled_does_not_call_livechat():
     from app.core.settings import Settings
     from app.workers.external_command_worker import process_pending_commands

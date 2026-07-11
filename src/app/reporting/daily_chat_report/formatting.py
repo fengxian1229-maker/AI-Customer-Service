@@ -21,8 +21,10 @@ def format_message_content(message: ReportMessage, translator: Translator) -> st
 
 def speaker_label(message: ReportMessage) -> str:
     if message.speaker_name:
+        if message.sender_role == "agent" and message.speaker_name == "真人客服":
+            return "真人客服"
         if message.sender_role == "agent" and not message.speaker_name.lower().startswith("lingxi"):
-            return f"LingXi（{message.speaker_name}）"
+            return f"真人客服（{message.speaker_name}）"
         return message.speaker_name
     sender_role = message.sender_role
     if sender_role == "agent":

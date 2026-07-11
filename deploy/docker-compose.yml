@@ -3,8 +3,13 @@ services:
     image: ai-customer-service:latest
     restart: unless-stopped
     mem_limit: ${AI_WEBHOOK_MEMORY_LIMIT:-512m}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     env_file:
-      - ${PRODUCTION_ENV_FILE:-production.env}
+      - production.env
     environment:
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-service-account.json
       MYSQL_POOL_MINSIZE: ${MYSQL_POOL_MINSIZE:-1}
@@ -20,8 +25,13 @@ services:
     image: ai-customer-service:latest
     restart: unless-stopped
     mem_limit: ${AI_WORKER_MEMORY_LIMIT:-2g}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     env_file:
-      - ${PRODUCTION_ENV_FILE:-production.env}
+      - production.env
     environment:
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-service-account.json
       MYSQL_POOL_MINSIZE: ${MYSQL_POOL_MINSIZE:-1}
@@ -41,11 +51,35 @@ services:
       - source: google_service_account
         target: google-service-account.json
 
+  ai-daily-chat-report:
+    image: ai-customer-service:latest
+    restart: unless-stopped
+    mem_limit: ${AI_DAILY_CHAT_REPORT_MEMORY_LIMIT:-1g}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    env_file:
+      - production.env
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-service-account.json
+      MYSQL_POOL_MINSIZE: ${MYSQL_POOL_MINSIZE:-1}
+      MYSQL_POOL_MAXSIZE: ${MYSQL_POOL_MAXSIZE:-20}
+      DAILY_CHAT_REPORT_ENABLED: ${DAILY_CHAT_REPORT_ENABLED:-true}
+      DAILY_CHAT_REPORT_SOURCE: ${DAILY_CHAT_REPORT_SOURCE:-lingxi}
+      DAILY_CHAT_REPORT_TIME: ${DAILY_CHAT_REPORT_TIME:-09:00}
+      DAILY_CHAT_REPORT_TIMEZONE: ${DAILY_CHAT_REPORT_TIMEZONE:-Asia/Shanghai}
+    command: ["python", "-m", "app.reporting.daily_chat_report.scheduler"]
+    secrets:
+      - source: google_service_account
+        target: google-service-account.json
+
   db-create:
     image: mysql:8
     profiles: ["tools"]
     env_file:
-      - ${PRODUCTION_ENV_FILE:-production.env}
+      - production.env
     command:
       - sh
       - -c

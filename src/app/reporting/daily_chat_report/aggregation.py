@@ -36,6 +36,7 @@ ROBOT_HANDOFF_TEXT_PATTERNS = (
     "转接真人",
     "转真人",
 )
+INTERNAL_MESSAGE_ROLES = {"backend", "telegram", "system"}
 
 
 def aggregate_threads(
@@ -47,6 +48,7 @@ def aggregate_threads(
     allowed_group_ids: set[int],
     excluded_group_ids: set[int],
     require_agent_participation: bool = False,
+    require_assistant_participation: bool = False,
     force_category: ReportCategory | None = None,
     force_category_reason: str | None = None,
     bot_name: str = "Ai Jtest",
@@ -61,7 +63,10 @@ def aggregate_threads(
         if not chat_id:
             continue
         thread_id = _optional_str(row.get("thread_id"))
-        messages_by_thread[(chat_id, thread_id)].append(_message_from_row(row))
+        message = _message_from_row(row)
+        if not _is_reportable_message(message):
+            continue
+        messages_by_thread[(chat_id, thread_id)].append(message)
 
     threads = []
     for key, messages in messages_by_thread.items():
@@ -69,8 +74,10 @@ def aggregate_threads(
         metadata = metadata_by_thread.get(key) or metadata_by_thread.get((key[0], None)) or {}
         if require_agent_participation and not _has_agent_participation(metadata, messages):
             continue
+        if require_assistant_participation and not _has_assistant_participation(messages):
+            continue
         customer_name = _extract_customer_name(metadata) or "Cliente"
-        messages = [_with_speaker_name(message, metadata, customer_name=customer_name) for message in messages]
+        messages = [_with_speaker_name(message, metadata, customer_name=customer_name, bot_name=bot_name) for message in messages]
         group_id = _extract_group_id(metadata, allowed_group_ids=allowed_group_ids)
         if group_id in excluded_group_ids:
             continue
@@ -189,6 +196,18 @@ def _has_agent_participation(metadata: dict[str, Any], messages: list[ReportMess
     return _has_human_agent_message(messages)
 
 
+def _has_assistant_participation(messages: list[ReportMessage]) -> bool:
+    return any(message.sender_role == "assistant" for message in messages)
+
+
+def _is_reportable_message(message: ReportMessage) -> bool:
+    if message.sender_role in INTERNAL_MESSAGE_ROLES:
+        return False
+    if str(message.text_content or "").strip():
+        return True
+    return bool(message.attachment_refs)
+
+
 def _metadata_by_thread(rows: Iterable[dict[str, Any]]) -> dict[tuple[str, str | None], dict[str, Any]]:
     result = {}
     for row in rows:
@@ -237,8 +256,8 @@ def _normalize_sender_role(value: Any) -> str:
         return "agent"
     if role in {"assistant", "self_agent", "bot"}:
         return "assistant"
-    if role in {"system"}:
-        return "system"
+    if role in INTERNAL_MESSAGE_ROLES:
+        return role
     return "customer"
 
 
@@ -275,7 +294,9 @@ def _extract_customer_name(metadata: dict[str, Any]) -> str | None:
     return None
 
 
-def _with_speaker_name(message: ReportMessage, metadata: dict[str, Any], *, customer_name: str) -> ReportMessage:
+def _with_speaker_name(message: ReportMessage, metadata: dict[str, Any], *, customer_name: str, bot_name: str = "Ai Jtest") -> ReportMessage:
+    if message.sender_role == "assistant":
+        return replace(message, speaker_name=bot_name)
     if message.speaker_name:
         return message
     speaker_name = _speaker_name_from_author_id(message.author_id, metadata)

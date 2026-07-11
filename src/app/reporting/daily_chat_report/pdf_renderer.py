@@ -64,18 +64,7 @@ def render_daily_chat_report_pdf(
 
 
 def _thread_story(index: int, thread: ReportThread, styles, translator: Translator) -> list:
-    rows = [[Paragraph("時間", styles["TableHeader"]), Paragraph("說話者", styles["TableHeader"]), Paragraph("內容", styles["TableHeader"])]]
-    for message in thread.messages:
-        rows.append(
-            [
-                Paragraph(time_label(message.sort_at), styles["TableCell"]),
-                Paragraph(speaker_label(message), styles["TableCell"]),
-                Paragraph(_escape_lines(format_message_content(message, translator)), styles["TableCell"]),
-            ]
-        )
-    table = Table(rows, colWidths=[0.72 * inch, 1.3 * inch, 5.15 * inch], repeatRows=1)
-    table.setStyle(_base_table_style())
-    return [
+    story = [
         Spacer(1, 8),
         Paragraph(f"{index}. {thread.customer_name}", styles["ThreadTitle"]),
         Paragraph(
@@ -92,7 +81,44 @@ def _thread_story(index: int, thread: ReportThread, styles, translator: Translat
         ),
         Paragraph(f"判定理由：{thread.category_reason}", styles["BodyCn"]),
         Paragraph(f"新版統計分類：{thread.category.value}", styles["BodyCn"]),
-        table,
+        _message_header_table(styles),
+    ]
+    for message in thread.messages:
+        story.extend(_message_story(message, styles, translator))
+    return story
+
+
+def _message_header_table(styles):
+    table = Table(
+        [[Paragraph("時間", styles["TableHeader"]), Paragraph("說話者", styles["TableHeader"]), Paragraph("內容", styles["TableHeader"])]],
+        colWidths=[0.72 * inch, 1.3 * inch, 5.15 * inch],
+    )
+    table.setStyle(_base_table_style())
+    return table
+
+
+def _message_story(message, styles, translator: Translator) -> list:
+    meta = Table(
+        [[Paragraph(time_label(message.sort_at), styles["TableCell"]), Paragraph(speaker_label(message), styles["TableCell"])]],
+        colWidths=[0.72 * inch, 1.3 * inch],
+    )
+    meta.setStyle(
+        TableStyle(
+            [
+                ("BOX", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    return [
+        meta,
+        Paragraph(_escape_lines(format_message_content(message, translator)), styles["MessageContent"]),
+        Spacer(1, 4),
     ]
 
 
@@ -133,7 +159,7 @@ def _scope_text(threads: list[ReportThread]) -> str:
     )
     return (
         f"範圍：只含 LiveChat group {','.join(str(group) for group in groups) or '無'}"
-        f"（{'、'.join(platforms) or '未知平台'}），排除測試 group 23，且只保留 LingXi 客服參與過的 thread。"
+        f"（{'、'.join(platforms) or '未知平台'}），排除測試 group 23，且只保留 LingXi 實際有發出訊息的 thread。"
         f"總數：{len(threads)}。<br/>{category_text}"
         "<br/>注意：本檔已將對話內容中文化；帳號、電話、姓名、圖片檔名與品牌名保留原樣。"
     )
@@ -170,6 +196,19 @@ def _styles(base_font: str):
     styles.add(ParagraphStyle("ThreadTitle", parent=styles["Heading3"], fontName=base_font, fontSize=11, leading=14, spaceAfter=4))
     styles.add(ParagraphStyle("TableHeader", parent=styles["BodyText"], fontName=base_font, fontSize=8, leading=10))
     styles.add(ParagraphStyle("TableCell", parent=styles["BodyText"], fontName=base_font, fontSize=7.8, leading=10))
+    styles.add(
+        ParagraphStyle(
+            "MessageContent",
+            parent=styles["BodyText"],
+            fontName=base_font,
+            fontSize=7.8,
+            leading=10,
+            borderColor=colors.HexColor("#cbd5e1"),
+            borderWidth=0.35,
+            borderPadding=4,
+            spaceAfter=1,
+        )
+    )
     return styles
 
 

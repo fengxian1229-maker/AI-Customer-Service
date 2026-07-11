@@ -40,7 +40,6 @@ def extract_polling_events_from_chat_detail(
         thread_id = thread.get("id") or thread.get("thread_id")
         if (
             thread_id
-            and not _thread_has_customer_message_or_file(thread, users_by_id)
             and not _thread_has_non_self_agent_message_or_file(thread, users_by_id, self_author_ids or set())
             and not _thread_has_rich_message(thread)
         ):
@@ -76,17 +75,6 @@ def extract_polling_events_from_chat_detail(
                 "event": event,
             })
     return payloads
-
-
-def _thread_has_customer_message_or_file(thread: dict, users_by_id: dict[str, dict]) -> bool:
-    for event in thread.get("events") or []:
-        if event.get("type") not in {"message", "file"}:
-            continue
-        author = users_by_id.get(str(event.get("author_id")))
-        if author and author.get("type") == "agent":
-            continue
-        return True
-    return False
 
 
 def _thread_has_non_self_agent_message_or_file(thread: dict, users_by_id: dict[str, dict], self_author_ids: set[str]) -> bool:

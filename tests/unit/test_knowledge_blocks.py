@@ -31,7 +31,7 @@ def test_validate_answer_blocks_accepts_text_image_and_buttons():
                 "asset_key": "deposit_howto",
                 "caption": "",
                 "position": "before",
-                "platform_asset_map": {"default": "bot66tornado/assets/tutorials/JUE999/deposit.jpg"},
+                "platform_asset_map": {"default": "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg"},
             },
             {"type": "buttons", "menu_key": "deposit_recovery"},
         ]

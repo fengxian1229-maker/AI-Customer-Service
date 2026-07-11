@@ -87,6 +87,17 @@ def test_final_reply_prompt_includes_lingxi_persona_and_compliance_bounds():
     assert "Never ask for passwords, verification codes" in FINAL_REPLY_SYSTEM_PROMPT
 
 
+def test_final_reply_prompt_requires_same_sentence_language_consistency():
+    from app.llm.final_reply_provider import FINAL_REPLY_SYSTEM_PROMPT
+
+    assert "Every natural-language sentence must use reply_language" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "Do not mix languages inside the same sentence" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "phrases, titles, explanations, or self-introductions" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "account IDs, order IDs, amounts, URLs, usernames, phone numbers" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "platform names, brand names, product names, and file names" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "If you must refer to your assistant identity" in FINAL_REPLY_SYSTEM_PROMPT
+
+
 def test_final_reply_service_payload_includes_node_template_and_facts():
     provider = FakeFinalReplyProvider()
     service = FinalReplyService(provider=provider, enabled=True)

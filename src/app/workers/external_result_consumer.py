@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -19,10 +20,16 @@ from app.db.repositories import (
 from app.services.final_reply_factory import build_final_reply_service_from_settings
 from app.services.message_history import build_external_result_summary_message
 from app.services.outbox import build_text_outbox
+from app.services.outbox import build_external_command_record
 from app.services.user_visible_finalizer import finalize_user_visible_text
 from app.services.reply_intents import CustomerReplyIntent, build_customer_reply
 from app.services.reply_renderer import render_customer_reply
+from app.workflows.command_contracts import CommandType
 from app.workflows.final_reply_policy import build_reply_plan
+
+BACKEND_NOT_FOUND_HANDOFF_THRESHOLD = 2
+BACKEND_NOT_FOUND_HANDOFF_TEXT = "多次查询仍未定位到账户资料，我会为您转接真人客服继续核实。"
+BACKEND_QUERY_FAILED_HANDOFF_TEXT = "后台查询连续暂时无法完成，我会为您转接真人客服继续核实。"
 
 
 RESULT_HANDLERS = {
@@ -89,7 +96,8 @@ async def process_pending_results(
     async def process_one(row: dict) -> dict:
         try:
             async with semaphore:
-                handler = build_result_handler(row)
+                conversation = await _load_conversation_for_result(row, conversation_repository)
+                handler = build_result_handler(row, conversation=conversation)
                 recent_messages = (
                     await _load_recent_messages(row, conversation_message_repository) if llm_final_reply_enabled else []
                 )
@@ -106,7 +114,7 @@ async def process_pending_results(
                     row,
                     graph_state=graph_state,
                     outbound_messages=[outbound],
-                    external_commands=[],
+                    external_commands=handler.get("external_commands") or [],
                     summary_message=handler["summary_message"],
                 )
                 return {
@@ -154,7 +162,8 @@ async def process_result_by_id(
     if conversation_message_repository is None and hasattr(result_repository, "pool"):
         conversation_message_repository = ConversationMessageRepository(result_repository.pool)
     try:
-        handler = build_result_handler(row)
+        conversation = await _load_conversation_for_result(row, conversation_repository)
+        handler = build_result_handler(row, conversation=conversation)
         recent_messages = await _load_recent_messages(row, conversation_message_repository) if llm_final_reply_enabled else []
         handler = await _apply_backend_final_reply(
             row,
@@ -168,7 +177,7 @@ async def process_result_by_id(
             row,
             graph_state=handler["graph_state"],
             outbound_messages=[outbound],
-            external_commands=[],
+            external_commands=handler.get("external_commands") or [],
             summary_message=handler["summary_message"],
         )
         return {
@@ -203,7 +212,16 @@ def build_result_outbox(row: dict, text: str) -> dict:
     return outbound
 
 
-def build_result_handler(row: dict) -> dict:
+async def _load_conversation_for_result(row: dict, conversation_repository: ConversationRepository) -> dict | None:
+    if not hasattr(conversation_repository, "get_or_create"):
+        return None
+    return await conversation_repository.get_or_create(
+        chat_id=row["chat_id"],
+        thread_id=row.get("thread_id"),
+    )
+
+
+def build_result_handler(row: dict, conversation: dict | None = None) -> dict:
     result_type = row["result_type"]
     result_json = row.get("result_json") or {}
     if result_type == "telegram.case.created":
@@ -292,20 +310,30 @@ def build_result_handler(row: dict) -> dict:
             reply_intent = CustomerReplyIntent.BACKEND_QUERY_FAILED
             reply_facts = {"error_code": result_json.get("error_code") or "UNKNOWN"}
             text = render_customer_reply(reply_intent, facts=reply_facts, reply_language=reply_language)
+            escalation = _backend_lookup_escalation(
+                row,
+                conversation=conversation,
+                kind="failed",
+                value=result_json.get("error_code") or "UNKNOWN",
+            )
+            if escalation["should_handoff"]:
+                text = _handoff_text_for_language(reply_language, kind="failed")
             resolved = {
                 "text": text,
                 "summary_sender_role": "backend",
-                "summary_text": "后台查询失败，已生成安全兜底回复。",
+                "summary_text": "后台查询连续失败，已请求人工复核。" if escalation["should_handoff"] else "后台查询失败，已生成安全兜底回复。",
                 "graph_state": {
-                    "status": "WAITING_EXTERNAL",
-                    "active_workflow": "withdrawal_blocked_or_rollover",
-                    "workflow_stage": "backend_query_failed_waiting_manual",
+                    "status": "HANDOFF_REQUESTED" if escalation["should_handoff"] else "WAITING_EXTERNAL",
+                    "active_workflow": "human_handoff" if escalation["should_handoff"] else "withdrawal_blocked_or_rollover",
+                    "workflow_stage": "handoff_requested" if escalation["should_handoff"] else "backend_query_failed_waiting_manual",
                     "slot_memory": {
                         "backend_query_status": "failed",
                         "backend_query_error_code": result_json.get("error_code") or "UNKNOWN",
+                        **escalation["slot_memory"],
                     },
                     "customer_reply": build_customer_reply(reply_intent, facts=reply_facts, language=reply_language, text=text),
                 },
+                "external_commands": escalation["external_commands"],
             }
             resolved["summary_message"] = build_external_result_summary_message(row, resolved)
             return resolved
@@ -320,17 +348,26 @@ def build_result_handler(row: dict) -> dict:
             facts=reply_facts,
             reply_language=reply_language,
         )
+        escalation = _backend_lookup_escalation(
+            row,
+            conversation=conversation,
+            kind="not_found",
+            value=result_json.get("account_or_phone") or (result_json.get("query") or {}).get("account_or_phone"),
+        ) if _is_backend_player_not_found(result_json, reply_intent) else _backend_lookup_reset()
+        if escalation["should_handoff"]:
+            text = _handoff_text_for_language(reply_language, kind="not_found")
         resolved = {
             "text": text,
             "summary_sender_role": "backend",
-            "summary_text": "后台查询成功，已生成可回复摘要。",
+            "summary_text": "后台连续未定位到账户，已请求人工复核。" if escalation["should_handoff"] else "后台查询成功，已生成可回复摘要。",
             "graph_state": {
-                "status": "AI_ACTIVE",
-                "active_workflow": None,
-                "workflow_stage": "completed",
-                "slot_memory": {"backend_query_status": "success"},
+                "status": "HANDOFF_REQUESTED" if escalation["should_handoff"] else "AI_ACTIVE",
+                "active_workflow": "human_handoff" if escalation["should_handoff"] else None,
+                "workflow_stage": "handoff_requested" if escalation["should_handoff"] else "completed",
+                "slot_memory": {"backend_query_status": "success", **escalation["slot_memory"]},
                 "customer_reply": build_customer_reply(reply_intent, facts=reply_facts, language=reply_language, text=text),
             },
+            "external_commands": escalation["external_commands"],
         }
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)
         return resolved
@@ -374,6 +411,8 @@ async def _apply_backend_final_reply(
 
     fallback_text = str(handler.get("text") or "").strip()
     if not fallback_text:
+        return handler
+    if _has_human_handoff_command(handler):
         return handler
 
     final_state = _build_backend_final_reply_state(row, handler, fallback_text, recent_messages=recent_messages)
@@ -516,6 +555,116 @@ def _build_backend_final_reply_state(
         ),
         "commands": [],
     }
+
+
+def _is_backend_player_not_found(result_json: dict, reply_intent: CustomerReplyIntent | str) -> bool:
+    query = result_json.get("query") if isinstance(result_json.get("query"), dict) else {}
+    return (
+        str(reply_intent) == str(CustomerReplyIntent.BACKEND_PLAYER_NOT_FOUND)
+        or result_json.get("reply_intent") == str(CustomerReplyIntent.BACKEND_PLAYER_NOT_FOUND)
+    ) and query.get("player_found") is False
+
+
+def _backend_lookup_reset() -> dict:
+    return {
+        "should_handoff": False,
+        "slot_memory": {
+            "backend_not_found_count": 0,
+            "backend_not_found_last_value_hash": None,
+            "backend_query_failed_count": 0,
+            "backend_query_failed_last_value_hash": None,
+            "backend_not_found_handoff_requested": False,
+        },
+        "external_commands": [],
+    }
+
+
+def _backend_lookup_escalation(
+    row: dict,
+    *,
+    conversation: dict | None,
+    kind: str,
+    value: Any,
+    threshold: int = BACKEND_NOT_FOUND_HANDOFF_THRESHOLD,
+) -> dict:
+    slot_memory = dict((conversation or {}).get("slot_memory") or {})
+    if kind == "failed":
+        count_key = "backend_query_failed_count"
+        hash_key = "backend_query_failed_last_value_hash"
+        handoff_reason = "backend_query_failed_repeated"
+    else:
+        count_key = "backend_not_found_count"
+        hash_key = "backend_not_found_last_value_hash"
+        handoff_reason = "backend_player_not_found_repeated"
+
+    existing_count = int(slot_memory.get(count_key) or 0)
+    value_hash = _stable_lookup_value_hash(value)
+    duplicate_lookup_value = kind != "failed" and value_hash and slot_memory.get(hash_key) == value_hash
+    count = existing_count if duplicate_lookup_value else existing_count + 1
+    handoff_already_requested = bool(slot_memory.get("backend_not_found_handoff_requested"))
+    should_handoff = count >= threshold and not handoff_already_requested
+    updated_slot_memory = {
+        count_key: count,
+        hash_key: value_hash,
+    }
+    if should_handoff:
+        updated_slot_memory["backend_not_found_handoff_requested"] = True
+
+    external_commands = []
+    if should_handoff:
+        external_commands.append(
+            build_external_command_record(
+                tenant_id=row.get("tenant_id") or "default",
+                chat_id=row.get("chat_id"),
+                thread_id=row.get("thread_id"),
+                conversation_id=row["conversation_id"],
+                inbound_event_id=row.get("inbound_event_id"),
+                command={
+                    "type": CommandType.HUMAN_HANDOFF_REQUESTED,
+                    "payload": {
+                        "reason": handoff_reason,
+                        "trigger": kind,
+                        "threshold": threshold,
+                        "count": count,
+                    },
+                },
+            )
+        )
+
+    return {
+        "should_handoff": should_handoff,
+        "slot_memory": updated_slot_memory,
+        "external_commands": external_commands,
+    }
+
+
+def _stable_lookup_value_hash(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _handoff_text_for_language(reply_language: str | None, *, kind: str) -> str:
+    language = str(reply_language or "").lower()
+    if language.startswith("es"):
+        if kind == "failed":
+            return "La consulta del sistema no se pudo completar varias veces. Solicitaré que un agente humano continúe verificando su caso."
+        return "Después de varias consultas, aún no logramos localizar los datos de la cuenta. Solicitaré que un agente humano continúe verificando su caso."
+    if language.startswith("en"):
+        if kind == "failed":
+            return "The system query could not be completed multiple times. I will request a human agent to continue checking your case."
+        return "After multiple checks, we still could not locate the account details. I will request a human agent to continue checking your case."
+    if kind == "failed":
+        return BACKEND_QUERY_FAILED_HANDOFF_TEXT
+    return BACKEND_NOT_FOUND_HANDOFF_TEXT
+
+
+def _has_human_handoff_command(handler: dict) -> bool:
+    return any(
+        str(command.get("command_type")) == str(CommandType.HUMAN_HANDOFF_REQUESTED)
+        for command in handler.get("external_commands") or []
+    )
 
 
 async def _load_recent_messages(row: dict, repository) -> list[dict]:

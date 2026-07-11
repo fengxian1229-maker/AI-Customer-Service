@@ -23,6 +23,22 @@ def test_deactivate_chat_posts_livechat_deactivate_action(monkeypatch):
     assert calls == [("/agent/action/deactivate_chat", {"id": "chat-1"})]
 
 
+def test_list_archives_posts_filters_and_limit(monkeypatch):
+    client = LiveChatSenderClient("https://livechat.example/v3.6", "account-1", "token-1")
+    calls = []
+
+    async def fake_post_json(path: str, body: dict) -> dict:
+        calls.append((path, body))
+        return {"chats": [{"id": "chat-1"}]}
+
+    monkeypatch.setattr(client, "_post_json", fake_post_json)
+
+    result = asyncio.run(client.list_archives(filters={"query": "thread-1"}, limit=5))
+
+    assert result == {"chats": [{"id": "chat-1"}]}
+    assert calls == [("/agent/action/list_archives", {"filters": {"query": "thread-1"}, "limit": 5})]
+
+
 def test_send_text_adds_agent_to_chat_before_send(monkeypatch):
     client = LiveChatSenderClient("https://livechat.example/v3.6", "account-1", "token-1", agent_email="bot@example.com")
     calls = []

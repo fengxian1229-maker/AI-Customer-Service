@@ -169,24 +169,24 @@ def test_seed_knowledge_loads_multimodal_seed_file():
         filename = tutorial_filenames[intent_id]
         assert document["answer_blocks"][0]["platform_asset_map"] == {
             **{
-                platform: f"bot66tornado/assets/tutorials/{platform}/{filename}"
+                platform: f"legacy/bot66tornado/assets/tutorials/{platform}/{filename}"
                 for platform in platforms
             },
-            "default": f"bot66tornado/assets/tutorials/CON777/{filename}",
+            "default": f"legacy/bot66tornado/assets/tutorials/CON777/{filename}",
         }
 
     deposit = repository.inserted[0]
     assert deposit["question_aliases"]
     assert [block["type"] for block in deposit["answer_blocks"]] == ["image", "text"]
     assert deposit["answer_blocks"][0]["platform_asset_map"] == {
-        "JUE999": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
-        "GNA777": "bot66tornado/assets/tutorials/GNA777/deposit.jpg",
-        "JG7": "bot66tornado/assets/tutorials/JG7/deposit.jpg",
-        "PAG99": "bot66tornado/assets/tutorials/PAG99/deposit.jpg",
-        "CUM777": "bot66tornado/assets/tutorials/CUM777/deposit.jpg",
-        "CON777": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
-        "ZAP69": "bot66tornado/assets/tutorials/ZAP69/deposit.jpg",
-        "default": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
+        "JUE999": "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+        "GNA777": "legacy/bot66tornado/assets/tutorials/GNA777/deposit.jpg",
+        "JG7": "legacy/bot66tornado/assets/tutorials/JG7/deposit.jpg",
+        "PAG99": "legacy/bot66tornado/assets/tutorials/PAG99/deposit.jpg",
+        "CUM777": "legacy/bot66tornado/assets/tutorials/CUM777/deposit.jpg",
+        "CON777": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg",
+        "ZAP69": "legacy/bot66tornado/assets/tutorials/ZAP69/deposit.jpg",
+        "default": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg",
     }
     assert deposit["metadata_json"]["intent_id"] == "deposit_howto"
     assert deposit["metadata_json"]["is_canonical"] is True

@@ -126,9 +126,10 @@ def test_extract_polling_events_from_chat_detail_filters_agent_messages():
 
     payloads = extract_polling_events_from_chat_detail(chat, self_author_ids={"self-agent"})
 
-    assert len(payloads) == 1
-    assert payloads[0]["event"]["id"] == "event-1"
-    assert payloads[0]["thread_id"] == "thread-1"
+    assert [payload["event"]["type"] for payload in payloads] == ["thread_started", "message"]
+    assert payloads[0]["event"]["id"] == "intro:chat-1:thread-1"
+    assert payloads[1]["event"]["id"] == "event-1"
+    assert payloads[1]["thread_id"] == "thread-1"
 
 
 def test_extract_polling_events_from_empty_thread_adds_thread_started_intro_event():
@@ -151,6 +152,38 @@ def test_extract_polling_events_from_empty_thread_adds_thread_started_intro_even
     assert len(payloads) == 1
     assert payloads[0]["event"]["type"] == "thread_started"
     assert payloads[0]["event"]["id"] == "intro:chat-1:thread-1"
+
+
+def test_extract_polling_events_from_customer_message_thread_adds_intro_before_message_for_official_group():
+    from app.channels.livechat.polling_receiver import extract_polling_events_from_chat_detail
+
+    chat = {
+        "id": "chat-1",
+        "access": {"group_ids": [2]},
+        "users": [{"id": "customer-1", "type": "customer"}],
+        "threads": [
+            {
+                "id": "thread-1",
+                "created_at": "2026-06-24T00:00:00Z",
+                "events": [
+                    {
+                        "id": "event-1",
+                        "type": "message",
+                        "author_id": "customer-1",
+                        "created_at": "2026-06-24T00:00:01Z",
+                        "text": "hello",
+                    }
+                ],
+            }
+        ],
+    }
+
+    payloads = extract_polling_events_from_chat_detail(chat)
+
+    assert [payload["event"]["type"] for payload in payloads] == ["thread_started", "message"]
+    assert payloads[0]["event"]["id"] == "intro:chat-1:thread-1"
+    assert payloads[0]["group_ids"] == [2]
+    assert payloads[1]["event"]["id"] == "event-1"
 
 
 def test_extract_polling_events_from_agent_greeting_thread_adds_thread_started_intro_event():
@@ -299,11 +332,13 @@ def test_poll_once_inserts_customer_events_from_listed_chats():
         )
     )
 
-    assert len(inserted) == 1
-    assert inserted[0].event_id == "event-1"
-    assert inserted[0].payload_json["ingress_source"] == "polling"
-    assert inserted[0].payload_json["polling_source"] == "get_chat"
-    assert inserted[0].payload_json["group_ids"] == []
+    assert len(inserted) == 2
+    assert [event.standard_event_type for event in inserted] == ["THREAD_STARTED", "MESSAGE_CREATED"]
+    assert inserted[0].event_id == "intro:chat-1:thread-1"
+    assert inserted[1].event_id == "event-1"
+    assert inserted[1].payload_json["ingress_source"] == "polling"
+    assert inserted[1].payload_json["polling_source"] == "get_chat"
+    assert inserted[1].payload_json["group_ids"] == []
 
 
 def test_poll_once_falls_back_to_summary_when_get_chat_forbidden():
@@ -396,7 +431,8 @@ def test_poll_once_filters_disallowed_groups():
         )
     )
 
-    assert [event.chat_id for event in inserted] == ["chat-23"]
+    assert [event.chat_id for event in inserted] == ["chat-23", "chat-23"]
+    assert [event.standard_event_type for event in inserted] == ["THREAD_STARTED", "MESSAGE_CREATED"]
 
 
 def test_run_polling_cycle_reports_counts():
@@ -439,7 +475,7 @@ def test_run_polling_cycle_reports_counts():
     )
 
     assert result["listed"] == 1
-    assert result["inserted"] == 1
+    assert result["inserted"] == 2
 
 
 def test_run_polling_cycle_reports_duplicate_and_group_counts():
@@ -488,4 +524,4 @@ def test_run_polling_cycle_reports_duplicate_and_group_counts():
     assert result["listed"] == 2
     assert result["matched_group"] == 1
     assert result["inserted"] == 0
-    assert result["duplicates"] == 1
+    assert result["duplicates"] == 2

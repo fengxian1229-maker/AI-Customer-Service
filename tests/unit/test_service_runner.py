@@ -338,6 +338,24 @@ def test_continue_on_error_default_keeps_worker_running(monkeypatch):
     assert calls["sender"] == 2
     assert result["workers"]["sender_worker"]["errors"] == 1
     assert result["errors"]
+    assert result["errors_total"] == 1
+
+
+def test_runner_summary_retains_only_recent_errors():
+    from app.workers import service_runner
+
+    summary = service_runner.RunnerSummary()
+
+    for index in range(service_runner.MAX_RETAINED_ERRORS + 5):
+        summary.record_error("sender_worker", RuntimeError(f"sender failed {index}"), elapsed_ms=index)
+
+    result = summary.to_result("OK")
+
+    assert summary.errors_total == service_runner.MAX_RETAINED_ERRORS + 5
+    assert result["errors_total"] == service_runner.MAX_RETAINED_ERRORS + 5
+    assert len(result["errors"]) == service_runner.MAX_RETAINED_ERRORS
+    assert result["errors"][0]["error_message"] == "sender failed 5"
+    assert result["errors"][-1]["error_message"] == "sender failed 104"
 
 
 def test_stop_on_error_stops_runner(monkeypatch):

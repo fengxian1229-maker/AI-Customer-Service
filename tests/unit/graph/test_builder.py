@@ -99,7 +99,11 @@ def test_workflow_graph_invokes_minimal_sop_path():
     )
 
     assert result["intent_result"]["intent"] == "deposit_missing"
-    assert result["response_text"] == "上方图片是付款成功截图示例。为了帮你查询这笔存款，请提供用户名或注册手机号，并上传你自己的付款成功截图。"
+    assert result["response_text"] == (
+        "La imagen de arriba es un ejemplo de captura de pago exitoso. "
+        "Para ayudarle a revisar este depósito, proporcione su usuario o número de teléfono registrado "
+        "y suba una captura de su pago exitoso."
+    )
 
 
 def test_workflow_graph_rag_route_returns_knowledge_answer_without_placeholder_command():
@@ -153,5 +157,5 @@ def test_workflow_graph_non_canonical_question_asks_for_clarification_without_ra
 
     assert result["route"] == "final_reply"
     assert result.get("rag_result") is None
-    assert "请补充" in result["response_text"]
+    assert "Indícame con qué necesitas ayuda" in result["response_text"]
     assert [str(command["type"]) for command in result["commands"]] == ["livechat.send_text"]

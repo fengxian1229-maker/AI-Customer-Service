@@ -112,11 +112,11 @@ def test_polling_ingress_receiver_writes_inbound_events():
         ).receive_once(limit=20)
     )
 
-    assert result["inserted"] == 1
+    assert result["inserted"] == 2
     assert result["duplicates"] == 0
     assert result["ignored"] == 0
-    assert repository.events[0].standard_event_type == "MESSAGE_CREATED"
-    assert repository.events[0].payload_json["ingress_source"] == "polling"
+    assert [event.standard_event_type for event in repository.events] == ["THREAD_STARTED", "MESSAGE_CREATED"]
+    assert all(event.payload_json["ingress_source"] == "polling" for event in repository.events)
 
 
 def test_polling_ingress_receiver_writes_intro_event_for_empty_thread_once():
@@ -201,10 +201,10 @@ def test_polling_ingress_receiver_does_not_insert_duplicates():
     first = asyncio.run(receiver.receive_once(limit=20))
     second = asyncio.run(receiver.receive_once(limit=20))
 
-    assert first["inserted"] == 1
+    assert first["inserted"] == 2
     assert second["inserted"] == 0
-    assert second["duplicates"] == 1
-    assert len(repository.events) == 1
+    assert second["duplicates"] == 2
+    assert len(repository.events) == 2
 
 
 def test_polling_ingress_receiver_ignores_human_agent_and_generates_intro_for_self_greeting():

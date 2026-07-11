@@ -439,7 +439,7 @@ def test_process_pending_message_image_sends_caption_after_file():
         "image",
         {
             "asset_key": "deposit_step_1",
-            "asset_ref": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+            "asset_ref": "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg",
             "caption": "第一步：进入充值页面",
         },
     )
@@ -450,7 +450,7 @@ def test_process_pending_message_image_sends_caption_after_file():
     assert result["delivery_mode"] == "livechat_file"
     assert result["caption_result"] == {"status": "SENT", "last_error": None}
     assert client.calls == [
-        ("image", "chat-1", "thread-1", "bot66tornado/assets/tutorials/JUE999/deposit.jpg"),
+        ("image", "chat-1", "thread-1", "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg"),
         ("text", "chat-1", "thread-1", "第一步：进入充值页面"),
     ]
     assert repository.sent == [7]
@@ -535,7 +535,7 @@ def test_process_pending_message_buttons_sends_quick_replies():
     rich = client.sent_buttons[0][2]["rich_message"]
     assert rich["template_id"] == "quick_replies"
     assert rich["elements"][0]["buttons"][0]["postback_id"] == "main_deposito"
-    assert rich["elements"][0]["buttons"][0]["value"] == "🧾 存款未到账"
+    assert rich["elements"][0]["buttons"][0]["value"] == "🧾 Depósito no acreditado"
 
 
 def test_process_pending_message_buttons_falls_back_to_text_when_rich_send_fails():

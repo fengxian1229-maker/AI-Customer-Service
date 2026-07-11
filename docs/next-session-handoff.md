@@ -20,7 +20,7 @@ Local path: `/Users/andy/ai-agent`
   - `TenantBackendConfigResolver`
   - `BackendProviderFactory`
   - `TacBackendClient`
-- Implemented TAC as the first read-only provider with parity for observed `bot66tornado/direct-query.js` behavior:
+- Implemented TAC as the first read-only provider with parity for observed `legacy/bot66tornado/direct-query.js` behavior:
   - password login
   - GET API headers
   - one-time `INVALID_TOKEN` refresh
@@ -59,7 +59,7 @@ Read these first:
 - `/Users/andy/ai-agent/README.md`
 - `/Users/andy/ai-agent/docs/next-session-handoff.md`
 - `/Users/andy/ai-agent/docs/superpowers/specs/2026-06-24-livechat-rtm-closed-loop-design.md`
-- `/Users/andy/Downloads/New project 2/bot66tornado/docs/AI智能客服MVP技术方案.md`
+- `/Users/andy/Downloads/New project 2/legacy/bot66tornado/docs/AI智能客服MVP技术方案.md`
 
 Current goal:
 Continue from the polling-first LiveChat MVP that has now hardened this repeatable loop:

@@ -9,7 +9,7 @@ def assert_deposit_missing_intro_commands(commands):
     ]
     assert commands[0]["block_index"] == 0
     assert commands[0]["payload"]["asset_key"] == "deposit_payment_success_example"
-    assert commands[0]["payload"]["asset_ref"] == "bot66tornado/assets/examples/deposit-payment-success-onepay.jpg"
+    assert commands[0]["payload"]["asset_ref"] == "legacy/bot66tornado/assets/examples/deposit-payment-success-onepay.jpg"
     assert commands[1]["block_index"] == 1
     assert commands[1]["payload"]["final_reply_target"] is True
     assert "存款未到账" in commands[1]["payload"]["text"] or "depósito" in commands[1]["payload"]["text"]

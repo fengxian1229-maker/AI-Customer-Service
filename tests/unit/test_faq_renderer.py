@@ -21,8 +21,8 @@ def test_renderer_preview_selects_platform_asset_ref():
                 "caption": "充值教程",
                 "position": "before",
                 "platform_asset_map": {
-                    "JUE999": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
-                    "default": "bot66tornado/assets/tutorials/default/deposit.jpg",
+                    "JUE999": "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+                    "default": "legacy/bot66tornado/assets/tutorials/default/deposit.jpg",
                 },
             }
         ],
@@ -35,7 +35,7 @@ def test_renderer_preview_selects_platform_asset_ref():
         {
             "kind": "image",
             "asset_key": "deposit_howto",
-            "asset_ref": "bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+            "asset_ref": "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg",
             "caption": "充值教程",
             "position": "before",
         }
@@ -49,13 +49,13 @@ def test_renderer_preview_defaults_to_con777_platform_asset_ref():
                 "type": "image",
                 "asset_key": "deposit_howto",
                 "platform_asset_map": {
-                    "CON777": "bot66tornado/assets/tutorials/CON777/deposit.jpg",
+                    "CON777": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg",
                 },
             }
         ]
     )
 
-    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/CON777/deposit.jpg"
+    assert preview[0]["asset_ref"] == "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg"
 
 
 def test_renderer_preview_falls_back_to_default_asset_ref():
@@ -66,14 +66,14 @@ def test_renderer_preview_falls_back_to_default_asset_ref():
                 "asset_key": "withdrawal_howto",
                 "position": "before",
                 "platform_asset_map": {
-                    "default": "bot66tornado/assets/tutorials/default/withdrawal.jpg",
+                    "default": "legacy/bot66tornado/assets/tutorials/default/withdrawal.jpg",
                 },
             }
         ],
         platform="MXN",
     )
 
-    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/default/withdrawal.jpg"
+    assert preview[0]["asset_ref"] == "legacy/bot66tornado/assets/tutorials/default/withdrawal.jpg"
 
 
 def test_renderer_preview_allows_missing_asset_ref_when_no_platform_or_default_match():
@@ -82,7 +82,7 @@ def test_renderer_preview_allows_missing_asset_ref_when_no_platform_or_default_m
             {
                 "type": "image",
                 "asset_key": "forgot_password",
-                "platform_asset_map": {"JUE999": "bot66tornado/assets/tutorials/JUE999/forgot-password.jpg"},
+                "platform_asset_map": {"JUE999": "legacy/bot66tornado/assets/tutorials/JUE999/forgot-password.jpg"},
             }
         ],
         platform="MXN",
@@ -119,7 +119,7 @@ def test_renderer_preview_uses_default_multimodal_seed_deposit_howto():
 
     assert preview[0]["kind"] == "image"
     assert preview[0]["asset_key"] == "deposit_howto"
-    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/CON777/deposit.jpg"
+    assert preview[0]["asset_ref"] == "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg"
     assert preview[1]["kind"] == "text"
     assert len(preview) == 2
 
@@ -131,7 +131,7 @@ def test_renderer_preview_uses_default_multimodal_seed_platform_asset_ref():
 
     preview = render_answer_blocks_preview(deposit["answer_blocks"], platform="PAG99")
 
-    assert preview[0]["asset_ref"] == "bot66tornado/assets/tutorials/PAG99/deposit.jpg"
+    assert preview[0]["asset_ref"] == "legacy/bot66tornado/assets/tutorials/PAG99/deposit.jpg"
 
 
 @pytest.mark.parametrize(

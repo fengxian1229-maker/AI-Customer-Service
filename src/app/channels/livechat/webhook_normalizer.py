@@ -148,12 +148,7 @@ def _normalize_incoming_chat(
     chat = payload.get("chat") if isinstance(payload.get("chat"), dict) else payload
     thread = _primary_thread(chat)
     events = []
-    has_message_or_file = any(
-        isinstance(event, dict) and event.get("type") in {"message", "file"}
-        for item_thread in _threads(chat)
-        for event in (item_thread.get("events") or [])
-    )
-    if not has_message_or_file:
+    if _should_emit_chat_started_intro(chat, settings):
         chat_started_payload = {
             **payload,
             "event": {
@@ -197,6 +192,35 @@ def _normalize_incoming_chat(
                 )
             )
     return events
+
+
+def _should_emit_chat_started_intro(chat: dict, settings) -> bool:
+    events = [
+        event
+        for item_thread in _threads(chat)
+        for event in (item_thread.get("events") or [])
+        if isinstance(event, dict) and event.get("type") in {"message", "file"}
+    ]
+    if not events:
+        return True
+
+    users_by_id = {
+        str(user.get("id")): user
+        for user in (chat.get("users") or chat.get("chat_users") or [])
+        if user.get("id") is not None
+    }
+    self_author_ids = getattr(settings, "livechat_self_author_id_set", set())
+    has_human_agent_event = False
+    for event in events:
+        author_id = str(event.get("author_id") or "")
+        if author_id in self_author_ids:
+            continue
+        author = users_by_id.get(author_id)
+        if author and str(author.get("type") or "").lower() == "agent":
+            has_human_agent_event = True
+            continue
+        return False
+    return not has_human_agent_event
 
 
 def _normalize_incoming_event(

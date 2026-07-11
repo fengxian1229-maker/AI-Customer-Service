@@ -632,7 +632,7 @@ def test_gateway_faq_image_text_reply_skips_official_streaming_and_keeps_image_o
                     "asset_key": "withdrawal_howto",
                     "caption": "",
                     "position": "before",
-                    "platform_asset_map": {"CON777": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg"},
+                    "platform_asset_map": {"CON777": "legacy/bot66tornado/assets/tutorials/CON777/withdrawal.jpg"},
                 },
                 {"type": "text", "text": "繁體 FAQ 文本"},
             ],
@@ -2181,9 +2181,9 @@ def test_gateway_faq_multiblock_uses_event_platform_for_tutorial_asset():
                             "type": "image",
                             "asset_key": "withdrawal_howto",
                             "platform_asset_map": {
-                                "CON777": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
-                                "ZAP69": "bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg",
-                                "default": "bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
+                                "CON777": "legacy/bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
+                                "ZAP69": "legacy/bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg",
+                                "default": "legacy/bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
                             },
                         },
                     ]
@@ -2193,7 +2193,7 @@ def test_gateway_faq_multiblock_uses_event_platform_for_tutorial_asset():
         )
     )
 
-    assert rows[0]["payload_json"]["asset_ref"] == "bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg"
+    assert rows[0]["payload_json"]["asset_ref"] == "legacy/bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg"
 
 
 def test_gateway_faq_multiblock_finalizes_each_text_block_and_preserves_media():

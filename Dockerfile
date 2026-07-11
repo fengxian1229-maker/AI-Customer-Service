@@ -25,7 +25,7 @@ RUN if [ "$INSTALL_DEV" = "true" ]; then \
 COPY src ./src
 COPY sql ./sql
 COPY data ./data
-COPY bot66tornado/assets ./bot66tornado/assets
+COPY legacy/bot66tornado/assets ./legacy/bot66tornado/assets
 COPY docs ./docs
 COPY tests ./tests
 

@@ -17,7 +17,7 @@ from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
 
 
-DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_ASSET = "bot66tornado/assets/examples/deposit-payment-success-onepay.jpg"
+DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_ASSET = "legacy/bot66tornado/assets/examples/deposit-payment-success-onepay.jpg"
 DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_KEY = "deposit_payment_success_example"
 DEPOSIT_EXAMPLE_SENT_SLOT = "deposit_missing_example_sent"
 

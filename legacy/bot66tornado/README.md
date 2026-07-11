@@ -1,10 +1,18 @@
-# bot66tornado
+# bot66tornado (Legacy Prototype)
+
+> This Node.js application is retained for historical reference and emergency
+> comparison. The production service is the Python application in
+> `../../src/app/`; this directory is not a second production entry point.
+>
+> The original `src/runtime/` implementation was local-only and ignored by
+> Git. Restore that directory from the operator backup before running this
+> prototype; commands requiring it will fail fast when it is absent.
 
 乾淨版客服 Bot。這裡不是舊專案複製品，而是把舊版可用的文案/SOP 搬進新的窄路徑架構。
 
 ## 工作版定位
 
-目前本資料夾 `/Users/idea3c/Documents/New project 2/bot66tornado` 是 Project2 工作版。
+本目录现在位于主仓库的 `legacy/bot66tornado/`，仅作为历史原型保留。
 
 - 不自動同步 Desktop 版本。
 - 不自動部署到正式 LiveChat。
@@ -105,7 +113,7 @@ npm run stop:official
 ## 正式上線順序
 
 ```bash
-cd "/Users/idea3c/Documents/New project 2/bot66tornado"
+cd legacy/bot66tornado
 npm run stop:test:live
 npm run go:no-go:official
 npm run launchd:install:official

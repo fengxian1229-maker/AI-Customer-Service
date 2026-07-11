@@ -168,3 +168,20 @@ def test_append_supplement_text_extracts_text_from_livechat_blocks():
     assert "Supplement text: The user is requesting expedited handling." in append["text"]
     assert "signature" not in append["text"]
     assert "{'type': 'text'" not in append["text"]
+
+
+def test_append_supplement_text_extracts_text_from_stringified_livechat_blocks():
+    append = build_telegram_case_append(
+        _append_command(
+            {
+                "text": "[{'type': 'text', 'text': 'The user is requesting expedited handling.', 'extras': {'signature': 'secret'}}]",
+                "reason": "customer_sent_supplement",
+            }
+        ),
+        {"chat_id": "-100test", "message_thread_id": None},
+        reply_to_message_id=123,
+    )
+
+    assert "Supplement text: The user is requesting expedited handling." in append["text"]
+    assert "signature" not in append["text"]
+    assert "{'type': 'text'" not in append["text"]

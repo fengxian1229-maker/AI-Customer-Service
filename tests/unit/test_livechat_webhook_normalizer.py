@@ -66,7 +66,7 @@ def test_secret_missing_or_wrong_raises(secret):
         normalize_webhook_payload(body, make_settings())
 
 
-def test_incoming_chat_with_initial_message_emits_only_message():
+def test_incoming_chat_with_initial_customer_message_emits_only_message():
     body = {
         "webhook_id": "webhook-chat",
         "secret_key": "secret",
@@ -76,7 +76,7 @@ def test_incoming_chat_with_initial_message_emits_only_message():
             "chat": {
                 "id": "chat-1",
                 "created_at": "2026-07-06T00:00:00Z",
-                "access": {"group_ids": [23]},
+                "access": {"group_ids": [2]},
                 "users": [{"id": "customer-1", "type": "customer"}],
                 "thread": {
                     "id": "thread-1",
@@ -95,11 +95,13 @@ def test_incoming_chat_with_initial_message_emits_only_message():
         },
     }
 
-    events = normalize_webhook_payload(body, make_settings(livechat_allowed_group_ids="23"))
+    events = normalize_webhook_payload(body, make_settings(livechat_allowed_group_ids="2"))
 
     assert [event.standard_event_type for event in events] == ["MESSAGE_CREATED"]
     assert events[0].chat_id == "chat-1"
     assert events[0].event_id == "event-1"
+    assert events[0].payload_json["platform"] == "JUE999"
+    assert events[0].payload_json["livechat_group_id"] == 2
     assert events[0].payload_json["event"]["text"] == "hello"
 
 
@@ -130,7 +132,7 @@ def test_incoming_chat_empty_thread_emits_chat_started_intro():
     assert events[0].event_id == "chat_started:chat-1:thread-1"
 
 
-def test_incoming_chat_self_agent_greeting_does_not_emit_chat_started_intro():
+def test_incoming_chat_self_agent_greeting_emits_chat_started_intro_before_ignored_message():
     body = {
         "webhook_id": "webhook-chat",
         "secret_key": "secret",
@@ -164,9 +166,48 @@ def test_incoming_chat_self_agent_greeting_does_not_emit_chat_started_intro():
         make_settings(livechat_allowed_group_ids="23", livechat_self_author_ids="lingxi@goetm.com"),
     )
 
+    assert [event.standard_event_type for event in events] == ["CHAT_STARTED", "MESSAGE_CREATED"]
+    assert events[0].event_id == "chat_started:chat-1:thread-1"
+    assert events[0].ignored is False
+    assert events[1].ignored is True
+    assert events[1].ignore_reason == "self_message"
+
+
+def test_incoming_chat_human_agent_greeting_does_not_emit_chat_started_intro():
+    body = {
+        "webhook_id": "webhook-chat",
+        "secret_key": "secret",
+        "action": "incoming_chat",
+        "organization_id": "org-1",
+        "payload": {
+            "chat": {
+                "id": "chat-1",
+                "created_at": "2026-07-06T00:00:00Z",
+                "access": {"group_ids": [23]},
+                "users": [{"id": "agent-1", "type": "agent"}],
+                "thread": {
+                    "id": "thread-1",
+                    "created_at": "2026-07-06T00:00:00Z",
+                    "events": [
+                        {
+                            "id": "event-1",
+                            "type": "message",
+                            "author_id": "agent-1",
+                            "created_at": "2026-07-06T00:00:01Z",
+                            "text": "human hello",
+                        }
+                    ],
+                },
+            }
+        },
+    }
+
+    events = normalize_webhook_payload(body, make_settings(livechat_allowed_group_ids="23"))
+
     assert [event.standard_event_type for event in events] == ["MESSAGE_CREATED"]
     assert events[0].ignored is True
-    assert events[0].ignore_reason == "self_message"
+    assert events[0].ignore_reason == "agent_message"
+    assert events[0].payload_json["human_agent_public_reply"] is True
 
 
 def test_incoming_event_file_maps_to_file_received():

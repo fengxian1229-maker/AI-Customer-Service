@@ -364,7 +364,437 @@ def test_lingxi_report_requires_agent_participation_but_keeps_three_category_cla
     assert threads[0].category == ReportCategory.CUSTOMER_MANUAL_HANDOFF
     assert threads[0].messages[0].speaker_name == "Cliente"
     assert threads[0].messages[1].speaker_name == "Cess"
-    assert speaker_label(threads[0].messages[1]) == "LingXi（Cess）"
+    assert speaker_label(threads[0].messages[1]) == "真人客服（Cess）"
+
+
+def test_lingxi_bot_thread_does_not_require_human_agent_participation():
+    from app.reporting.daily_chat_report.aggregation import aggregate_threads
+    from app.reporting.daily_chat_report.models import ReportCategory
+
+    threads = aggregate_threads(
+        [
+            {
+                "id": "customer-1",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "customer",
+                "speaker_name": "Cliente",
+                "message_type": "text",
+                "text_content": "hola",
+                "attachment_refs": [],
+                "source": "inbound_event",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 0),
+                "created_at": datetime(2026, 7, 9, 1, 0, 0),
+            },
+            {
+                "id": "lingxi-1",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "assistant",
+                "author_id": "lingxi@goetm.com",
+                "speaker_name": "LingXi",
+                "message_type": "text",
+                "text_content": "Hola, soy LingXi.",
+                "attachment_refs": [],
+                "source": "inbound_event_self",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 1),
+                "created_at": datetime(2026, 7, 9, 1, 0, 1),
+            },
+        ],
+        metadata_rows=[
+            {
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "payload_json": {"livechat_group_id": 25, "chat_users": [{"id": "Cliente", "type": "customer", "name": "Cliente"}]},
+            }
+        ],
+        command_rows=[],
+        state_rows=[],
+        allowed_group_ids={25},
+        excluded_group_ids=set(),
+        require_assistant_participation=True,
+        bot_name="LingXi",
+    )
+
+    assert len(threads) == 1
+    assert threads[0].category == ReportCategory.BOT_COMPLETED
+    assert threads[0].messages[1].sender_role == "assistant"
+
+
+def test_lingxi_report_labels_assistant_messages_as_lingxi():
+    from app.reporting.daily_chat_report.aggregation import aggregate_threads
+
+    threads = aggregate_threads(
+        [
+            {
+                "id": "lingxi-1",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "assistant",
+                "speaker_name": "Ai Jtest",
+                "message_type": "text",
+                "text_content": "Hola.",
+                "attachment_refs": [],
+                "source": "sender_worker",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 1),
+                "created_at": datetime(2026, 7, 9, 1, 0, 1),
+            },
+        ],
+        metadata_rows=[{"chat_id": "chat-1", "thread_id": "thread-1", "payload_json": {"livechat_group_id": 25}}],
+        command_rows=[],
+        state_rows=[],
+        allowed_group_ids={25},
+        excluded_group_ids=set(),
+        require_assistant_participation=True,
+        bot_name="LingXi",
+    )
+
+    assert threads[0].messages[0].speaker_name == "LingXi"
+
+
+def test_lingxi_report_omits_blank_assistant_messages():
+    from app.reporting.daily_chat_report.aggregation import aggregate_threads
+
+    threads = aggregate_threads(
+        [
+            {
+                "id": "customer-1",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "customer",
+                "message_type": "text",
+                "text_content": "hola",
+                "attachment_refs": [],
+                "source": "inbound_event",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 0),
+                "created_at": datetime(2026, 7, 9, 1, 0, 0),
+            },
+            {
+                "id": "lingxi-blank",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "assistant",
+                "message_type": "text",
+                "text_content": "   ",
+                "attachment_refs": [],
+                "source": "inbound_event_self",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 1),
+                "created_at": datetime(2026, 7, 9, 1, 0, 1),
+            },
+            {
+                "id": "lingxi-text",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "assistant",
+                "message_type": "text",
+                "text_content": "Hola, soy LingXi.",
+                "attachment_refs": [],
+                "source": "inbound_event_self",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 2),
+                "created_at": datetime(2026, 7, 9, 1, 0, 2),
+            },
+        ],
+        metadata_rows=[{"chat_id": "chat-1", "thread_id": "thread-1", "payload_json": {"livechat_group_id": 25}}],
+        command_rows=[],
+        state_rows=[],
+        allowed_group_ids={25},
+        excluded_group_ids=set(),
+        require_assistant_participation=True,
+        bot_name="LingXi",
+    )
+
+    assert [message.id for message in threads[0].messages] == ["customer-1", "lingxi-text"]
+
+
+def test_lingxi_report_omits_internal_backend_action_messages():
+    from app.reporting.daily_chat_report.aggregation import aggregate_threads
+
+    threads = aggregate_threads(
+        [
+            {
+                "id": "lingxi-1",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "assistant",
+                "message_type": "text",
+                "text_content": "Hola, soy LingXi.",
+                "attachment_refs": [],
+                "source": "inbound_event_self",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 0),
+                "created_at": datetime(2026, 7, 9, 1, 0, 0),
+            },
+            {
+                "id": "backend-query",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "backend",
+                "message_type": "text",
+                "text_content": "后台查询成功，已生成可回复摘要",
+                "attachment_refs": [],
+                "source": "external_result_consumer",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 1),
+                "created_at": datetime(2026, 7, 9, 1, 0, 1),
+            },
+            {
+                "id": "telegram-case",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "telegram",
+                "message_type": "text",
+                "text_content": "案件已建立，case_id=tg:59271",
+                "attachment_refs": [],
+                "source": "external_result_consumer",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 2),
+                "created_at": datetime(2026, 7, 9, 1, 0, 2),
+            },
+            {
+                "id": "system-summary",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "system",
+                "message_type": "text",
+                "text_content": "Telegram 人工客服回复已润色并准备回写用户。",
+                "attachment_refs": [],
+                "source": "message_history",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 3),
+                "created_at": datetime(2026, 7, 9, 1, 0, 3),
+            },
+        ],
+        metadata_rows=[{"chat_id": "chat-1", "thread_id": "thread-1", "payload_json": {"livechat_group_id": 25}}],
+        command_rows=[],
+        state_rows=[],
+        allowed_group_ids={25},
+        excluded_group_ids=set(),
+        require_assistant_participation=True,
+        bot_name="LingXi",
+    )
+
+    assert [message.id for message in threads[0].messages] == ["lingxi-1"]
+
+
+def test_lingxi_real_agent_signal_classifies_manual_handoff():
+    from app.reporting.daily_chat_report.aggregation import aggregate_threads
+    from app.reporting.daily_chat_report.models import ReportCategory
+
+    threads = aggregate_threads(
+        [
+            {
+                "id": "lingxi-1",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "assistant",
+                "author_id": "lingxi@goetm.com",
+                "speaker_name": "LingXi",
+                "message_type": "text",
+                "text_content": "Hola, soy LingXi.",
+                "attachment_refs": [],
+                "source": "inbound_event_self",
+                "occurred_at": datetime(2026, 7, 9, 1, 0, 1),
+                "created_at": datetime(2026, 7, 9, 1, 0, 1),
+            },
+            {
+                "id": "agent-1",
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "sender_role": "agent",
+                "author_id": "cess@xyo.email",
+                "speaker_name": "Cess",
+                "message_type": "text",
+                "text_content": "Hola, soy soporte.",
+                "attachment_refs": [],
+                "source": "inbound_event_agent",
+                "occurred_at": datetime(2026, 7, 9, 1, 1, 0),
+                "created_at": datetime(2026, 7, 9, 1, 1, 0),
+            },
+        ],
+        metadata_rows=[
+            {
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "payload_json": {
+                    "livechat_group_id": 25,
+                    "chat_users": [
+                        {"id": "lingxi@goetm.com", "type": "agent", "name": "LingXi"},
+                        {"id": "cess@xyo.email", "type": "agent", "name": "Cess"},
+                    ],
+                },
+            }
+        ],
+        command_rows=[],
+        state_rows=[],
+        allowed_group_ids={25},
+        excluded_group_ids=set(),
+        require_assistant_participation=True,
+        bot_name="LingXi",
+    )
+
+    assert len(threads) == 1
+    assert threads[0].category == ReportCategory.CUSTOMER_MANUAL_HANDOFF
+
+
+def test_lingxi_source_uses_livechat_repository():
+    from app.reporting.daily_chat_report.repository import LingxiLiveChatApiReportReadRepository
+    from app.reporting.daily_chat_report.runner import _build_read_repository
+
+    class Settings:
+        livechat_api_base = "https://livechat.example/v3.6"
+        livechat_account_id = "account"
+        livechat_agent_access_token = "token"
+        livechat_agent_email = None
+        livechat_self_author_id_set = {"lingxi@goetm.com"}
+
+    repository = _build_read_repository(pool=object(), settings=Settings(), source="lingxi")
+
+    assert isinstance(repository, LingxiLiveChatApiReportReadRepository)
+
+
+def test_lingxi_agent_messages_after_handoff_attach_to_lingxi_thread():
+    from app.reporting.daily_chat_report.repository import _attach_followup_messages_to_lingxi_threads
+
+    rows = [
+        {
+            "id": "lingxi-1",
+            "chat_id": "chat-1",
+            "thread_id": "lingxi-thread",
+            "sender_role": "assistant",
+            "occurred_at": datetime(2026, 7, 9, 1, 0, 0),
+            "created_at": datetime(2026, 7, 9, 1, 0, 0),
+        },
+        {
+            "id": "agent-1",
+            "chat_id": "chat-1",
+            "thread_id": "human-thread",
+            "sender_role": "agent",
+            "occurred_at": datetime(2026, 7, 9, 1, 1, 0),
+            "created_at": datetime(2026, 7, 9, 1, 1, 0),
+        },
+        {
+            "id": "customer-2",
+            "chat_id": "chat-1",
+            "thread_id": "human-thread",
+            "sender_role": "customer",
+            "occurred_at": datetime(2026, 7, 9, 1, 2, 0),
+            "created_at": datetime(2026, 7, 9, 1, 2, 0),
+        },
+        {
+            "id": "lingxi-2",
+            "chat_id": "chat-1",
+            "thread_id": "later-lingxi-thread",
+            "sender_role": "assistant",
+            "occurred_at": datetime(2026, 7, 9, 2, 0, 0),
+            "created_at": datetime(2026, 7, 9, 2, 0, 0),
+        },
+        {
+            "id": "staff-reply-1",
+            "chat_id": "chat-1",
+            "thread_id": "staff-reply-thread",
+            "sender_role": "agent",
+            "source": "outbound_staff_reply",
+            "occurred_at": datetime(2026, 7, 9, 3, 0, 0),
+            "created_at": datetime(2026, 7, 9, 3, 0, 0),
+        },
+    ]
+
+    mapped = _attach_followup_messages_to_lingxi_threads(rows)
+
+    assert mapped[1]["thread_id"] == "lingxi-thread"
+    assert mapped[1]["original_thread_id"] == "human-thread"
+    assert mapped[2]["thread_id"] == "lingxi-thread"
+    assert mapped[2]["original_thread_id"] == "human-thread"
+    assert mapped[3]["thread_id"] == "lingxi-thread"
+    assert mapped[3]["original_thread_id"] == "later-lingxi-thread"
+    assert mapped[4]["thread_id"] == "lingxi-thread"
+    assert mapped[4]["original_thread_id"] == "staff-reply-thread"
+
+
+def test_lingxi_outbound_staff_reply_maps_to_real_agent_message():
+    from app.reporting.daily_chat_report.repository import _message_from_outbound_staff_reply
+
+    message = _message_from_outbound_staff_reply(
+        {
+            "id": 2571,
+            "chat_id": "chat-1",
+            "thread_id": "human-thread",
+            "message_type": "text",
+            "payload_json": {"type": "message", "text": "Estamos revisando su caso."},
+            "sent_at": datetime(2026, 7, 10, 6, 58, 5),
+            "created_at": datetime(2026, 7, 10, 6, 58, 1),
+        }
+    )
+
+    assert message["sender_role"] == "agent"
+    assert message["speaker_name"] == "真人客服"
+    assert message["text_content"] == "Estamos revisando su caso."
+
+
+def test_lingxi_livechat_api_chat_detail_maps_real_agent_messages():
+    from app.reporting.daily_chat_report.repository import _message_rows_from_livechat_chat
+
+    rows = _message_rows_from_livechat_chat(
+        {
+            "id": "TH2I7WH683",
+            "access": {"group_ids": [13]},
+            "users": [
+                {"id": "lingxi@goetm.com", "type": "agent", "name": "Lingxi", "email": "lingxi@goetm.com"},
+                {"id": "prez@xyo.email", "type": "agent", "name": "Prez", "email": "prez@xyo.email"},
+                {"id": "customer-1", "type": "customer", "name": "Kelly Sarmiento"},
+            ],
+            "threads": [
+                {
+                    "id": "TH2V7R801L",
+                    "events": [
+                        {
+                            "id": "e1",
+                            "type": "message",
+                            "author_id": "lingxi@goetm.com",
+                            "text": "Hola.",
+                            "created_at": "2026-07-08T23:38:45.047006Z",
+                        },
+                        {
+                            "id": "e2",
+                            "type": "message",
+                            "author_id": "customer-1",
+                            "text": "Buenas tardes",
+                            "created_at": "2026-07-08T23:39:00.286000Z",
+                        },
+                        {
+                            "id": "e3",
+                            "type": "message",
+                            "author_id": "prez@xyo.email",
+                            "text": "Thank you for your patience. My name is Prez.",
+                            "created_at": "2026-07-08T23:41:00.000000Z",
+                        },
+                    ],
+                }
+            ],
+        },
+        self_author_ids={"lingxi@goetm.com"},
+    )
+
+    assert [row["sender_role"] for row in rows] == ["assistant", "customer", "agent"]
+    assert rows[2]["speaker_name"] == "Prez"
+    assert rows[2]["text_content"] == "Thank you for your patience. My name is Prez."
+
+
+def test_speaker_label_does_not_duplicate_real_agent_label():
+    from app.reporting.daily_chat_report.formatting import speaker_label
+    from app.reporting.daily_chat_report.models import ReportMessage
+
+    message = ReportMessage(
+        id=1,
+        chat_id="chat-1",
+        thread_id="thread-1",
+        sender_role="agent",
+        speaker_name="真人客服",
+        message_type="text",
+        text_content="Estamos revisando su caso.",
+        attachment_refs=[],
+        source="outbound_staff_reply",
+        occurred_at=datetime(2026, 7, 10, 6, 58, 5),
+        created_at=datetime(2026, 7, 10, 6, 58, 1),
+    )
+
+    assert speaker_label(message) == "真人客服"
 
 
 def test_translation_preserves_urls_account_like_values_and_attachment_formatting():
@@ -437,7 +867,7 @@ def test_pdf_renderer_outputs_expected_report_text(tmp_path):
 
     text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output)).pages)
     assert "LingXi 正式群組對話紀錄" in text
-    assert "LingXi 客服參與過的 thread" in text
+    assert "LingXi 實際有發出訊息的 thread" in text
     assert "分類定義" in text
     assert "統計" in text
     assert "機器人獨立完成" in text
@@ -494,6 +924,56 @@ def test_lingxi_pdf_renderer_outputs_three_category_sections(tmp_path):
     assert "機器人獨立完成（0 筆）" in text
     assert "機器人判定轉真人（0 筆）" in text
     assert "客戶手動轉真人（1 筆）" in text
+
+
+def test_pdf_renderer_paginates_very_long_message_content(tmp_path):
+    from pypdf import PdfReader
+
+    from app.reporting.daily_chat_report.models import ReportCategory, ReportMessage, ReportThread
+    from app.reporting.daily_chat_report.pdf_renderer import render_daily_chat_report_pdf
+    from app.reporting.daily_chat_report.translation import NullTranslator
+
+    output = tmp_path / "long-message-report.pdf"
+    long_text = "\n".join(f"line {index} 這是一段很長的客服對話內容" for index in range(260))
+    thread = ReportThread(
+        chat_id="chat-long",
+        thread_id="thread-long",
+        customer_name="Cliente Largo",
+        group_id=28,
+        platform="ZAP69",
+        start_at=datetime(2026, 7, 10, 1, 0, 0),
+        end_at=datetime(2026, 7, 10, 1, 30, 0),
+        category=ReportCategory.CUSTOMER_MANUAL_HANDOFF,
+        category_reason="真人客服已參與對話。",
+        messages=[
+            ReportMessage(
+                id=1,
+                chat_id="chat-long",
+                thread_id="thread-long",
+                sender_role="agent",
+                speaker_name="Prez",
+                message_type="text",
+                text_content=long_text,
+                attachment_refs=[],
+                source="livechat_archive",
+                occurred_at=datetime(2026, 7, 10, 1, 0, 0),
+                created_at=datetime(2026, 7, 10, 1, 0, 0),
+            )
+        ],
+    )
+
+    render_daily_chat_report_pdf(
+        [thread],
+        start_at=datetime(2026, 7, 10, 0, 0, 0),
+        end_at=datetime(2026, 7, 11, 0, 0, 0),
+        output_path=output,
+        translator=NullTranslator(),
+    )
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output)).pages)
+    assert "Chat ID：chat-long" in text
+    assert "真人客服（Prez）" in text
+    assert "line 259" in text
 
 
 def test_audit_repository_prevents_duplicate_send():

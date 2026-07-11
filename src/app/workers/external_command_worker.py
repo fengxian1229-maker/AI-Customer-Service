@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import ast
 import json
 import logging
 import os
@@ -892,7 +893,7 @@ def _translate_append_supplement_text(payload: dict, settings: Settings | None, 
         supplement["translation_unavailable"] = True
         return
     if translated:
-        supplement["text"] = translated
+        supplement["text"] = _plain_supplement_text(translated)
 
 
 def _plain_supplement_text(value) -> str:
@@ -902,7 +903,22 @@ def _plain_supplement_text(value) -> str:
         if "text" in value:
             return _plain_supplement_text(value.get("text"))
         return ""
+    if isinstance(value, str):
+        parsed = _parse_supplement_text_structure(value)
+        if parsed is not None:
+            return _plain_supplement_text(parsed)
+        return value.strip()
     return str(value or "").strip()
+
+
+def _parse_supplement_text_structure(value: str):
+    raw = value.strip()
+    if not (raw.startswith("[") or raw.startswith("{")):
+        return None
+    try:
+        return ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        return None
 
 
 def _build_result_record(command: dict, result_type: str, result_json: dict, status: str | None = None) -> dict:

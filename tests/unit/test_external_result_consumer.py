@@ -2,8 +2,22 @@ import asyncio
 
 
 class FakeConversationRepository:
-    def __init__(self) -> None:
+    def __init__(self, conversation: dict | None = None) -> None:
         self.updated = []
+        self.conversation = conversation or {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "chat_id": "chat-1",
+            "current_thread_id": "thread-1",
+            "slot_memory": {},
+        }
+
+    async def get_or_create(self, chat_id: str, thread_id: str | None = None) -> dict:
+        return {
+            **self.conversation,
+            "chat_id": chat_id,
+            "current_thread_id": thread_id,
+            "conversation_id": self.conversation.get("conversation_id") or f"livechat:{chat_id}:{thread_id}",
+        }
 
     async def update_workflow_state(self, conversation_id: str, graph_state: dict) -> None:
         self.updated.append((conversation_id, graph_state))
@@ -64,6 +78,7 @@ class FakeTransactionRepository:
         self.conversation_repository = conversation_repository
         self.outbound_repository = outbound_repository
         self.calls = []
+        self.external_commands = []
 
     async def process_result_transactionally(
         self,
@@ -78,8 +93,12 @@ class FakeTransactionRepository:
         outbound_inserts = []
         for message in outbound_messages:
             outbound_inserts.append(await self.outbound_repository.insert_idempotent(message))
+        self.external_commands.extend(external_commands or [])
         await self.result_repository.mark_processed(result["id"])
-        return {"outbound_inserts": outbound_inserts, "external_command_inserts": []}
+        return {
+            "outbound_inserts": outbound_inserts,
+            "external_command_inserts": [{"inserted": True, "duplicate": False, "id": index + 1} for index, _ in enumerate(external_commands or [])],
+        }
 
 
 class FakeFinalReplyService:
@@ -375,6 +394,274 @@ def test_backend_query_result_renders_structured_spanish_player_not_found_withou
     assert processed[0]["status"] == "PROCESSED"
     assert "No encontramos datos de jugador" in outbound_repository.inserted[0]["payload_json"]["text"]
     assert outbound_repository.inserted[0]["command_type"] == "backend.query.result"
+
+
+def test_backend_player_not_found_first_time_counts_without_handoff():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "success",
+                    "reply_intent": "backend_player_not_found",
+                    "reply_facts": {},
+                    "reply_language": "zh-Hans",
+                    "account_or_phone": "user-1",
+                    "query": {"player_found": False},
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    assert processed[0]["status"] == "PROCESSED"
+    assert transaction_repository.external_commands == []
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "AI_ACTIVE"
+    assert graph_state["slot_memory"]["backend_not_found_count"] == 1
+    assert "转接真人客服" not in outbound_repository.inserted[0]["payload_json"]["text"]
+
+
+def test_backend_player_not_found_second_distinct_value_requests_handoff():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "success",
+                    "reply_intent": "backend_player_not_found",
+                    "reply_facts": {},
+                    "reply_language": "zh-Hans",
+                    "account_or_phone": "user-2",
+                    "query": {"player_found": False},
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository(
+        {"conversation_id": "livechat:chat-1:thread-1", "slot_memory": {"backend_not_found_count": 1, "backend_not_found_last_value_hash": "old"}}
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    assert processed[0]["status"] == "PROCESSED"
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "HANDOFF_REQUESTED"
+    assert graph_state["active_workflow"] == "human_handoff"
+    assert graph_state["workflow_stage"] == "handoff_requested"
+    assert graph_state["slot_memory"]["backend_not_found_count"] == 2
+    assert graph_state["slot_memory"]["backend_not_found_handoff_requested"] is True
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "多次查询仍未定位到账户资料，我会为您转接真人客服继续核实。"
+    assert transaction_repository.external_commands[0]["command_type"] == "human_handoff.requested"
+    assert transaction_repository.external_commands[0]["payload_json"]["reason"] == "backend_player_not_found_repeated"
+
+
+def test_backend_player_not_found_same_value_does_not_increment_or_handoff():
+    from app.workers.external_result_consumer import _stable_lookup_value_hash, process_pending_results
+
+    same_hash = _stable_lookup_value_hash("user-1")
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "success",
+                    "reply_intent": "backend_player_not_found",
+                    "reply_facts": {},
+                    "reply_language": "zh-Hans",
+                    "account_or_phone": "user-1",
+                    "query": {"player_found": False},
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository(
+        {"conversation_id": "livechat:chat-1:thread-1", "slot_memory": {"backend_not_found_count": 1, "backend_not_found_last_value_hash": same_hash}}
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["slot_memory"]["backend_not_found_count"] == 1
+    assert transaction_repository.external_commands == []
+    assert graph_state["status"] == "AI_ACTIVE"
+
+
+def test_backend_player_not_found_existing_handoff_flag_does_not_duplicate_command():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "success",
+                    "reply_intent": "backend_player_not_found",
+                    "reply_facts": {},
+                    "reply_language": "zh-Hans",
+                    "account_or_phone": "user-3",
+                    "query": {"player_found": False},
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository(
+        {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "slot_memory": {
+                "backend_not_found_count": 2,
+                "backend_not_found_last_value_hash": "old",
+                "backend_not_found_handoff_requested": True,
+            },
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    assert transaction_repository.external_commands == []
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "AI_ACTIVE"
+    assert graph_state["slot_memory"]["backend_not_found_count"] == 3
+
+
+def test_backend_query_success_found_resets_lookup_failure_counters():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "success",
+                    "reply_intent": "backend_turnover_met",
+                    "reply_facts": {},
+                    "reply_language": "zh-Hans",
+                    "query": {"player_found": True, "active_requirements_count": 0, "is_met": True},
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository(
+        {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "slot_memory": {
+                "backend_not_found_count": 1,
+                "backend_query_failed_count": 1,
+                "backend_not_found_handoff_requested": False,
+            },
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "AI_ACTIVE"
+    assert graph_state["slot_memory"]["backend_not_found_count"] == 0
+    assert graph_state["slot_memory"]["backend_query_failed_count"] == 0
+    assert graph_state["slot_memory"]["backend_not_found_handoff_requested"] is False
+    assert transaction_repository.external_commands == []
+
+
+def test_backend_query_failed_second_time_requests_handoff():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "failed",
+                    "error_code": "FAILED_BACKEND_QUERY",
+                    "reply_language": "zh-Hans",
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository(
+        {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "slot_memory": {
+                "backend_query_failed_count": 1,
+                "backend_query_failed_last_value_hash": "old",
+            },
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "HANDOFF_REQUESTED"
+    assert graph_state["active_workflow"] == "human_handoff"
+    assert graph_state["slot_memory"]["backend_query_failed_count"] == 2
+    assert outbound_repository.inserted[0]["payload_json"]["text"] == "后台查询连续暂时无法完成，我会为您转接真人客服继续核实。"
+    assert transaction_repository.external_commands[0]["command_type"] == "human_handoff.requested"
+    assert transaction_repository.external_commands[0]["payload_json"]["reason"] == "backend_query_failed_repeated"
 
 
 def test_external_result_consumer_process_result_by_id_reports_locked():

@@ -1,11 +1,13 @@
 import argparse
 import asyncio
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from app.channels.livechat.sender_client import LiveChatSenderClient
 from app.channels.telegram.sender_client import TelegramSenderClient
 from app.config.platforms import default_allowed_livechat_group_ids
 from app.core.settings import Settings
@@ -15,7 +17,9 @@ from app.reporting.daily_chat_report.pdf_renderer import render_daily_chat_repor
 from app.reporting.daily_chat_report.repository import (
     DailyChatReportAuditRepository,
     DailyChatReportReadRepository,
+    LingxiLiveChatApiReportReadRepository,
     LingxiDailyChatReportReadRepository,
+    LingxiLiveChatReportReadRepository,
 )
 from app.reporting.daily_chat_report.translation import GeminiTraditionalChineseTranslator, NullTranslator
 
@@ -29,16 +33,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-chat-id", help="Telegram chat id override.")
     parser.add_argument("--message-thread-id", type=int, help="Telegram topic id override.")
     parser.add_argument("--no-translate", action="store_true", help="Skip Gemini translation; useful for tests and dry runs.")
-    parser.add_argument("--source", choices=("lingxi", "ai_customer_service"), help="Report data source.")
+    parser.add_argument("--source", choices=("lingxi", "lingxi_db", "lingxi_archive", "ai_customer_service"), help="Report data source.")
     return parser
 
 
 async def run(argv: list[str] | None = None) -> dict:
     args = build_arg_parser().parse_args(argv)
-    settings = Settings(
-        livechat_agent_access_token="unused-for-daily-chat-report",
-        livechat_account_id="unused-for-daily-chat-report",
-    )
+    settings = build_report_settings()
     report_date = _report_date(args.date, settings.daily_chat_report_timezone)
     windows = _date_windows(report_date, settings.daily_chat_report_timezone)
     output_dir = Path(args.output_dir or settings.daily_chat_report_output_dir)
@@ -65,8 +66,9 @@ async def run(argv: list[str] | None = None) -> dict:
             state_rows=states,
             allowed_group_ids=_parse_group_ids(settings.daily_chat_report_group_ids, default_allowed_livechat_group_ids(include_test=False)),
             excluded_group_ids=_parse_group_ids(settings.daily_chat_report_excluded_group_ids, {23}),
-            require_agent_participation=source == "lingxi",
-            bot_name="LingXi" if source == "lingxi" else "Ai Jtest",
+            require_agent_participation=source == "lingxi_archive",
+            require_assistant_participation=source == "lingxi",
+            bot_name="LingXi" if source in {"lingxi", "lingxi_archive"} else "Ai Jtest",
         )
         threads = _threads_for_display_timezone(threads, settings.daily_chat_report_timezone)
         translator = NullTranslator() if args.no_translate else GeminiTraditionalChineseTranslator(settings)
@@ -93,8 +95,9 @@ async def run(argv: list[str] | None = None) -> dict:
         if args.send:
             if not target_chat_id:
                 raise ValueError("DAILY_CHAT_REPORT_TARGET_CHAT_ID or --target-chat-id is required when --send is used")
-            if not settings.telegram_bot_token:
-                raise ValueError("TELEGRAM_BOT_TOKEN is required when --send is used")
+            bot_token = _daily_chat_report_bot_token(settings)
+            if not bot_token:
+                raise ValueError("DAILY_CHAT_REPORT_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN is required when --send is used")
             audit = DailyChatReportAuditRepository(pool)
             await audit.ensure_table()
             started = await audit.start_once(
@@ -108,7 +111,7 @@ async def run(argv: list[str] | None = None) -> dict:
                 return result
             try:
                 client = TelegramSenderClient(
-                    settings.telegram_bot_token,
+                    bot_token,
                     api_base=settings.telegram_api_base,
                     timeout_seconds=settings.telegram_request_timeout_seconds,
                 )
@@ -147,8 +150,32 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def build_report_settings() -> Settings:
+    return Settings(
+        livechat_agent_access_token=os.environ.get("LIVECHAT_AGENT_ACCESS_TOKEN", "unused-for-daily-chat-report"),
+        livechat_account_id=os.environ.get("LIVECHAT_ACCOUNT_ID", "unused-for-daily-chat-report"),
+    )
+
+
+def _daily_chat_report_bot_token(settings: Settings) -> str | None:
+    return settings.daily_chat_report_telegram_bot_token or settings.telegram_bot_token
+
+
 def _build_read_repository(pool, settings: Settings, source: str):
     if source == "lingxi":
+        return LingxiLiveChatApiReportReadRepository(
+            pool,
+            livechat_client=LiveChatSenderClient(
+                settings.livechat_api_base,
+                settings.livechat_account_id,
+                settings.livechat_agent_access_token,
+                agent_email=settings.livechat_agent_email,
+            ),
+            self_author_ids=settings.livechat_self_author_id_set,
+        )
+    if source == "lingxi_db":
+        return LingxiLiveChatReportReadRepository(pool, self_author_ids=settings.livechat_self_author_id_set)
+    if source == "lingxi_archive":
         return LingxiDailyChatReportReadRepository(pool, database=settings.daily_chat_report_lingxi_database)
     if source == "ai_customer_service":
         return DailyChatReportReadRepository(pool)

@@ -142,6 +142,15 @@ class LiveChatSenderClient:
         data = await self._post_json("/agent/action/get_chat", {"chat_id": chat_id})
         return data.get("chat") or data
 
+    async def list_archives(self, filters: dict | None = None, limit: int = 20, page_id: str | None = None) -> dict:
+        body = {
+            "filters": filters or {},
+            "limit": limit,
+        }
+        if page_id:
+            body["page_id"] = page_id
+        return await self._post_json("/agent/action/list_archives", body)
+
     async def add_user_to_chat(self, chat_id: str) -> dict:
         if not self.agent_email:
             return {"skipped": True, "reason": "livechat_agent_email_not_configured"}
