@@ -40,6 +40,17 @@ PLATFORM_TOPICS = {
     "ZAP69": 36735,
 }
 
+PLATFORM_MERCHANTS = {
+    "JUE999": "juecopf1",
+    "GNA777": "gnacops1",
+    "JG7": "jgcops1",
+    "PAG99": "pagcops1",
+    "CUM777": "cumcops1",
+    "CON777": "concops1",
+    "ZAP69": "zapcops1",
+    TEST_PLATFORM: "zapcops1",
+}
+
 
 def normalize_platform(platform: Any) -> str:
     return str(platform or "").strip().upper()
@@ -51,6 +62,15 @@ def platform_for_livechat_group_id(group_id: Any) -> str | None:
     except (TypeError, ValueError):
         return None
     return LIVECHAT_GROUP_TO_PLATFORM.get(key)
+
+
+def merchant_for_platform(platform: Any) -> str | None:
+    return PLATFORM_MERCHANTS.get(normalize_platform(platform))
+
+
+def merchant_for_livechat_group_id(group_id: Any) -> str | None:
+    platform = platform_for_livechat_group_id(group_id)
+    return merchant_for_platform(platform) if platform else None
 
 
 def livechat_group_for_platform(platform: Any) -> int | None:

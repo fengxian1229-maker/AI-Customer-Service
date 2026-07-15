@@ -1,4 +1,9 @@
-from app.config.platforms import platform_for_livechat_group_id, topic_for_platform
+from app.config.platforms import (
+    merchant_for_livechat_group_id,
+    merchant_for_platform,
+    platform_for_livechat_group_id,
+    topic_for_platform,
+)
 from app.core.settings import Settings
 from app.services.telegram_target_resolver import resolve_telegram_target
 
@@ -21,6 +26,29 @@ def test_official_platform_group_and_topic_mapping():
     assert topic_for_platform("ZAP69") == 36735
     assert platform_for_livechat_group_id(23) == "TEST"
     assert topic_for_platform("TEST") is None
+
+
+def test_livechat_groups_map_to_expected_tac_merchants():
+    assert {
+        group_id: merchant_for_livechat_group_id(group_id)
+        for group_id in (2, 11, 12, 13, 23, 24, 25, 28)
+    } == {
+        2: "juecopf1",
+        11: "jgcops1",
+        12: "gnacops1",
+        13: "pagcops1",
+        23: "zapcops1",
+        24: "cumcops1",
+        25: "concops1",
+        28: "zapcops1",
+    }
+
+
+def test_merchant_lookup_normalizes_platform_and_rejects_unknown_values():
+    assert merchant_for_platform(" pag99 ") == "pagcops1"
+    assert merchant_for_platform("unknown") is None
+    assert merchant_for_livechat_group_id(999) is None
+    assert merchant_for_livechat_group_id("invalid") is None
 
 
 def test_settings_default_allowed_livechat_groups_include_official_and_test():
