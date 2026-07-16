@@ -477,7 +477,7 @@ def test_validate_sop_slot_extraction_rejects_protected_fields_and_forged_attach
     assert result["extracted_slots"]["amount"] == "500"
     assert "telegram_message_id" not in result["extracted_slots"]
     assert result["extracted_slots"].get("deposit_screenshot") is None
-    assert result["missing_slots"] == ["deposit_screenshot"]
+    assert result["missing_slots"] == ["account_or_phone", "deposit_screenshot"]
 
 
 def test_validate_sop_slot_extraction_rejects_text_values_not_visible_to_model():

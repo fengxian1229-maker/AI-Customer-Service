@@ -1,10 +1,16 @@
 from typing import Any
 import re
+from datetime import datetime, timedelta
 
 from app.graph.state import GraphState
 from app.llm.guardrails import validate_router_decision_output, validate_sop_dialogue_planner_output, validate_sop_slot_extraction_output
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
+from app.workflows.backend_dispute_escalation import (
+    clear_backend_dispute_memory,
+    evaluate_backend_dispute,
+    mark_backend_recheck_pending,
+)
 from app.services.faq_delivery import LIVECHAT_BUTTON_SOURCE, prepare_faq_context_for_delivery
 from app.services.rag import answer_from_rag_context, answer_from_static_knowledge
 from app.services.livechat_menus import BUSINESS_BUTTON_ROUTES, MENU_BY_NAV_BUTTON, detect_button_id
@@ -24,6 +30,7 @@ from app.workflows.slot_extractors import (
 )
 from app.workflows.sop_handlers import run_sop
 from app.workflows.waiting_backend_classifier import handle_waiting_backend, has_workflow_resolution_signal
+from app.services.telegram_case_followup import resolve_money_case_followup
 from app.workflows.final_reply_policy import build_reply_plan
 from app.workflows.llm_sop_dialogue_planner import build_llm_sop_dialogue_input
 from app.workflows.sop_definitions import get_sop_definition
@@ -72,6 +79,7 @@ def build_graph_state_from_event(
         "conversation_id": conversation.get("conversation_id") or f"livechat:{event.chat_id or 'unknown'}",
         "chat_id": event.chat_id or "unknown",
         "thread_id": event.thread_id,
+        "event_id": event.event_id,
         "payload_json": payload,
         "raw_user_input": raw_input,
         "rewritten_question": None,
@@ -83,6 +91,7 @@ def build_graph_state_from_event(
         "supported_languages": [],
         "language_result": None,
         "event_type": event.standard_event_type,
+        "occurred_at": event.occurred_at,
         "attachments": attachments,
         "image_analysis": image_analysis,
         "image_candidate_only": image_candidate_only,
@@ -106,6 +115,8 @@ def build_graph_state_from_event(
         "node_facts": None,
         "recent_messages": recent_messages or [],
         "previous_thread_memory": previous_thread_memory or [],
+        "telegram_money_case_candidates": list(conversation.get("telegram_money_case_candidates") or []),
+        "matched_telegram_money_case": None,
         "reply_plan": None,
         "customer_reply": None,
         "response_text_fallback": None,
@@ -268,10 +279,23 @@ def make_language_policy_node(**settings):
 def intent_router_node(state: GraphState) -> GraphState:
     if state.get("route_locked") and state.get("route"):
         return state
+    forgot_password_followup = _forgot_password_followup_route(
+        state,
+        normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower(),
+    )
+    if forgot_password_followup:
+        return forgot_password_followup
+    state = _clear_backend_dispute_on_acceptance(state)
+    backend_dispute = _recent_backend_result_dispute_route(state)
+    if backend_dispute:
+        return backend_dispute
     if state.get("route_source") in LLM_AUTHORITATIVE_SOURCES and state.get("route"):
         return state
     if (state.get("llm_router_result") or {}).get("hard_guard") == "backend_fact" and state.get("route"):
         return state
+    resolution_dispute = _recent_authoritative_result_dispute_route(state)
+    if resolution_dispute:
+        return resolution_dispute
     active = state.get("active_workflow")
     stage = state.get("workflow_stage")
     text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input"))
@@ -280,6 +304,9 @@ def intent_router_node(state: GraphState) -> GraphState:
 
     if hints["has_explicit_human_request"]:
         return _with_route(state, "explicit_human_request", "human_handoff", "Customer explicitly requested a human agent.")
+    money_case_route = _cross_thread_money_case_route(state, text)
+    if money_case_route:
+        return money_case_route
     promoted_image = _promote_pending_image_candidate_route(state, text)
     if promoted_image:
         return promoted_image
@@ -459,6 +486,25 @@ def make_intent_router_node(
     async def node(state: GraphState) -> GraphState:
         if state.get("route_locked") and state.get("route"):
             return state
+        state = _clear_backend_dispute_on_acceptance(state)
+        backend_dispute = _recent_backend_result_dispute_route(state)
+        if backend_dispute:
+            backend_dispute["llm_router_result"] = _router_result_summary(
+                "fallback",
+                mode="guarded_authoritative",
+                fallback_reason="backend_conclusion_disputed_guard",
+                fallback_to_deterministic=True,
+            )
+            return backend_dispute
+        resolution_dispute = _recent_authoritative_result_dispute_route(state)
+        if resolution_dispute:
+            resolution_dispute["llm_router_result"] = _router_result_summary(
+                "fallback",
+                mode="guarded_authoritative",
+                fallback_reason="authoritative_result_disputed_guard",
+                fallback_to_deterministic=True,
+            )
+            return resolution_dispute
         raw = normalize_text(state.get("raw_user_input"))
         if is_explicit_human_request(raw):
             next_state = _with_route(
@@ -493,6 +539,18 @@ def make_intent_router_node(
                 fallback_to_deterministic=True,
             )
             return next_state
+        money_case_route = _cross_thread_money_case_route(
+            state,
+            normalize_text(state.get("rewritten_question") or state.get("raw_user_input")),
+        )
+        if money_case_route:
+            money_case_route["llm_router_result"] = _router_result_summary(
+                "fallback",
+                mode="guarded_authoritative",
+                fallback_reason="cross_thread_money_case_guard",
+                fallback_to_deterministic=True,
+            )
+            return money_case_route
         if not llm_intent_service or not hasattr(llm_intent_service, "route"):
             return _router_fallback_state(state, "missing_provider", "guarded_authoritative", fallback_to_deterministic)
 
@@ -604,7 +662,10 @@ def rag_node(state: GraphState) -> GraphState:
     rag_result = answer_from_rag_context(state) if state.get("rag_context") is not None else answer_from_static_knowledge(state)
     fallback_text = rag_result["answer"]
     next_state = {**state}
-    if next_state.get("active_workflow"):
+    if _faq_intent_from_state(state) == "forgot_password_howto":
+        next_state["active_workflow"] = "forgot_password_howto"
+        next_state["workflow_stage"] = "awaiting_password_reset_result"
+    elif next_state.get("active_workflow"):
         next_state["active_workflow"] = None
         next_state["workflow_stage"] = None
     return {
@@ -691,6 +752,14 @@ def human_handoff_node(state: GraphState) -> GraphState:
     intent = (state.get("intent_result") or {}).get("intent")
     reason = intent or "explicit_human_request"
     handoff_text = "我会为你转接真人客服继续协助。"
+    allowed_facts = ["客户需要真人客服", "系统将提出转接请求"]
+    if intent == "forgot_password_followup_failed":
+        if state.get("attachments"):
+            handoff_text = "收到，我会为你转接真人客服。客服可以查看当前聊天中的错误截图和操作记录，请稍候。"
+            allowed_facts.append("人工客服可以查看当前聊天中的错误截图和操作记录")
+        else:
+            handoff_text = "收到，我会为你转接真人客服。客服可以查看当前聊天记录，请稍候。"
+            allowed_facts.append("人工客服可以查看当前聊天记录")
     return {
         **state,
         "status": "HANDOFF_REQUESTED",
@@ -702,7 +771,7 @@ def human_handoff_node(state: GraphState) -> GraphState:
         "node_facts": {
             "reason": reason,
             "handoff_requested": True,
-            "allowed_facts": ["客户需要真人客服", "系统将提出转接请求"],
+            "allowed_facts": allowed_facts,
         },
         "reply_plan": build_reply_plan(
             kind="human_handoff",
@@ -710,7 +779,7 @@ def human_handoff_node(state: GraphState) -> GraphState:
             must_say=["转接真人客服"],
             semantic_required_items=["human_handoff_notice"],
             must_not_say=["已接入", "马上处理", "已处理", "已到账", "已完成"],
-            allowed_facts=["客户需要真人客服", "系统将提出转接请求"],
+            allowed_facts=allowed_facts,
         ),
         "commands": [
             {
@@ -842,8 +911,14 @@ def _with_route(
     workflow_relation: str | None = None,
     preserve_active_workflow: bool | None = None,
 ) -> GraphState:
+    slot_memory = dict(state.get("slot_memory") or {})
+    conclusion = slot_memory.get("backend_conclusion")
+    conclusion_intent = conclusion.get("intent") if isinstance(conclusion, dict) else None
+    if route != "human_handoff" and conclusion_intent and str(conclusion_intent) != str(intent):
+        slot_memory = clear_backend_dispute_memory(slot_memory)
     return {
         **state,
+        "slot_memory": slot_memory,
         "intent_result": _intent_result(
             intent=intent,
             route=route,
@@ -858,6 +933,179 @@ def _with_route(
         ),
         "route": route,
     }
+
+
+def _cross_thread_money_case_route(state: GraphState, text: str) -> GraphState | None:
+    candidates = list(state.get("telegram_money_case_candidates") or [])
+    if not candidates:
+        return None
+    inherited_root = (state.get("slot_memory") or {}).get("telegram_message_id")
+    resolution = resolve_money_case_followup(candidates, text, inherited_root)
+    if resolution["status"] == "none":
+        return None
+    if resolution["status"] == "ambiguous":
+        language = str(state.get("reply_language") or state.get("conversation_language") or "es")
+        fallback = _money_case_ambiguity_text(language)
+        routed = _with_route(
+            state,
+            "money_case_followup_ambiguous",
+            "final_reply",
+            "Multiple open money cases require an exact transaction reference.",
+            confidence=0.99,
+        )
+        return {
+            **routed,
+            "route_locked": True,
+            "response_text": fallback,
+            "response_text_fallback": fallback,
+            "node_reply_template": "clarification",
+            "node_facts": {"fallback_text": fallback, "allowed_facts": [fallback]},
+            "reply_plan": build_reply_plan(
+                kind="clarification",
+                fallback_text=fallback,
+                allowed_facts=[fallback],
+                must_not_say=["Telegram", "TG", "case ID"],
+            ),
+            "commands": [],
+        }
+    case = resolution["case"]
+    customer_confirmed = resolution.get("follow_up_kind") == "customer_confirmed_resolved"
+    routed = _with_route(
+        state,
+        str(case["intent"]),
+        "sop",
+        (
+            "Customer confirmed a matched Telegram money case is resolved in another thread."
+            if customer_confirmed
+            else "Customer is following up on a matched Telegram money case from another thread."
+        ),
+        confidence=0.99,
+        sop_name=str(case["intent"]),
+        workflow_relation="current_workflow_resolution" if customer_confirmed else "current_sop_supplement",
+        preserve_active_workflow=True,
+    )
+    return {
+        **routed,
+        "route_locked": True,
+        "active_workflow": case["intent"],
+        "workflow_stage": "waiting_backend",
+        "slot_memory": {
+            **(state.get("slot_memory") or {}),
+            "telegram_internal_case_id": int(case["id"]),
+        },
+        "matched_telegram_money_case": case,
+    }
+
+
+def _money_case_ambiguity_text(language: str) -> str:
+    normalized = language.lower()
+    if normalized.startswith("zh"):
+        return "我查到多笔仍在跟进的交易，请提供这次要查询的订单号或交易编号。"
+    if normalized.startswith("en"):
+        return "I found multiple transactions still being followed up. Please provide the order or transaction ID."
+    if normalized.startswith("tl"):
+        return "May ilang transaksyong kasalukuyang sinusubaybayan. Pakibigay ang order o transaction ID."
+    return "Encontré varias transacciones en seguimiento. Indica el número de orden o de transacción."
+
+
+def _recent_backend_result_dispute_route(state: GraphState) -> GraphState | None:
+    evaluation = evaluate_backend_dispute(state)
+    if not evaluation:
+        return None
+    next_state = evaluation["state"]
+    conclusion = next_state["slot_memory"]["backend_conclusion"]
+    if evaluation["should_handoff"]:
+        return _with_route(
+            next_state,
+            "backend_conclusion_disputed_repeated",
+            "human_handoff",
+            "Customer disputed the same backend conclusion twice.",
+            confidence=0.99,
+            workflow_relation="human_escalation",
+            preserve_active_workflow=False,
+        )
+    if not evaluation.get("waiting_for_recheck"):
+        next_state = {
+            **next_state,
+            "slot_memory": mark_backend_recheck_pending(next_state["slot_memory"]),
+        }
+    intent = str(conclusion.get("intent") or "withdrawal_blocked_or_rollover")
+    return _with_route(
+        next_state,
+        intent,
+        "sop",
+        (
+            "Customer dispute recorded while the backend recheck is pending."
+            if evaluation.get("waiting_for_recheck")
+            else "Customer disputed the latest backend conclusion once; recheck before escalation."
+        ),
+        confidence=0.95,
+        sop_name=intent,
+        workflow_relation="current_sop_followup",
+        preserve_active_workflow=True,
+    )
+
+
+def _clear_backend_dispute_on_acceptance(state: GraphState) -> GraphState:
+    if not _is_backend_conclusion_acceptance(state):
+        return state
+    return {**state, "slot_memory": clear_backend_dispute_memory(state.get("slot_memory") or {})}
+
+
+def _is_backend_conclusion_acceptance(state: GraphState) -> bool:
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    normalized = re.sub(r"[,，.!?。！？…\s]+", " ", text).strip()
+    return bool(re.search(r"\b(gracias|thanks|thank you|listo|vale|entendido)\b|谢谢|謝謝|明白|解决了|解決了", normalized, re.I))
+
+
+def _recent_authoritative_result_dispute_route(state: GraphState) -> GraphState | None:
+    slot_memory = state.get("slot_memory") or {}
+    if slot_memory.get("customer_confirmed_resolved") is True:
+        return None
+    resolved_at = _parse_graph_datetime(slot_memory.get("telegram_case_resolved_at"))
+    occurred_at = _parse_graph_datetime(state.get("occurred_at"))
+    if resolved_at is None or occurred_at is None:
+        return None
+    if occurred_at < resolved_at or occurred_at - resolved_at > timedelta(hours=24):
+        return None
+    text = normalize_text(state.get("rewritten_question") or state.get("raw_user_input")).lower()
+    if not _is_authoritative_result_dispute_text(text):
+        return None
+    return _with_route(
+        state,
+        "authoritative_result_disputed",
+        "human_handoff",
+        "Customer disputes a recent authoritative Telegram case resolution.",
+        confidence=0.99,
+        workflow_relation="human_escalation",
+        preserve_active_workflow=False,
+    )
+
+
+def _is_authoritative_result_dispute_text(text: str) -> bool:
+    return bool(
+        text
+        and re.search(
+            r"(仍未收到|还是没收到|還是沒收到|没有到账|沒有到賬|未到账|未到賬|余额.*没|餘額.*沒|"
+            r"still\s+(?:have\s+)?not\s+(?:received|arrived|credited)|haven['’]?t\s+received|"
+            r"didn['’]?t\s+(?:arrive|receive)|not\s+(?:received|credited)|"
+            r"no\s+me\s+(?:h?a\s+)?llega(?:do|fo)|no\s+me\s+lleg[oó]|no\s+me\s+llega|no\s+he\s+recibido|"
+            r"todav[ií]a\s+no|a[uú]n\s+no|no\s+(?:se\s+)?acredit[oó]|no\s+aparece)",
+            text,
+            re.I,
+        )
+    )
+
+
+def _parse_graph_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 def _image_candidate_only_route(state: GraphState) -> GraphState | None:
@@ -1025,6 +1273,45 @@ def _confirms_image_candidate(text: str, kind: str) -> bool:
 
 def _has_sop_key_material(text: str) -> bool:
     return bool(extract_identity(text) or extract_order_id(text) or extract_amount(text))
+
+
+def _forgot_password_followup_route(state: GraphState, text: str) -> GraphState | None:
+    if state.get("active_workflow") != "forgot_password_howto":
+        return None
+    if state.get("workflow_stage") != "awaiting_password_reset_result":
+        return None
+    has_screenshot = state.get("event_type") == "FILE_RECEIVED" and bool(state.get("attachments"))
+    reset_still_failed = _contains_any(
+        text,
+        (
+            "还是不行",
+            "還是不行",
+            "仍然不行",
+            "仍无法登录",
+            "仍無法登入",
+            "重置失败",
+            "重設失敗",
+            "报错",
+            "報錯",
+            "can't log in",
+            "still doesn't work",
+            "still failed",
+            "no puedo entrar",
+            "sigue sin funcionar",
+            "error",
+        ),
+    )
+    if not (has_screenshot or reset_still_failed):
+        return None
+    return _with_route(
+        state,
+        "forgot_password_followup_failed",
+        "human_handoff",
+        "Customer still cannot access the account after the forgot-password tutorial.",
+        confidence=0.98,
+        workflow_relation="human_escalation",
+        preserve_active_workflow=False,
+    )
 
 
 def _auto_handoff_route(state: GraphState, lower: str, hints: dict[str, Any]) -> GraphState | None:
@@ -1811,6 +2098,8 @@ def _sop_dialogue_low_confidence(result: dict, min_confidence: float) -> bool:
     updates = result.get("slot_updates") or {}
     confidence = result.get("slot_confidence") or {}
     for key, value in updates.items():
+        if key in {"identity_source", "account_or_phone_source", "phone_source"}:
+            continue
         if value and float(confidence.get(key) or 0.0) < float(min_confidence):
             return True
     return False

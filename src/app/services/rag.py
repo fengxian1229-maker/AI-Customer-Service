@@ -54,7 +54,7 @@ DEFAULT_KNOWLEDGE_DOCUMENTS = [
         "tenant_id": "default",
         "kb_scope": "default",
         "title": "忘记密码说明",
-        "content": "忘记密码时，请在登录页面点击忘记密码并按页面提示完成验证和重设。",
+        "content": "多数情况下，用户名是注册手机号。请在登录页面点击忘记密码并按提示完成验证和重设。如果操作后仍无法登录，可以发送错误截图，我会为您转接人工客服进一步处理。",
         "keywords": ["forgot password", "olvidé mi contraseña", "olvide mi contraseña", "忘记密码"],
         "language": "multi",
         "priority": 14,

@@ -9,7 +9,7 @@ def assert_deposit_missing_intro_commands(commands):
     ]
     assert commands[0]["block_index"] == 0
     assert commands[0]["payload"]["asset_key"] == "deposit_payment_success_example"
-    assert commands[0]["payload"]["asset_ref"] == "legacy/bot66tornado/assets/examples/deposit-payment-success-onepay.jpg"
+    assert commands[0]["payload"]["asset_ref"] == "data/assets/customer-service/examples/deposit-payment-success-onepay.jpg"
     assert commands[1]["block_index"] == 1
     assert commands[1]["payload"]["final_reply_target"] is True
     assert "存款未到账" in commands[1]["payload"]["text"] or "depósito" in commands[1]["payload"]["text"]
@@ -276,6 +276,7 @@ def test_withdrawal_blocked_or_rollover_generates_waiting_reply_and_backend_quer
     state = run_sop(
         {
             "intent_result": {"intent": "withdrawal_blocked_or_rollover"},
+            "raw_user_input": "mi usuario es andy123",
             "rewritten_question": "mi usuario es andy123",
             "slot_memory": {},
             "attachments": [],
@@ -338,6 +339,19 @@ def test_withdrawal_blocked_or_rollover_has_sop_definition_for_account_lookup():
     assert definition.required_slots == ("account_or_phone",)
     assert compute_missing_slots("withdrawal_blocked_or_rollover", {}) == ["account_or_phone"]
     assert compute_missing_slots("withdrawal_blocked_or_rollover", {"account_or_phone": "andy123"}) == []
+
+
+def test_image_account_tail_does_not_satisfy_money_missing_identity_slot():
+    from app.workflows.llm_sop_dialogue_planner import compute_missing_slots
+
+    assert compute_missing_slots(
+        "withdrawal_missing",
+        {
+            "account_or_phone": "terminado en 7964",
+            "identity_source": "llm_or_image",
+            "withdrawal_screenshot": "https://cdn.example/withdrawal.png",
+        },
+    ) == ["phone"]
 
 
 def test_pending_reply_lookup_asks_identity_when_missing():
@@ -425,6 +439,47 @@ def test_llm_username_and_phone_preserves_username_account_slot():
 
     assert state["slot_memory"]["account_or_phone"] == "frank"
     assert state["slot_memory"]["phone"] == "12335"
+
+
+def test_llm_image_identity_hint_does_not_complete_withdrawal_missing_identity():
+    state = run_sop(
+        {
+            "intent_result": {"intent": "withdrawal_missing"},
+            "raw_user_input": "",
+            "rewritten_question": "La captura muestra Nequi terminado en 7964.",
+            "slot_memory": {},
+            "attachments": [
+                {
+                    "url": "https://cdn.example/withdrawal.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "withdrawal",
+                }
+            ],
+            "llm_sop_dialogue_plan": {
+                "status": "accepted",
+                "intent_relation": "current_sop_supplement",
+                "slot_updates": {
+                    "account_or_phone": "terminado en 7964",
+                    "payment_channel": "Nequi",
+                    "receipt_screenshot": "https://cdn.example/withdrawal.png",
+                },
+                "slot_confidence": {
+                    "account_or_phone": 0.9,
+                    "payment_channel": 0.95,
+                    "receipt_screenshot": 0.96,
+                },
+                "reason": "image-derived account tail and screenshot",
+            },
+        }
+    )
+
+    assert "account_or_phone" not in state["slot_memory"]
+    assert state["slot_memory"]["image_identity_hint"] == "terminado en 7964"
+    assert state["slot_memory"]["payment_channel"] == "Nequi"
+    assert state["slot_memory"]["withdrawal_screenshot"] == "https://cdn.example/withdrawal.png"
+    assert state["missing_slots"] == ["phone"]
+    assert state["commands"] == []
+    assert state["node_reply_template"] == "sop_missing_slots"
 
 
 def test_unverified_image_attachment_is_accepted_as_receipt_screenshot():
@@ -670,6 +725,7 @@ def test_llm_unknown_and_protected_slot_keys_are_dropped():
     state = run_sop(
         {
             "intent_result": {"intent": "deposit_missing"},
+            "raw_user_input": "电话 13800138000",
             "slot_memory": {"telegram_message_id": 123},
             "llm_sop_dialogue_plan": {
                 "status": "accepted",

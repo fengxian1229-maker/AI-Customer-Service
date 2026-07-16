@@ -1,5 +1,17 @@
 import asyncio
 
+import pytest
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["todavía no ha llegado", "仍未收到", "ยังไม่ได้", "belum masuk"],
+)
+def test_effective_followup_kind_uses_shared_multilingual_dispute_detection(text):
+    from app.workers.external_command_worker import effective_follow_up_kind
+
+    assert effective_follow_up_kind("completed_by_staff", text) == "completion_dispute"
+
 
 def test_external_command_worker_cli_accepts_once_limit_and_dry_run():
     from app.workers.external_command_worker import build_arg_parser
@@ -483,6 +495,271 @@ def test_external_command_worker_real_telegram_sends_case_and_emits_result():
     assert result_repository.inserted[0]["result_json"]["telegram_message_id"] == 555
 
 
+def test_external_command_worker_real_followup_reserves_sends_and_records():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    command = {
+        "id": 61,
+        "tenant_id": "default",
+        "conversation_id": "livechat:chat-1:thread-new",
+        "chat_id": "chat-1",
+        "thread_id": "thread-new",
+        "inbound_event_id": 161,
+        "command_type": "telegram.remind_case",
+        "payload_json": {
+            "telegram_case_id": 8,
+            "intent": "withdrawal_missing",
+            "follow_up_kind": "pending_follow_up",
+            "previous_status": "under_review",
+            "raw_user_input": "还没有收到 TX123",
+            "supplement": {"attachment_urls": []},
+        },
+    }
+
+    class CommandRepository:
+        def __init__(self):
+            self.sent = []
+
+        async def lease_pending(self, **kwargs):
+            return [command]
+
+        async def mark_sent(self, command_id):
+            self.sent.append(command_id)
+
+    class ResultRepository:
+        def __init__(self):
+            self.inserted = []
+
+        async def insert_idempotent(self, row):
+            self.inserted.append(row)
+            return {"inserted": True, "id": 71}
+
+    class CaseRepository:
+        def __init__(self):
+            self.reserved = []
+            self.sending = []
+            self.sent = []
+
+        async def reserve_followup(self, **kwargs):
+            self.reserved.append(kwargs)
+            return {
+                "id": 81,
+                "follow_up_number": 2,
+                "follow_up_kind": "pending_follow_up",
+                "previous_status": "under_review",
+                "status": "reserved",
+                "duplicate": False,
+                "case": {
+                    "id": 8,
+                    "intent": "withdrawal_missing",
+                    "status": "under_review",
+                    "telegram_chat_id": "-1001",
+                    "telegram_message_thread_id": 12,
+                    "root_message_id": 123,
+                },
+            }
+
+        async def mark_followup_sending(self, followup_id):
+            self.sending.append(followup_id)
+
+        async def record_followup_sent(self, *args, **kwargs):
+            self.sent.append((args, kwargs))
+
+    class Sender:
+        def __init__(self):
+            self.followups = []
+
+        def send_case_followup(self, followup):
+            self.followups.append(followup)
+            return {"ok": True, "message_id": 456, "attachment_results": []}
+
+    class Translator:
+        def translate_followup(self, source_text, intent):
+            return "The customer reports that withdrawal TX123 is still not received."
+
+    command_repository = CommandRepository()
+    result_repository = ResultRepository()
+    case_repository = CaseRepository()
+    sender = Sender()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        telegram_sop_enabled=True,
+        telegram_bot_token="secret",
+        telegram_test_group="-100test",
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            command_repository,
+            result_repository=result_repository,
+            telegram_case_repository=case_repository,
+            dry_run=False,
+            execute_telegram=True,
+            emit_result=True,
+            settings=settings,
+            telegram_client_factory=lambda _settings: sender,
+            telegram_followup_translator=Translator(),
+        )
+    )
+
+    assert result[0]["status"] == "SENT"
+    assert case_repository.reserved[0]["source_thread_id"] == "thread-new"
+    assert case_repository.sending == [81]
+    assert sender.followups[0]["root_message_id"] == 123
+    assert case_repository.sent[0][0][1] == 456
+    assert command_repository.sent == [61]
+    assert result_repository.inserted[0]["result_type"] == "telegram.case.reminded"
+    assert result_repository.inserted[0]["status"] == "PROCESSED"
+
+
+def test_external_command_worker_duplicate_sent_followup_does_not_send_again():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    command = {
+        "id": 62,
+        "conversation_id": "livechat:chat-1:thread-new",
+        "chat_id": "chat-1",
+        "thread_id": "thread-new",
+        "command_type": "telegram.remind_case",
+        "payload_json": {
+            "telegram_case_id": 8,
+            "follow_up_kind": "pending_follow_up",
+            "previous_status": "under_review",
+            "raw_user_input": "still not received",
+        },
+    }
+
+    class CommandRepository:
+        def __init__(self):
+            self.sent = []
+
+        async def lease_pending(self, **kwargs):
+            return [command]
+
+        async def mark_sent(self, command_id):
+            self.sent.append(command_id)
+
+    class CaseRepository:
+        async def reserve_followup(self, **kwargs):
+            return {
+                "id": 81,
+                "status": "sent",
+                "duplicate": True,
+                "case": {"id": 8, "intent": "withdrawal_missing", "status": "under_review"},
+            }
+
+    class Sender:
+        def send_case_followup(self, followup):
+            raise AssertionError("duplicate follow-up must not call Telegram")
+
+    repository = CommandRepository()
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            telegram_case_repository=CaseRepository(),
+            dry_run=False,
+            execute_telegram=True,
+            settings=Settings(
+                livechat_agent_access_token="token",
+                livechat_account_id="account",
+                telegram_sop_enabled=True,
+                telegram_bot_token="secret",
+                telegram_test_group="-100test",
+            ),
+            telegram_client_factory=lambda _settings: Sender(),
+        )
+    )
+
+    assert result[0]["status"] == "DUPLICATE_SENT"
+    assert repository.sent == [62]
+
+
+def test_external_command_worker_followup_timeout_becomes_delivery_uncertain_without_retry():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    command = {
+        "id": 63,
+        "conversation_id": "livechat:chat-1:thread-new",
+        "chat_id": "chat-1",
+        "thread_id": "thread-new",
+        "command_type": "telegram.remind_case",
+        "payload_json": {
+            "telegram_case_id": 8,
+            "intent": "deposit_missing",
+            "follow_up_kind": "pending_follow_up",
+            "previous_status": "under_review",
+            "raw_user_input": "deposit still not credited",
+        },
+    }
+
+    class CommandRepository:
+        def __init__(self):
+            self.statuses = []
+
+        async def lease_pending(self, **kwargs):
+            return [command]
+
+        async def mark_status(self, command_id, status, error=None):
+            self.statuses.append((command_id, status, error))
+
+    class CaseRepository:
+        def __init__(self):
+            self.uncertain = []
+
+        async def reserve_followup(self, **kwargs):
+            return {
+                "id": 82,
+                "follow_up_number": 2,
+                "status": "reserved",
+                "duplicate": False,
+                "case": {
+                    "id": 8,
+                    "intent": "deposit_missing",
+                    "status": "under_review",
+                    "telegram_chat_id": "-1001",
+                    "telegram_message_thread_id": None,
+                    "root_message_id": 123,
+                },
+            }
+
+        async def mark_followup_sending(self, followup_id):
+            pass
+
+        async def mark_followup_delivery_uncertain(self, followup_id, error):
+            self.uncertain.append((followup_id, error))
+
+    class Sender:
+        def send_case_followup(self, followup):
+            raise TimeoutError("response timed out after dispatch")
+
+    repository = CommandRepository()
+    case_repository = CaseRepository()
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            telegram_case_repository=case_repository,
+            dry_run=False,
+            execute_telegram=True,
+            settings=Settings(
+                livechat_agent_access_token="token",
+                livechat_account_id="account",
+                telegram_sop_enabled=True,
+                telegram_bot_token="secret",
+                telegram_test_group="-100test",
+            ),
+            telegram_client_factory=lambda _settings: Sender(),
+        )
+    )
+
+    assert result[0]["status"] == "FAILED_DELIVERY_UNCERTAIN"
+    assert case_repository.uncertain == [(82, "response timed out after dispatch")]
+    assert repository.statuses[0][1] == "FAILED_DELIVERY_UNCERTAIN"
+
+
 def test_external_command_worker_real_telegram_skips_when_conversation_human_active():
     from app.core.settings import Settings
     from app.workers.external_command_worker import process_pending_commands
@@ -546,7 +823,51 @@ def test_external_command_worker_real_telegram_skips_when_conversation_human_act
     )
 
     assert repository.statuses == [
-        (41, "SKIPPED_HUMAN_ACTIVE", "conversation is HUMAN_ACTIVE; telegram command skipped")
+        (41, "SKIPPED_HUMAN_ACTIVE", "conversation is HUMAN_ACTIVE; external command skipped")
+    ]
+    assert result[0]["status"] == "SKIPPED_HUMAN_ACTIVE"
+
+
+def test_external_command_worker_skips_backend_command_when_conversation_human_active():
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.statuses = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 42,
+                    "conversation_id": "livechat:chat-1:thread-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "command_type": "backend.query",
+                    "payload_json": {"account_or_phone": "3045983609"},
+                }
+            ]
+
+        async def mark_status(self, command_id: int, status: str, error: str | None = None) -> None:
+            self.statuses.append((command_id, status, error))
+
+    class FakeConversationRepository:
+        async def get_by_conversation_id(self, conversation_id: str):
+            return {"conversation_id": conversation_id, "status": "HUMAN_ACTIVE"}
+
+    repository = FakeCommandRepository()
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            conversation_repository=FakeConversationRepository(),
+            dry_run=False,
+            execute_backend=True,
+            settings=None,
+            worker_id="worker-a",
+        )
+    )
+
+    assert repository.statuses == [
+        (42, "SKIPPED_HUMAN_ACTIVE", "conversation is HUMAN_ACTIVE; external command skipped")
     ]
     assert result[0]["status"] == "SKIPPED_HUMAN_ACTIVE"
 
@@ -1094,8 +1415,11 @@ def test_external_command_worker_real_handoff_sent_ack_allows_transfer():
     class FakeCommandRepository:
         def __init__(self) -> None:
             self.done = []
+            self.completed = False
 
         async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            if self.completed:
+                return []
             return [
                 {
                     "id": 14,
@@ -1111,11 +1435,20 @@ def test_external_command_worker_real_handoff_sent_ack_allows_transfer():
 
         async def mark_sent(self, command_id: int) -> None:
             self.done.append(command_id)
+            self.completed = True
 
     class FakeOutboundRepository:
         async def fetch_handoff_ack_by_event(self, conversation_id: str, inbound_event_id: int):
             assert (conversation_id, inbound_event_id) == ("livechat:chat-1", 24)
             return {"id": 32, "status": "SENT"}
+
+    class FakeResultRepository:
+        def __init__(self) -> None:
+            self.inserted = []
+
+        async def insert_idempotent(self, result: dict) -> dict:
+            self.inserted.append(result)
+            return {"inserted": True, "duplicate": False, "id": 101}
 
     class FakeConversationRepository:
         def __init__(self) -> None:
@@ -1133,6 +1466,7 @@ def test_external_command_worker_real_handoff_sent_ack_allows_transfer():
             return {"ok": True}
 
     repository = FakeCommandRepository()
+    result_repository = FakeResultRepository()
     conversation_repository = FakeConversationRepository()
     sender_client = SenderClient()
     settings = Settings(
@@ -1145,9 +1479,11 @@ def test_external_command_worker_real_handoff_sent_ack_allows_transfer():
     result = asyncio.run(
         process_pending_commands(
             repository,
+            result_repository=result_repository,
             conversation_repository=conversation_repository,
             outbound_repository=FakeOutboundRepository(),
             dry_run=False,
+            emit_result=True,
             execute_human_handoff=True,
             settings=settings,
             sender_client_factory=lambda settings: sender_client,
@@ -1159,7 +1495,101 @@ def test_external_command_worker_real_handoff_sent_ack_allows_transfer():
     assert repository.done == [14]
     assert result[0]["status"] == "SENT"
     assert result[0]["transfer_result"]["target_group_id"] == 28
+    assert result_repository.inserted[0]["result_type"] == "human_handoff.transfer_chat.result"
+    assert result_repository.inserted[0]["result_json"]["status"] == "TRANSFERRED"
+    assert result_repository.inserted[0]["status"] == "PROCESSED"
     assert conversation_repository.updated[0][1]["status"] == "HUMAN_ACTIVE"
+    assert conversation_repository.updated[0][1]["workflow_stage"] == "transferred"
+
+    repeated = asyncio.run(
+        process_pending_commands(
+            repository,
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=FakeOutboundRepository(),
+            dry_run=False,
+            emit_result=True,
+            execute_human_handoff=True,
+            settings=settings,
+            sender_client_factory=lambda settings: sender_client,
+            worker_id="worker-a-repeat",
+        )
+    )
+    assert repeated == []
+    assert sender_client.calls == [("chat-1", 28, True, True)]
+
+
+def test_external_command_worker_idle_handoff_with_direct_notice_reaches_transfer_without_inbound_event():
+    from app.core.settings import Settings
+    from app.workers.external_command_worker import process_pending_commands
+
+    class FakeCommandRepository:
+        def __init__(self) -> None:
+            self.done = []
+            self.processing_failures = []
+
+        async def lease_pending(self, limit: int, worker_id: str, lease_seconds: int):
+            return [
+                {
+                    "id": 17,
+                    "tenant_id": "default",
+                    "conversation_id": "livechat:chat-1",
+                    "chat_id": "chat-1",
+                    "thread_id": "thread-1",
+                    "inbound_event_id": None,
+                    "command_type": "human_handoff.requested",
+                    "payload_json": {
+                        "reason": "ai_service_failure",
+                        "source": "livechat_idle_timer",
+                        "failure_reason": "timeout",
+                        "handoff_ack_mode": "direct_notice",
+                    },
+                }
+            ]
+
+        async def mark_sent(self, command_id: int) -> None:
+            self.done.append(command_id)
+
+        async def mark_processing_failed(self, command_id: int, error: str, max_retries: int = 3) -> None:
+            self.processing_failures.append((command_id, error, max_retries))
+
+    class FakeOutboundRepository:
+        async def fetch_handoff_ack_by_event(self, conversation_id: str, inbound_event_id: int):
+            raise AssertionError("direct idle notice must bypass inbound-event ack lookup")
+
+    class SenderClient:
+        def __init__(self) -> None:
+            self.transfers = []
+
+        async def transfer_chat_to_group(self, chat_id, group_id, **kwargs):
+            self.transfers.append((chat_id, group_id))
+            return {"ok": True}
+
+    repository = FakeCommandRepository()
+    sender_client = SenderClient()
+    settings = Settings(
+        livechat_agent_access_token="token",
+        livechat_account_id="account",
+        livechat_handoff_enabled=True,
+        livechat_handoff_target_group_id=23,
+    )
+
+    result = asyncio.run(
+        process_pending_commands(
+            repository,
+            outbound_repository=FakeOutboundRepository(),
+            dry_run=False,
+            execute_human_handoff=True,
+            settings=settings,
+            sender_client_factory=lambda settings: sender_client,
+            worker_id="worker-a",
+        )
+    )
+
+    assert sender_client.transfers == [("chat-1", 23)]
+    assert repository.done == [17]
+    assert repository.processing_failures == []
+    assert result[0]["status"] == "SENT"
 
 
 def test_external_command_worker_real_handoff_fails_when_ack_is_missing():
@@ -1191,11 +1621,23 @@ def test_external_command_worker_real_handoff_fails_when_ack_is_missing():
         async def fetch_handoff_ack_by_event(self, conversation_id: str, inbound_event_id: int):
             return None
 
+    class FakeConversationRepository:
+        def __init__(self) -> None:
+            self.failures = []
+
+        async def get_by_conversation_id(self, conversation_id: str):
+            return {"conversation_id": conversation_id, "status": "HANDOFF_REQUESTED"}
+
+        async def record_handoff_failure(self, conversation_id: str, failure: dict) -> bool:
+            self.failures.append((conversation_id, failure))
+            return True
+
     class SenderClient:
         async def transfer_chat_to_group(self, *args, **kwargs):
             raise AssertionError("transfer must not run without a handoff ack outbound")
 
     repository = FakeCommandRepository()
+    conversation_repository = FakeConversationRepository()
     settings = Settings(
         livechat_agent_access_token="token",
         livechat_account_id="account",
@@ -1206,6 +1648,7 @@ def test_external_command_worker_real_handoff_fails_when_ack_is_missing():
     result = asyncio.run(
         process_pending_commands(
             repository,
+            conversation_repository=conversation_repository,
             outbound_repository=FakeOutboundRepository(),
             dry_run=False,
             execute_human_handoff=True,
@@ -1217,6 +1660,11 @@ def test_external_command_worker_real_handoff_fails_when_ack_is_missing():
 
     assert repository.statuses == [(15, "FAILED_DEPENDENCY", "handoff ack outbound message is missing")]
     assert result[0]["status"] == "FAILED_DEPENDENCY"
+    assert conversation_repository.failures[0][0] == "livechat:chat-1"
+    assert conversation_repository.failures[0][1]["stage"] == "handoff_ack"
+    assert conversation_repository.failures[0][1]["command_id"] == 15
+    assert conversation_repository.failures[0][1]["outbound_message_id"] is None
+    assert conversation_repository.failures[0][1]["status"] == "FAILED_DEPENDENCY"
 
 
 def test_external_command_worker_real_handoff_rejects_invalid_payload_group_id():

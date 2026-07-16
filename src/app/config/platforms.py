@@ -56,12 +56,24 @@ def normalize_platform(platform: Any) -> str:
     return str(platform or "").strip().upper()
 
 
-def platform_for_livechat_group_id(group_id: Any) -> str | None:
-    try:
-        key = int(group_id)
-    except (TypeError, ValueError):
+def normalize_livechat_group_id(value: Any) -> int | None:
+    if isinstance(value, bool):
         return None
-    return LIVECHAT_GROUP_TO_PLATFORM.get(key)
+    if isinstance(value, int):
+        group_id = value
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped.isdecimal():
+            return None
+        group_id = int(stripped)
+    else:
+        return None
+    return group_id if group_id > 0 else None
+
+
+def platform_for_livechat_group_id(group_id: Any) -> str | None:
+    key = normalize_livechat_group_id(group_id)
+    return LIVECHAT_GROUP_TO_PLATFORM.get(key) if key is not None else None
 
 
 def merchant_for_platform(platform: Any) -> str | None:

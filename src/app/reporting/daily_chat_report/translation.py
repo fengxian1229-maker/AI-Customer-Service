@@ -2,6 +2,7 @@ import json
 from typing import Protocol
 
 from app.llm.gemini_model import build_gemini_chat_model
+from app.reporting.daily_chat_report.content_blocks import visible_text
 
 
 class Translator(Protocol):
@@ -31,7 +32,8 @@ class GeminiTraditionalChineseTranslator:
             f"{text}"
         )
         response = self._model.invoke(prompt)
-        return str(getattr(response, "content", response) or text)
+        translated = visible_text(getattr(response, "content", response))
+        return translated or text
 
 
 def translate_batch_json(translator: Translator, values: list[str]) -> list[str]:

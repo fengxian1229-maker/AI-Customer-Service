@@ -24,14 +24,14 @@
         "caption": "",
         "position": "before",
         "platform_asset_map": {
-          "JUE999": "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg",
-          "GNA777": "legacy/bot66tornado/assets/tutorials/GNA777/deposit.jpg",
-          "JG7": "legacy/bot66tornado/assets/tutorials/JG7/deposit.jpg",
-          "PAG99": "legacy/bot66tornado/assets/tutorials/PAG99/deposit.jpg",
-          "CUM777": "legacy/bot66tornado/assets/tutorials/CUM777/deposit.jpg",
-          "CON777": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg",
-          "ZAP69": "legacy/bot66tornado/assets/tutorials/ZAP69/deposit.jpg",
-          "default": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg"
+          "JUE999": "data/assets/customer-service/tutorials/JUE999/deposit.jpg",
+          "GNA777": "data/assets/customer-service/tutorials/GNA777/deposit.jpg",
+          "JG7": "data/assets/customer-service/tutorials/JG7/deposit.jpg",
+          "PAG99": "data/assets/customer-service/tutorials/PAG99/deposit.jpg",
+          "CUM777": "data/assets/customer-service/tutorials/CUM777/deposit.jpg",
+          "CON777": "data/assets/customer-service/tutorials/CON777/deposit.jpg",
+          "ZAP69": "data/assets/customer-service/tutorials/ZAP69/deposit.jpg",
+          "default": "data/assets/customer-service/tutorials/CON777/deposit.jpg"
         }
       },
       {
@@ -76,14 +76,14 @@
         "caption": "",
         "position": "before",
         "platform_asset_map": {
-          "JUE999": "legacy/bot66tornado/assets/tutorials/JUE999/withdrawal.jpg",
-          "GNA777": "legacy/bot66tornado/assets/tutorials/GNA777/withdrawal.jpg",
-          "JG7": "legacy/bot66tornado/assets/tutorials/JG7/withdrawal.jpg",
-          "PAG99": "legacy/bot66tornado/assets/tutorials/PAG99/withdrawal.jpg",
-          "CUM777": "legacy/bot66tornado/assets/tutorials/CUM777/withdrawal.jpg",
-          "CON777": "legacy/bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
-          "ZAP69": "legacy/bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg",
-          "default": "legacy/bot66tornado/assets/tutorials/CON777/withdrawal.jpg"
+          "JUE999": "data/assets/customer-service/tutorials/JUE999/withdrawal.jpg",
+          "GNA777": "data/assets/customer-service/tutorials/GNA777/withdrawal.jpg",
+          "JG7": "data/assets/customer-service/tutorials/JG7/withdrawal.jpg",
+          "PAG99": "data/assets/customer-service/tutorials/PAG99/withdrawal.jpg",
+          "CUM777": "data/assets/customer-service/tutorials/CUM777/withdrawal.jpg",
+          "CON777": "data/assets/customer-service/tutorials/CON777/withdrawal.jpg",
+          "ZAP69": "data/assets/customer-service/tutorials/ZAP69/withdrawal.jpg",
+          "default": "data/assets/customer-service/tutorials/CON777/withdrawal.jpg"
         }
       },
       {
@@ -105,7 +105,7 @@
   },
   {
     "title": "忘记密码说明",
-    "content": "多數情況下，用戶名是註冊手機號。請依照圖片步驟重設密碼；若仍無法登入，請傳錯誤截圖。",
+    "content": "多數情況下，用戶名是註冊手機號。請依照圖片步驟重設密碼。如果操作後仍無法登入，可以傳送錯誤截圖，我會為您轉接人工客服進一步處理。",
     "question_aliases": [
       "forgot password",
       "I forgot my password",
@@ -128,19 +128,19 @@
         "caption": "",
         "position": "before",
         "platform_asset_map": {
-          "JUE999": "legacy/bot66tornado/assets/tutorials/JUE999/forgot-password.jpg",
-          "GNA777": "legacy/bot66tornado/assets/tutorials/GNA777/forgot-password.jpg",
-          "JG7": "legacy/bot66tornado/assets/tutorials/JG7/forgot-password.jpg",
-          "PAG99": "legacy/bot66tornado/assets/tutorials/PAG99/forgot-password.jpg",
-          "CUM777": "legacy/bot66tornado/assets/tutorials/CUM777/forgot-password.jpg",
-          "CON777": "legacy/bot66tornado/assets/tutorials/CON777/forgot-password.jpg",
-          "ZAP69": "legacy/bot66tornado/assets/tutorials/ZAP69/forgot-password.jpg",
-          "default": "legacy/bot66tornado/assets/tutorials/CON777/forgot-password.jpg"
+          "JUE999": "data/assets/customer-service/tutorials/JUE999/forgot-password.jpg",
+          "GNA777": "data/assets/customer-service/tutorials/GNA777/forgot-password.jpg",
+          "JG7": "data/assets/customer-service/tutorials/JG7/forgot-password.jpg",
+          "PAG99": "data/assets/customer-service/tutorials/PAG99/forgot-password.jpg",
+          "CUM777": "data/assets/customer-service/tutorials/CUM777/forgot-password.jpg",
+          "CON777": "data/assets/customer-service/tutorials/CON777/forgot-password.jpg",
+          "ZAP69": "data/assets/customer-service/tutorials/ZAP69/forgot-password.jpg",
+          "default": "data/assets/customer-service/tutorials/CON777/forgot-password.jpg"
         }
       },
       {
         "type": "text",
-        "text": "多數情況下，用戶名是註冊手機號。請依照圖片步驟重設密碼；若仍無法登入，請傳錯誤截圖。"
+        "text": "多數情況下，用戶名是註冊手機號。請依照圖片步驟重設密碼。如果操作後仍無法登入，可以傳送錯誤截圖，我會為您轉接人工客服進一步處理。"
       }
     ],
     "metadata_json": {

@@ -26,7 +26,7 @@ def test_build_gemini_chat_model_passes_vertexai_settings(monkeypatch):
         "location": "global",
         "temperature": 1.0,
         "max_tokens": None,
-        "timeout": None,
+        "timeout": 30.0,
         "max_retries": 2,
         "vertexai": True,
     }

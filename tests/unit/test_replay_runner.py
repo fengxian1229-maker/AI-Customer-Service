@@ -6,6 +6,7 @@ from app.graph.builder import build_workflow_graph
 from app.graph.nodes import build_graph_state_from_event
 from app.schemas.events import InboundEvent
 from app.workflows.command_contracts import CommandType
+from app.workflows.backend_dispute_escalation import backend_conclusion_record
 
 
 EXTERNAL_COMMAND_TYPES = {
@@ -32,6 +33,18 @@ def test_replay_runner_executes_all_fixtures():
         assert result["required_slots"] == fixture["expected_required_slots"], path.name
         assert result["outbound_command_types"] == fixture["expected_outbound_command_types"], path.name
         assert result["external_command_types"] == fixture["expected_external_command_types"], path.name
+
+
+def test_backend_dispute_replay_waits_for_recheck_result_before_handoff():
+    path = Path("tests/fixtures/replay/livechat_repeated_backend_dispute_es.json")
+    fixture = json.loads(path.read_text(encoding="utf-8"))
+
+    result = run_replay_case(build_workflow_graph(), path.stem, fixture["input_messages"])
+
+    assert result["active_workflow"] == "withdrawal_blocked_or_rollover"
+    assert result["workflow_stage"] == "waiting_backend"
+    assert result["external_command_types"] == [str(CommandType.BACKEND_QUERY)]
+    assert str(CommandType.HUMAN_HANDOFF_REQUESTED) not in result["external_command_types"]
 
 
 def run_replay_case(graph, case_name: str, input_messages: list[str]) -> dict:
@@ -93,6 +106,28 @@ def initial_conversation(case_name: str) -> dict:
                     "deposit_screenshot": "https://example.test/old.jpg",
                     "telegram_case_id": "tg:900001",
                     "telegram_message_id": 900001,
+                },
+            }
+        )
+    if case_name == "livechat_repeated_backend_dispute_es":
+        conclusion = backend_conclusion_record(
+            {
+                "status": "success",
+                "intent": "withdrawal_blocked_or_rollover",
+                "reply_intent": "backend_turnover_remaining",
+                "reply_facts": {"remaining_turnover": "18.88"},
+            },
+            recorded_at="2026-07-15T00:00:00+00:00",
+        )
+        conversation.update(
+            {
+                "active_workflow": "withdrawal_blocked_or_rollover",
+                "workflow_stage": "backend_resolved",
+                "slot_memory": {
+                    "account_or_phone": "test-player-3043",
+                    "identity_source": "user_text",
+                    "backend_conclusion": conclusion,
+                    "backend_dispute_count": 0,
                 },
             }
         )

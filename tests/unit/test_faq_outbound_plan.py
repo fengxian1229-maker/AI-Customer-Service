@@ -49,7 +49,7 @@ def test_build_faq_outbound_plan_normalizes_text_and_caption_for_zh_hans():
                 "type": "image",
                 "asset_key": "deposit_howto",
                 "caption": "進入充值頁面",
-                "platform_asset_map": {"CON777": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg"},
+                "platform_asset_map": {"CON777": "data/assets/customer-service/tutorials/CON777/deposit.jpg"},
             },
         ],
         **{**BASE_KWARGS, "language": "zh-Hans"},
@@ -67,7 +67,7 @@ def test_build_faq_outbound_plan_normalizes_text_and_caption_for_zh_hant():
                 "type": "image",
                 "asset_key": "deposit_howto",
                 "caption": "进入充值页面",
-                "platform_asset_map": {"CON777": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg"},
+                "platform_asset_map": {"CON777": "data/assets/customer-service/tutorials/CON777/deposit.jpg"},
             },
         ],
         **{**BASE_KWARGS, "language": "zh-Hant"},
@@ -85,7 +85,7 @@ def test_build_faq_outbound_plan_maps_image_block_to_send_image():
                 "asset_key": "deposit_howto",
                 "caption": "",
                 "position": "before",
-                "platform_asset_map": {"CON777": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg"},
+                "platform_asset_map": {"CON777": "data/assets/customer-service/tutorials/CON777/deposit.jpg"},
             }
         ],
         **BASE_KWARGS,
@@ -98,7 +98,7 @@ def test_build_faq_outbound_plan_maps_image_block_to_send_image():
     assert message["dedup_key"].endswith(":image:deposit_howto")
     assert message["payload"] == {
         "asset_key": "deposit_howto",
-        "asset_ref": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg",
+        "asset_ref": "data/assets/customer-service/tutorials/CON777/deposit.jpg",
         "caption": "",
         "position": "before",
     }
@@ -138,7 +138,7 @@ def test_build_faq_outbound_plan_warns_when_image_asset_ref_missing():
             {
                 "type": "image",
                 "asset_key": "forgot_password",
-                "platform_asset_map": {"JUE999": "legacy/bot66tornado/assets/tutorials/JUE999/forgot-password.jpg"},
+                "platform_asset_map": {"JUE999": "data/assets/customer-service/tutorials/JUE999/forgot-password.jpg"},
             }
         ],
         platform="MXN",
@@ -184,7 +184,7 @@ def test_build_faq_outbound_plan_uses_default_multimodal_seed_deposit_howto():
     assert plan["message_count"] == 2
     assert [message["message_kind"] for message in plan["messages"]] == ["image", "text"]
     assert plan["messages"][0]["payload"]["asset_key"] == "deposit_howto"
-    assert plan["messages"][0]["payload"]["asset_ref"] == "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg"
+    assert plan["messages"][0]["payload"]["asset_ref"] == "data/assets/customer-service/tutorials/CON777/deposit.jpg"
     assert plan["messages"][0]["warnings"] == []
 
 
@@ -192,9 +192,9 @@ def test_build_faq_outbound_plan_default_seed_uses_con777_assets_for_all_tutoria
     seed_path = Path(__file__).resolve().parents[2] / "data" / "knowledge" / "default_multimodal_faq_seed.json"
     seed_rows = json.loads(seed_path.read_text(encoding="utf-8"))
     expected_refs = {
-        "deposit_howto": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg",
-        "withdrawal_howto": "legacy/bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
-        "forgot_password_howto": "legacy/bot66tornado/assets/tutorials/CON777/forgot-password.jpg",
+        "deposit_howto": "data/assets/customer-service/tutorials/CON777/deposit.jpg",
+        "withdrawal_howto": "data/assets/customer-service/tutorials/CON777/withdrawal.jpg",
+        "forgot_password_howto": "data/assets/customer-service/tutorials/CON777/forgot-password.jpg",
     }
 
     for row in seed_rows:

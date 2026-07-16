@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import time
+from datetime import UTC, datetime
 
 from app.channels.livechat.sender_client import LiveChatApiError, LiveChatSenderClient
 from app.channels.telegram.sender_client import TelegramApiError, TelegramSenderClient
@@ -13,9 +14,15 @@ from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import ConversationRepository, ExternalCommandRepository, ExternalCommandResultRepository
 from app.db.repositories import OutboundMessageRepository
+from app.db.telegram_repositories import TelegramCaseRepository
 from app.services.backend_query_service import BackendQueryService
 from app.services.pending_reply_lookup import PendingReplyLookupService
 from app.services.telegram_case_card import build_telegram_case_append, build_telegram_case_card
+from app.services.telegram_case_followup import (
+    build_telegram_case_followup,
+    is_money_case_followup_text,
+    summarize_customer_update,
+)
 from app.services.telegram_target_resolver import resolve_telegram_target
 from app.backends.factory import BackendProviderFactory
 from app.backends.resolver import TenantBackendConfigResolver
@@ -25,6 +32,7 @@ from app.llm.gemini_model import build_gemini_chat_model
 SUPPORTED_COMMAND_TYPES = {
     "telegram.send_case_card",
     "telegram.append_to_case",
+    "telegram.remind_case",
     "backend.query",
     "pending_reply.lookup",
     "human_handoff.requested",
@@ -97,6 +105,8 @@ async def process_pending_commands(
     sender_client_factory=None,
     telegram_client_factory=None,
     telegram_append_translator=None,
+    telegram_case_repository: TelegramCaseRepository | None = None,
+    telegram_followup_translator=None,
     pending_reply_lookup_service=None,
     worker_id: str | None = None,
     lease_seconds: int = 60,
@@ -146,6 +156,8 @@ async def process_pending_commands(
                     sender_client_factory=sender_client_factory,
                     telegram_client_factory=telegram_client_factory,
                     telegram_append_translator=telegram_append_translator,
+                    telegram_case_repository=telegram_case_repository,
+                    telegram_followup_translator=telegram_followup_translator,
                     pending_reply_lookup_service=pending_reply_lookup_service,
                     max_retries=max_retries,
                 )
@@ -166,6 +178,8 @@ async def process_pending_commands(
                     sender_client_factory=sender_client_factory,
                     telegram_client_factory=telegram_client_factory,
                     telegram_append_translator=telegram_append_translator,
+                    telegram_case_repository=telegram_case_repository,
+                    telegram_followup_translator=telegram_followup_translator,
                     pending_reply_lookup_service=pending_reply_lookup_service,
                     max_retries=max_retries,
                 )
@@ -176,7 +190,7 @@ async def process_pending_commands(
 def _command_limit_target(command_type: str) -> str | None:
     if command_type == "backend.query":
         return "backend"
-    if command_type in {"telegram.send_case_card", "telegram.append_to_case"}:
+    if command_type in {"telegram.send_case_card", "telegram.append_to_case", "telegram.remind_case"}:
         return "telegram"
     if command_type == HUMAN_HANDOFF_COMMAND_TYPE:
         return "handoff"
@@ -199,11 +213,28 @@ async def _process_one_pending_command(
     sender_client_factory,
     telegram_client_factory,
     telegram_append_translator,
+    telegram_case_repository,
+    telegram_followup_translator,
     pending_reply_lookup_service,
     max_retries: int,
 ) -> dict:
     command_type = command["command_type"]
     try:
+        if await _command_blocked_by_human_active(command, conversation_repository):
+            reason = "conversation is HUMAN_ACTIVE; external command skipped"
+            await _mark_command_status(
+                repository,
+                command["id"],
+                "SKIPPED_HUMAN_ACTIVE",
+                reason,
+                max_retries=max_retries,
+            )
+            return {
+                "id": command["id"],
+                "command_type": command_type,
+                "status": "SKIPPED_HUMAN_ACTIVE",
+                "error": reason,
+            }
         if command_type not in SUPPORTED_COMMAND_TYPES:
             raise ValueError(f"unsupported command_type: {command_type}")
         if dry_run:
@@ -228,6 +259,8 @@ async def _process_one_pending_command(
             sender_client_factory=sender_client_factory,
             telegram_client_factory=telegram_client_factory,
             telegram_append_translator=telegram_append_translator,
+            telegram_case_repository=telegram_case_repository,
+            telegram_followup_translator=telegram_followup_translator,
             pending_reply_lookup_service=pending_reply_lookup_service,
             max_retries=max_retries,
         )
@@ -270,10 +303,25 @@ async def _process_real_command(
     sender_client_factory,
     telegram_client_factory,
     telegram_append_translator,
+    telegram_case_repository,
+    telegram_followup_translator,
     pending_reply_lookup_service,
     max_retries: int = 3,
 ) -> dict:
     command_type = command["command_type"]
+    if command_type == "telegram.remind_case":
+        return await _process_real_telegram_followup_command(
+            command,
+            repository=repository,
+            result_repository=result_repository,
+            emit_result=emit_result,
+            execute_telegram=execute_telegram,
+            settings=settings,
+            telegram_client_factory=telegram_client_factory,
+            telegram_case_repository=telegram_case_repository,
+            telegram_followup_translator=telegram_followup_translator,
+            max_retries=max_retries,
+        )
     if command_type in {"telegram.send_case_card", "telegram.append_to_case"}:
         return await _process_real_telegram_command(
             command,
@@ -318,7 +366,12 @@ async def _process_real_command(
         await _mark_command_status(repository, command["id"], status, block_reason, max_retries=max_retries)
         return {"id": command["id"], "command_type": command_type, "status": status, "error": block_reason}
 
-    ack_dependency = await _handoff_ack_dependency_status(command, repository, outbound_repository)
+    ack_dependency = await _handoff_ack_dependency_status(
+        command,
+        repository,
+        outbound_repository,
+        conversation_repository,
+    )
     if ack_dependency:
         return ack_dependency
 
@@ -407,6 +460,178 @@ async def _process_real_command(
     return item
 
 
+async def _process_real_telegram_followup_command(
+    command: dict,
+    repository: ExternalCommandRepository,
+    result_repository: ExternalCommandResultRepository | None,
+    emit_result: bool,
+    execute_telegram: bool,
+    settings: Settings | None,
+    telegram_client_factory,
+    telegram_case_repository: TelegramCaseRepository | None,
+    telegram_followup_translator=None,
+    max_retries: int = 3,
+) -> dict:
+    block_reason = _telegram_block_reason(command, settings, execute_telegram)
+    if block_reason:
+        status = "SKIPPED_DISABLED" if block_reason == "--execute-telegram is required" else "FAILED_CONFIG"
+        await _mark_command_status(repository, command["id"], status, block_reason, max_retries=max_retries)
+        return {"id": command["id"], "command_type": command["command_type"], "status": status, "error": block_reason}
+    if telegram_case_repository is None:
+        pool = getattr(repository, "pool", None)
+        if pool is None:
+            error = "telegram_case_repository is required for telegram.remind_case"
+            await _mark_command_status(repository, command["id"], "FAILED_CONFIG", error, max_retries=max_retries)
+            return {"id": command["id"], "command_type": command["command_type"], "status": "FAILED_CONFIG", "error": error}
+        telegram_case_repository = TelegramCaseRepository(pool)
+
+    payload = command.get("payload_json") or {}
+    reservation = await telegram_case_repository.reserve_followup(
+        external_command_id=int(command["id"]),
+        telegram_case_id=int(payload["telegram_case_id"]),
+        source_conversation_id=str(command["conversation_id"]),
+        source_thread_id=str(command.get("thread_id") or ""),
+        follow_up_kind=str(payload.get("follow_up_kind") or "pending_follow_up"),
+        previous_status=str(payload.get("previous_status") or "under_review"),
+    )
+    if reservation.get("duplicate") and reservation.get("status") in {"sent", "delivery_uncertain", "sending"}:
+        await repository.mark_sent(command["id"])
+        return {
+            "id": command["id"],
+            "command_type": command["command_type"],
+            "status": "DUPLICATE_SENT",
+            "followup_id": reservation.get("id"),
+        }
+    if (
+        reservation.get("duplicate")
+        and reservation.get("external_command_id") is not None
+        and int(reservation["external_command_id"]) != int(command["id"])
+    ):
+        await repository.mark_sent(command["id"])
+        return {
+            "id": command["id"],
+            "command_type": command["command_type"],
+            "status": "DUPLICATE_RESERVED",
+            "followup_id": reservation.get("id"),
+        }
+
+    case = reservation["case"]
+    kind = effective_follow_up_kind(str(case.get("status") or ""), str(payload.get("raw_user_input") or ""))
+    if kind is None:
+        await telegram_case_repository.cancel_followup(reservation["id"], f"stale case status: {case.get('status')}")
+        await repository.mark_sent(command["id"])
+        return {
+            "id": command["id"],
+            "command_type": command["command_type"],
+            "status": "CANCELED_STALE",
+            "followup_id": reservation["id"],
+        }
+
+    translator = telegram_followup_translator or (GeminiEnglishTranslator(settings) if settings is not None else None)
+    customer_update = summarize_customer_update(
+        str(payload.get("raw_user_input") or ""), str(case["intent"]), translator
+    )
+    rendered = build_telegram_case_followup(
+        command,
+        case,
+        {
+            **reservation,
+            "follow_up_kind": kind,
+            "previous_status": payload.get("previous_status") or reservation.get("previous_status"),
+        },
+        customer_update,
+    )
+    telegram_client_factory = telegram_client_factory or _build_telegram_client
+    client = telegram_client_factory(settings)
+    await telegram_case_repository.mark_followup_sending(reservation["id"])
+    try:
+        delivery = client.send_case_followup(rendered)
+        await telegram_case_repository.record_followup_sent(
+            reservation["id"],
+            int(delivery["message_id"]),
+            _telegram_attachment_message_ids(delivery),
+            customer_update,
+        )
+    except Exception as exc:
+        if isinstance(exc, TelegramApiError) and (exc.status == 429 or exc.error_code == 429):
+            if hasattr(telegram_case_repository, "mark_followup_retryable"):
+                await telegram_case_repository.mark_followup_retryable(reservation["id"], str(exc))
+            final_status = await _mark_command_status(
+                repository, command["id"], "RETRYABLE", str(exc), max_retries=max_retries
+            )
+            return {"id": command["id"], "command_type": command["command_type"], "status": final_status, "error": str(exc)}
+        await telegram_case_repository.mark_followup_delivery_uncertain(reservation["id"], str(exc))
+        await _mark_command_status(
+            repository,
+            command["id"],
+            "FAILED_DELIVERY_UNCERTAIN",
+            str(exc),
+            max_retries=max_retries,
+        )
+        return {
+            "id": command["id"],
+            "command_type": command["command_type"],
+            "status": "FAILED_DELIVERY_UNCERTAIN",
+            "error": str(exc),
+        }
+
+    result_insert = None
+    if emit_result:
+        result_insert = await result_repository.insert_idempotent(
+            _build_result_record(
+                command,
+                "telegram.case.reminded",
+                {
+                    "status": "sent",
+                    "followup_id": reservation["id"],
+                    "telegram_case_id": case["id"],
+                    "telegram_message_id": int(delivery["message_id"]),
+                    "follow_up_number": reservation.get("follow_up_number"),
+                    "follow_up_kind": kind,
+                    "attachment_errors": list(delivery.get("attachment_errors") or []),
+                },
+                status="PROCESSED",
+            )
+        )
+    await repository.mark_sent(command["id"])
+    item = {
+        "id": command["id"],
+        "command_type": command["command_type"],
+        "status": "SENT",
+        "telegram_result": {
+            "message_id": int(delivery["message_id"]),
+            "followup_id": reservation["id"],
+            "attachment_errors": list(delivery.get("attachment_errors") or []),
+        },
+    }
+    if emit_result:
+        item["result_insert"] = result_insert
+    return item
+
+
+def effective_follow_up_kind(case_status: str, raw_user_input: str) -> str | None:
+    status = str(case_status or "")
+    if status in {"completed_confirmed_by_customer", "terminal_other", "waiting_customer"}:
+        return None
+    if status in {"completed_by_staff", "completion_disputed"}:
+        if is_money_case_followup_text(raw_user_input):
+            return "completion_dispute"
+        return None
+    return "pending_follow_up"
+
+
+def _telegram_attachment_message_ids(delivery: dict) -> list[int]:
+    message_ids = []
+    for item in delivery.get("attachment_results") or []:
+        result = item.get("result") if isinstance(item, dict) else None
+        message_id = (item.get("message_id") if isinstance(item, dict) else None) or (
+            result.get("message_id") if isinstance(result, dict) else None
+        )
+        if message_id is not None:
+            message_ids.append(int(message_id))
+    return message_ids
+
+
 async def _process_real_telegram_command(
     command: dict,
     repository: ExternalCommandRepository,
@@ -419,11 +644,6 @@ async def _process_real_telegram_command(
     telegram_append_translator=None,
     max_retries: int = 3,
 ) -> dict:
-    if await _telegram_command_blocked_by_human_active(command, conversation_repository):
-        reason = "conversation is HUMAN_ACTIVE; telegram command skipped"
-        await _mark_command_status(repository, command["id"], "SKIPPED_HUMAN_ACTIVE", reason, max_retries=max_retries)
-        return {"id": command["id"], "command_type": command["command_type"], "status": "SKIPPED_HUMAN_ACTIVE", "error": reason}
-
     block_reason = _telegram_block_reason(command, settings, execute_telegram)
     if block_reason:
         status = "SKIPPED_DISABLED" if block_reason == "--execute-telegram is required" else "FAILED_CONFIG"
@@ -493,7 +713,7 @@ async def _process_real_telegram_command(
     return item
 
 
-async def _telegram_command_blocked_by_human_active(
+async def _command_blocked_by_human_active(
     command: dict,
     conversation_repository: ConversationRepository | None,
 ) -> bool:
@@ -650,7 +870,7 @@ def _build_backend_query_service(settings: Settings) -> BackendQueryService:
 
 
 def _telegram_block_reason(command: dict, settings: Settings | None, execute_telegram: bool) -> str | None:
-    if command.get("command_type") not in {"telegram.send_case_card", "telegram.append_to_case"}:
+    if command.get("command_type") not in {"telegram.send_case_card", "telegram.append_to_case", "telegram.remind_case"}:
         return f"unsupported telegram command_type: {command.get('command_type')}"
     if not execute_telegram:
         return "--execute-telegram is required"
@@ -662,8 +882,13 @@ def _telegram_block_reason(command: dict, settings: Settings | None, execute_tel
         return "telegram_bot_token is required"
     if not command.get("conversation_id") or not command.get("chat_id"):
         return "command conversation_id and chat_id are required"
-    if not (command.get("payload_json") or {}).get("slot_memory"):
+    if command.get("command_type") != "telegram.remind_case" and not (command.get("payload_json") or {}).get("slot_memory"):
         return "command payload.slot_memory is required"
+    if command.get("command_type") == "telegram.remind_case":
+        payload = command.get("payload_json") or {}
+        if not payload.get("telegram_case_id") or not command.get("thread_id"):
+            return "telegram reminder requires telegram_case_id and source thread_id"
+        return None
     if command.get("command_type") == "telegram.append_to_case":
         payload = command.get("payload_json") or {}
         slot_memory = payload.get("slot_memory") or {}
@@ -709,6 +934,16 @@ def _build_mock_result_for_command(command: dict) -> tuple[str, dict]:
                 "attachment_results": [],
                 "intent": payload.get("intent"),
                 "active_workflow": payload.get("active_workflow") or payload.get("intent"),
+            },
+        )
+    if command_type == "telegram.remind_case":
+        return (
+            "telegram.case.reminded",
+            {
+                "status": "mocked",
+                "followup_id": 920000 + int(command["id"]),
+                "telegram_message_id": 930000 + int(command["id"]),
+                "follow_up_kind": payload.get("follow_up_kind"),
             },
         )
     return MOCK_RESULT_BY_COMMAND_TYPE[command_type]
@@ -789,8 +1024,11 @@ async def _handoff_ack_dependency_status(
     command: dict,
     repository: ExternalCommandRepository,
     outbound_repository: OutboundMessageRepository | None,
+    conversation_repository: ConversationRepository | None,
 ) -> dict | None:
     if outbound_repository is None:
+        return None
+    if (command.get("payload_json") or {}).get("handoff_ack_mode") == "direct_notice":
         return None
     ack = await outbound_repository.fetch_handoff_ack_by_event(
         command["conversation_id"],
@@ -817,6 +1055,18 @@ async def _handoff_ack_dependency_status(
     else:
         reason = "handoff ack outbound message is missing"
     await _mark_command_status(repository, command["id"], HANDOFF_ACK_FAILED_STATUS, reason)
+    if conversation_repository is not None and hasattr(conversation_repository, "record_handoff_failure"):
+        await conversation_repository.record_handoff_failure(
+            command["conversation_id"],
+            {
+                "stage": "handoff_ack",
+                "command_id": command["id"],
+                "outbound_message_id": ack.get("id") if ack else None,
+                "status": HANDOFF_ACK_FAILED_STATUS,
+                "error": reason,
+                "recorded_at": datetime.now(UTC).isoformat(),
+            },
+        )
     return {
         "id": command["id"],
         "command_type": command["command_type"],
@@ -873,6 +1123,18 @@ class GeminiEnglishTranslator:
         )
         response = self._model.invoke(prompt)
         return str(getattr(response, "content", response) or text)
+
+    def translate_followup(self, source_text: str, intent: str) -> str:
+        if self._model is None:
+            self._model = build_gemini_chat_model(self.settings)
+        prompt = (
+            "Translate only the customer's latest update into one concise English sentence "
+            "of at most 300 characters. Preserve transaction IDs, amounts, and durations exactly. "
+            "Do not infer payment status or add facts. Return the sentence only.\n"
+            f"Case intent: {intent}\nCustomer update: {source_text}"
+        )
+        response = self._model.invoke(prompt)
+        return str(getattr(response, "content", response) or "")
 
 
 def _translate_append_supplement_text(payload: dict, settings: Settings | None, translator=None) -> None:
@@ -940,6 +1202,9 @@ def _build_result_record(command: dict, result_type: str, result_json: dict, sta
 
 
 def _copy_backend_context_to_result(command_payload: dict, result_json: dict) -> None:
+    for key in ("livechat_group_id", "platform"):
+        if result_json.get(key) is None and command_payload.get(key) is not None:
+            result_json[key] = command_payload[key]
     _copy_user_visible_context_to_result(command_payload, result_json)
 
 
@@ -950,6 +1215,7 @@ def _copy_user_visible_context_to_result(command_payload: dict, result_json: dic
         "detected_language",
         "raw_user_input",
         "rewritten_question",
+        "identity_source",
     ):
         if command_payload.get(key) is not None:
             result_json[key] = command_payload[key]

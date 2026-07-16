@@ -14,14 +14,18 @@ FINAL_REPLY_SYSTEM_PROMPT = GLOBAL_FINAL_REPLY_CONSTRAINTS
 class FinalReplyLLMProvider:
     provider_name = "gemini"
 
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, *, model_name: str | None = None) -> None:
         self.settings = settings
+        self.model_name = model_name
         self._model = None
 
     @property
     def model(self):
         if self._model is None:
-            self._model = build_gemini_chat_model(self.settings)
+            if self.model_name:
+                self._model = build_gemini_chat_model(self.settings, model_name=self.model_name)
+            else:
+                self._model = build_gemini_chat_model(self.settings)
         return self._model
 
     async def compose_final_reply(self, payload: LLMFinalReplyInput) -> LLMFinalReplyOutput:

@@ -29,6 +29,7 @@ def test_rag_service_returns_matched_answer_from_knowledge_document():
             "title": "充值教程",
             "content": "按页面提示完成充值。",
             "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
+            "language": "multi",
             "score": 12,
             "priority": 20,
             "matched_fields": ["title", "keywords"],
@@ -61,6 +62,7 @@ def test_rag_service_retrieve_uses_repository_search():
             "title": "充值教程",
             "content": "按页面提示完成充值。",
             "metadata_json": {"intent_id": "deposit_howto", "is_canonical": True},
+            "language": "multi",
             "score": 12,
             "priority": 20,
             "matched_fields": ["title", "keywords"],
@@ -477,6 +479,14 @@ def test_static_knowledge_retrieves_all_four_canonical_faq_intents():
         assert context["matched"] is True
         assert context["faq_intent"] == intent
         assert context["documents"][0]["metadata_json"] == {"intent_id": intent, "is_canonical": True}
+
+
+def test_static_forgot_password_answer_explains_human_handoff():
+    result = asyncio.run(RagService().answer({"tenant_id": "default", "raw_user_input": "忘记密码"}))
+
+    assert result["matched"] is True
+    assert "错误截图" in result["answer"]
+    assert "人工客服" in result["answer"]
 
 
 def test_rank_knowledge_document_prefers_exact_title_match():

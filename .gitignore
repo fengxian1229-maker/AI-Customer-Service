@@ -12,7 +12,3 @@ tmp/
 backups/knowledge_documents_delete_backup_20260703.json
 *.tar.gz
 Ai_Jtest_*.pdf
-legacy/bot66tornado/.npm/
-legacy/bot66tornado/Downloads/
-legacy/bot66tornado/reports/
-legacy/bot66tornado/runtime/

@@ -2,7 +2,7 @@ import asyncio
 
 from app.channels.livechat.sender_client import LiveChatApiError
 from app.workers import sender_worker
-from app.workers.sender_worker import classify_send_result, process_pending_message
+from app.workers.sender_worker import classify_send_result, process_message_group, process_pending_message
 
 
 def classify_send_error(exc: Exception) -> dict:
@@ -309,7 +309,103 @@ def test_process_pending_message_skips_when_conversation_human_active():
     assert message_repository.inserted == []
 
 
-def test_process_pending_message_allows_handoff_ack_when_conversation_human_active():
+def test_process_pending_message_rechecks_human_active_after_queue_lease():
+    class FreshStatusRepository(FakeOutboundRepository):
+        async def is_conversation_human_active(self, conversation_id: str) -> bool:
+            assert conversation_id == "livechat:chat-1"
+            return True
+
+    class SenderClient:
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            raise AssertionError("Stale leased outbound must not send after human takeover")
+
+    repository = FreshStatusRepository()
+    message = {
+        **make_message(),
+        "conversation_status": "AI_ACTIVE",
+        "conversation_active_workflow": "deposit_missing",
+    }
+
+    result = asyncio.run(process_pending_message(repository, SenderClient(), message))
+
+    assert result["status"] == "SKIPPED_HUMAN_ACTIVE"
+    assert repository.sent == []
+    assert repository.failures[0][1] == "SKIPPED_HUMAN_ACTIVE"
+
+
+def test_process_pending_message_sends_handoff_ack_while_handoff_is_requested():
+    class SenderClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            self.calls.append((chat_id, thread_id, text))
+            return {"event_id": "event-1"}
+
+    repository = FakeOutboundRepository()
+    message_repository = FakeConversationMessageRepository()
+    client = SenderClient()
+    message = {
+        **make_message(),
+        "conversation_status": "HANDOFF_REQUESTED",
+        "conversation_active_workflow": "human_handoff",
+        "payload_json": {"type": "message", "text": "我会为你转接真人客服继续协助。", "handoff_ack": True},
+    }
+
+    result = asyncio.run(process_pending_message(repository, client, message, message_repository=message_repository))
+
+    assert result["status"] == "SENT"
+    assert client.calls == [("chat-1", "thread-1", "我会为你转接真人客服继续协助。")]
+    assert repository.sent == [7]
+    assert repository.failures == []
+    assert len(message_repository.inserted) == 1
+
+
+def test_process_pending_message_skips_regular_message_while_handoff_is_requested():
+    class SenderClient:
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            raise AssertionError("regular bot outbound must not send during human handoff")
+
+    repository = FakeOutboundRepository()
+    message = {
+        **make_message(),
+        "conversation_status": "HANDOFF_REQUESTED",
+        "conversation_active_workflow": "human_handoff",
+    }
+
+    result = asyncio.run(process_pending_message(repository, SenderClient(), message))
+
+    assert result["status"] == "SKIPPED_HUMAN_ACTIVE"
+    assert repository.sent == []
+    assert repository.failures[0][1] == "SKIPPED_HUMAN_ACTIVE"
+
+
+def test_process_pending_message_rechecks_human_active_before_sending_handoff_ack():
+    class FreshStatusRepository(FakeOutboundRepository):
+        async def is_conversation_human_active(self, conversation_id: str) -> bool:
+            assert conversation_id == "livechat:chat-1"
+            return True
+
+    class SenderClient:
+        async def send_text(self, chat_id: str, thread_id: str | None, text: str) -> dict:
+            raise AssertionError("late handoff ack must not send after human takeover")
+
+    repository = FreshStatusRepository()
+    message = {
+        **make_message(),
+        "conversation_status": "HANDOFF_REQUESTED",
+        "conversation_active_workflow": "human_handoff",
+        "payload_json": {"type": "message", "text": "我会为你转接真人客服继续协助。", "handoff_ack": True},
+    }
+
+    result = asyncio.run(process_pending_message(repository, SenderClient(), message))
+
+    assert result["status"] == "SKIPPED_HUMAN_ACTIVE"
+    assert repository.sent == []
+    assert repository.failures[0][1] == "SKIPPED_HUMAN_ACTIVE"
+
+
+def test_process_pending_message_skips_handoff_ack_when_conversation_human_active():
     class SenderClient:
         def __init__(self) -> None:
             self.calls = []
@@ -330,11 +426,11 @@ def test_process_pending_message_allows_handoff_ack_when_conversation_human_acti
 
     result = asyncio.run(process_pending_message(repository, client, message, message_repository=message_repository))
 
-    assert result["status"] == "SENT"
-    assert client.calls == [("chat-1", "thread-1", "我会为你转接真人客服继续协助。")]
-    assert repository.sent == [7]
-    assert repository.failures == []
-    assert message_repository.inserted[0]["text_content"] == "我会为你转接真人客服继续协助。"
+    assert result["status"] == "SKIPPED_HUMAN_ACTIVE"
+    assert client.calls == []
+    assert repository.sent == []
+    assert repository.failures[0][1] == "SKIPPED_HUMAN_ACTIVE"
+    assert message_repository.inserted == []
 
 
 def test_process_pending_for_inbound_event_only_fetches_target_inbound(monkeypatch):
@@ -439,7 +535,7 @@ def test_process_pending_message_image_sends_caption_after_file():
         "image",
         {
             "asset_key": "deposit_step_1",
-            "asset_ref": "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg",
+            "asset_ref": "data/assets/customer-service/tutorials/JUE999/deposit.jpg",
             "caption": "第一步：进入充值页面",
         },
     )
@@ -450,7 +546,7 @@ def test_process_pending_message_image_sends_caption_after_file():
     assert result["delivery_mode"] == "livechat_file"
     assert result["caption_result"] == {"status": "SENT", "last_error": None}
     assert client.calls == [
-        ("image", "chat-1", "thread-1", "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg"),
+        ("image", "chat-1", "thread-1", "data/assets/customer-service/tutorials/JUE999/deposit.jpg"),
         ("text", "chat-1", "thread-1", "第一步：进入充值页面"),
     ]
     assert repository.sent == [7]
@@ -853,6 +949,142 @@ def test_livechat_send_image_uploads_local_file_and_sends_file_event(tmp_path):
             },
         ),
     ]
+
+
+def test_sender_downloads_telegram_photo_only_when_image_outbound_is_sent():
+    class TelegramClient:
+        def __init__(self) -> None:
+            self.file_ids = []
+
+        def download_file(self, file_id: str) -> dict:
+            self.file_ids.append(file_id)
+            return {
+                "content": b"telegram-jpeg",
+                "content_type": "image/jpeg",
+                "filename": "receipt.jpg",
+            }
+
+    class SenderClient:
+        def __init__(self) -> None:
+            self.images = []
+
+        async def send_image_content(self, chat_id, thread_id, content, content_type, filename):
+            self.images.append((chat_id, thread_id, content, content_type, filename))
+            return {"event_id": "event-image"}
+
+    repository = FakeOutboundRepository()
+    telegram_client = TelegramClient()
+    sender_client = SenderClient()
+    message = make_message_of_type(
+        "image",
+        {
+            "asset_source": "telegram",
+            "telegram_file_id": "photo-large",
+            "caption": "",
+        },
+    )
+
+    result = asyncio.run(
+        process_pending_message(
+            repository,
+            sender_client,
+            message,
+            telegram_client=telegram_client,
+        )
+    )
+
+    assert result["status"] == "SENT"
+    assert telegram_client.file_ids == ["photo-large"]
+    assert sender_client.images == [
+        ("chat-1", "thread-1", b"telegram-jpeg", "image/jpeg", "receipt.jpg")
+    ]
+
+
+def test_sender_retries_telegram_photo_download_without_text_fallback(monkeypatch):
+    from app.channels.telegram.sender_client import TelegramApiError
+
+    class TelegramClient:
+        def download_file(self, file_id: str) -> dict:
+            raise TelegramApiError("temporary Telegram failure", retryable=True)
+
+    class SenderClient:
+        async def send_text(self, **kwargs):
+            raise AssertionError("Telegram attachment identifiers must never fall back to customer text")
+
+    monkeypatch.setenv("LIVECHAT_IMAGE_MVP_TEXT_FALLBACK", "1")
+    repository = FakeOutboundRepository()
+    message = make_message_of_type(
+        "image",
+        {
+            "asset_source": "telegram",
+            "telegram_file_id": "photo-large",
+            "caption": "",
+        },
+    )
+
+    result = asyncio.run(
+        process_pending_message(
+            repository,
+            SenderClient(),
+            message,
+            telegram_client=TelegramClient(),
+        )
+    )
+
+    assert result["status"] == "RETRYABLE"
+    assert result["retryable"] is True
+    assert repository.failures[0][1] == "RETRYABLE"
+
+
+def test_ordered_group_releases_caption_when_photo_send_needs_retry():
+    from app.channels.telegram.sender_client import TelegramApiError
+
+    class Repository(FakeOutboundRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.released = []
+
+        async def release_lease(self, message_id: int) -> None:
+            self.released.append(message_id)
+
+    class TelegramClient:
+        def download_file(self, file_id: str) -> dict:
+            raise TelegramApiError("temporary failure", retryable=True)
+
+    class SenderClient:
+        async def send_text(self, **kwargs):
+            raise AssertionError("Caption must not send before the photo succeeds")
+
+    repository = Repository()
+    image = {
+        **make_message_of_type(
+            "image",
+            {
+                "asset_source": "telegram",
+                "telegram_file_id": "photo-large",
+                "caption": "",
+            },
+        ),
+        "id": 7,
+        "block_index": 0,
+    }
+    caption = {
+        **make_message_of_type("text", {"type": "message", "text": "receipt caption"}),
+        "id": 8,
+        "block_index": 1,
+    }
+
+    results = asyncio.run(
+        process_message_group(
+            repository,
+            SenderClient(),
+            [image, caption],
+            telegram_client=TelegramClient(),
+        )
+    )
+
+    assert [result["status"] for result in results] == ["RETRYABLE"]
+    assert repository.released == [8]
 
 
 def test_livechat_upload_file_posts_multipart(monkeypatch):

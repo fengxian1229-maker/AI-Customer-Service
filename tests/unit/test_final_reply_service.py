@@ -23,6 +23,24 @@ class FakeFinalReplyProvider:
         return self.result
 
 
+class SlowFinalReplyProvider:
+    def __init__(self, delay_seconds: float = 0.05) -> None:
+        self.delay_seconds = delay_seconds
+        self.calls = []
+
+    async def compose_final_reply(self, payload: dict) -> dict:
+        self.calls.append(payload)
+        await asyncio.sleep(self.delay_seconds)
+        return {
+            "text": "too late",
+            "language": "zh",
+            "tone": "polite",
+            "confidence": 0.91,
+            "safety_flags": [],
+            "reason": "slow",
+        }
+
+
 def base_state(**overrides):
     state = {
         "tenant_id": "default",
@@ -74,9 +92,10 @@ def test_final_reply_prompt_requires_contextual_answer_planning():
 def test_final_reply_prompt_includes_lingxi_persona_and_compliance_bounds():
     from app.llm.final_reply_provider import FINAL_REPLY_SYSTEM_PROMPT
 
-    assert "客服灵犀" in FINAL_REPLY_SYSTEM_PROMPT
+    assert "客服灵犀" not in FINAL_REPLY_SYSTEM_PROMPT
+    assert "Lingxi" in FINAL_REPLY_SYSTEM_PROMPT
     assert 'not a phrase to repeat in every answer' in FINAL_REPLY_SYSTEM_PROMPT
-    assert 'Do not introduce yourself again with phrases like "我是客服灵犀"' in FINAL_REPLY_SYSTEM_PROMPT
+    assert "Do not introduce yourself again" in FINAL_REPLY_SYSTEM_PROMPT
     assert "avoid repeating the same opening phrase" in FINAL_REPLY_SYSTEM_PROMPT
     assert "感谢您的谅解" in FINAL_REPLY_SYSTEM_PROMPT
     assert "official intelligent customer service assistant for a gaming platform" in FINAL_REPLY_SYSTEM_PROMPT
@@ -114,11 +133,62 @@ def test_final_reply_service_payload_includes_node_template_and_facts():
         )
     )
 
-    assert result["final_reply_result"]["status"] == "accepted"
+    assert result["final_reply_result"]["status"] in {"accepted", "accepted_with_warnings"}
     assert provider.calls[0]["node_reply_template"] == "sop_missing_slots"
     assert "Node reply template: SOP missing slots" in provider.calls[0]["node_reply_instruction"]
     assert provider.calls[0]["node_facts"]["sop_name"] == "deposit_missing"
     assert provider.calls[0]["recent_messages"] == [{"sender_role": "customer", "text_content": "hola"}]
+
+
+def test_final_reply_service_uses_failover_provider_after_primary_timeout():
+    primary = SlowFinalReplyProvider()
+    failover = FakeFinalReplyProvider(
+        {
+            "text": "备用模型回复",
+            "language": "zh",
+            "tone": "polite",
+            "confidence": 0.92,
+            "safety_flags": [],
+            "reason": "failover",
+        }
+    )
+    service = FinalReplyService(
+        provider=primary,
+        failover_provider=failover,
+        enabled=True,
+        timeout_seconds=0.01,
+        failover_timeout_seconds=0.05,
+    )
+
+    result = asyncio.run(service.compose(base_state()))
+
+    assert result["final_response_text"] == "备用模型回复"
+    assert result["final_reply_result"]["status"] in {"accepted", "accepted_with_warnings"}
+    assert result["final_reply_result"]["provider"] == "failover"
+    assert len(primary.calls) == 1
+    assert len(failover.calls) == 1
+
+
+def test_final_reply_service_marks_timeout_when_primary_and_failover_timeout():
+    primary = SlowFinalReplyProvider()
+    failover = SlowFinalReplyProvider()
+    service = FinalReplyService(
+        provider=primary,
+        failover_provider=failover,
+        enabled=True,
+        timeout_seconds=0.01,
+        failover_timeout_seconds=0.01,
+    )
+
+    result = asyncio.run(service.compose(base_state()))
+
+    assert result["final_response_text"] == "请提供用户名或注册手机号，并上传存款付款截图。"
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["fallback_reason"] == "timeout"
+    assert result["final_reply_result"]["primary_error_type"] == "TimeoutError"
+    assert result["final_reply_result"]["failover_error_type"] == "TimeoutError"
+    assert primary.calls[0]["recent_messages"] == [{"sender_role": "customer", "text_content": "hola"}]
+    assert failover.calls[0]["recent_messages"] == [{"sender_role": "customer", "text_content": "hola"}]
 
 
 def test_final_reply_service_derives_faq_node_facts_from_rag_result():
@@ -173,6 +243,103 @@ def test_final_reply_service_uses_llm_text_when_guardrails_pass():
     assert result["final_response_text"] == "您好，请提供用户名或注册手机号，并上传存款付款截图。"
     assert result["final_reply_result"]["status"] == "accepted"
     assert provider.calls[0]["tenant_persona"]["default_language"] == "es"
+
+
+def test_final_reply_service_hard_falls_back_when_model_reports_wrong_language():
+    fallback = "Siga los pasos indicados para completar el depósito."
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "請依照頁面步驟完成充值。",
+            "language": "zh-Hant",
+            "tone": "polite",
+            "confidence": 0.95,
+            "safety_flags": [],
+            "used_facts": [],
+            "reason": "wrong language",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                route="faq",
+                reply_language="es",
+                response_text=fallback,
+                response_text_fallback=fallback,
+                reply_plan={"kind": "faq_answer", "fallback_text": fallback, "allowed_facts": [fallback]},
+            )
+        )
+    )
+
+    assert result["final_response_text"] == fallback
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["fallback_reason"] == "language_guard"
+    assert "language_mismatch" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_service_hard_falls_back_when_non_chinese_reply_contains_chinese_script():
+    fallback = "Siga los pasos indicados para completar el depósito."
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "Para continuar，請依照頁面步驟完成充值。",
+            "language": "es",
+            "tone": "polite",
+            "confidence": 0.95,
+            "safety_flags": [],
+            "used_facts": [],
+            "reason": "mixed language",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                route="faq",
+                reply_language="es",
+                response_text=fallback,
+                response_text_fallback=fallback,
+                reply_plan={"kind": "faq_answer", "fallback_text": fallback, "allowed_facts": [fallback]},
+            )
+        )
+    )
+
+    assert result["final_response_text"] == fallback
+    assert result["final_reply_result"]["fallback_reason"] == "language_guard"
+    assert "language_script_mismatch" in result["final_reply_result"]["violations"]
+
+
+def test_final_reply_service_hard_falls_back_when_model_repeats_internal_chinese_identity():
+    fallback = "您好，请问有什么可以帮您？"
+    provider = FakeFinalReplyProvider(
+        {
+            "text": "您好，我是客服灵犀。请问有什么可以帮您？",
+            "language": "zh-Hans",
+            "tone": "polite",
+            "confidence": 0.96,
+            "safety_flags": [],
+            "used_facts": [],
+            "reason": "introduced persona",
+        }
+    )
+    service = FinalReplyService(provider=provider, enabled=True)
+
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                reply_language="zh-Hans",
+                response_text=fallback,
+                response_text_fallback=fallback,
+                reply_plan={"kind": "casual_chat", "must_say": [], "must_not_say": []},
+            )
+        )
+    )
+
+    assert result["final_response_text"] == fallback
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["fallback_reason"] == "language_guard"
+    assert "assistant_identity_leak" in result["final_reply_result"]["violations"]
 
 
 def test_final_reply_service_audits_internal_staff_label_for_customer_reply():

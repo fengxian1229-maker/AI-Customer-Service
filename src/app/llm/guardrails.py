@@ -543,6 +543,8 @@ def validate_sop_dialogue_planner_output(payload: dict[str, Any], output: dict[s
         "reason": _require_str(output, "reason", "sop dialogue planner"),
     }
     state = {
+        "raw_user_input": str(payload.get("latest_user_text") or ""),
+        "rewritten_question": str(payload.get("latest_user_text") or ""),
         "slot_memory": dict(payload.get("current_slot_memory") or {}),
         "attachments": list(payload.get("attachments_summary") or []),
         "attachments_summary": list(payload.get("attachments_summary") or []),

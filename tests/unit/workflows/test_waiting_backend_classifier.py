@@ -45,6 +45,118 @@ def test_waiting_backend_attachment_with_telegram_case_generates_append_command(
     assert payload["supplement"]["attachment_urls"] == ["https://cdn.example/supplement.png"]
 
 
+def test_new_thread_followup_with_supplement_emits_one_reminder_only():
+    state = handle_waiting_backend(
+        {
+            "conversation_id": "livechat:chat-1:thread-new",
+            "thread_id": "thread-new",
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "waiting_backend",
+            "raw_user_input": "TX200 is still not received",
+            "matched_telegram_money_case": {
+                "id": 8,
+                "intent": "withdrawal_missing",
+                "status": "under_review",
+                "telegram_chat_id": "-1001",
+                "root_message_id": 200,
+            },
+            "slot_memory": {
+                "telegram_case_id": "tg:200",
+                "telegram_message_id": 200,
+                "forwarded_attachment_urls": [],
+                "previous_thread_continuation": {"thread_id": "thread-old"},
+            },
+            "attachments": [
+                {
+                    "url": "https://cdn.example/new.png",
+                    "verified_receipt_attachment": True,
+                    "receipt_kind": "withdrawal",
+                }
+            ],
+        }
+    )
+
+    assert [command["type"] for command in state["commands"]] == [CommandType.TELEGRAM_REMIND_CASE]
+    command = state["commands"][0]
+    assert command["payload"]["supplement"]["attachment_urls"] == ["https://cdn.example/new.png"]
+    assert command["dedup_key"] == "telegram.case.followup:-1001:200:thread-new"
+
+
+def test_completed_case_followup_marks_completion_disputed():
+    state = handle_waiting_backend(
+        {
+            "conversation_id": "livechat:chat-1:thread-new",
+            "thread_id": "thread-new",
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "waiting_backend",
+            "raw_user_input": "The deposit is still not credited",
+            "matched_telegram_money_case": {
+                "id": 9,
+                "intent": "deposit_missing",
+                "status": "completed_by_staff",
+                "telegram_chat_id": "-1001",
+                "root_message_id": 201,
+            },
+            "slot_memory": {},
+            "attachments": [],
+        }
+    )
+
+    assert state["commands"][0]["payload"]["follow_up_kind"] == "completion_dispute"
+    assert state["telegram_case_update"] == {
+        "telegram_case_id": 9,
+        "status": "completion_disputed",
+    }
+
+
+def test_customer_confirmation_after_followup_marks_case_confirmed():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "waiting_backend",
+            "raw_user_input": "已经收到了，谢谢",
+            "intent_result": {"workflow_relation": "current_workflow_resolution"},
+            "slot_memory": {"telegram_internal_case_id": 9},
+            "attachments": [],
+        }
+    )
+
+    assert state["workflow_stage"] == "completed"
+    assert state["telegram_case_update"] == {
+        "telegram_case_id": 9,
+        "status": "completed_confirmed_by_customer",
+    }
+
+
+def test_waiting_backend_resolved_case_ignores_delayed_customer_supplement_without_tg_append():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "withdrawal_missing",
+            "workflow_stage": "waiting_backend",
+            "occurred_at": "2026-07-13 02:51:16.872000",
+            "raw_user_input": "Primero iba a retirar 30 y despues 14",
+            "slot_memory": {
+                "telegram_case_id": "tg:123",
+                "telegram_message_id": 123,
+                "telegram_case_created_at": "2026-07-13 02:47:35.364780",
+                "telegram_case_resolved_at": "2026-07-13 02:51:30.000000",
+                "telegram_case_resolution_type": "resolution",
+            },
+            "attachments": [],
+            "llm_sop_dialogue_plan": {
+                "status": "accepted",
+                "slot_updates": {"amount": 30},
+                "slot_confidence": {"amount": 0.9},
+                "intent_relation": "current_sop_supplement",
+            },
+        }
+    )
+
+    assert state["commands"] == []
+    assert state["sop_action"] == "acknowledgement"
+    assert state["workflow_stage"] == "completed"
+
+
 def test_waiting_backend_attachment_and_human_with_telegram_case_appends_first():
     state = handle_waiting_backend(
         {
@@ -141,6 +253,53 @@ def test_waiting_backend_repeated_dispute_handoffs_on_second_attempt():
     assert second["status"] == "HANDOFF_REQUESTED"
     assert second["commands"][0]["type"] == CommandType.HUMAN_HANDOFF_REQUESTED
     assert second["commands"][0]["payload"]["reason"] == "waiting_backend_repeat_dispute"
+
+
+def test_waiting_backend_recheck_pending_never_handoffs_for_repeated_disputes():
+    state = {
+        "active_workflow": "withdrawal_blocked_or_rollover",
+        "workflow_stage": "waiting_backend",
+        "slot_memory": {
+            "backend_recheck_pending": True,
+            "backend_recheck_queued_dispute": True,
+        },
+        "attachments": [],
+        "raw_user_input": "Siempre falla otra vez",
+    }
+
+    for _ in range(3):
+        state = handle_waiting_backend(state)
+
+    assert state.get("status") != "HANDOFF_REQUESTED"
+    assert state["commands"] == []
+    assert "waiting_backend_dispute_count" not in state["slot_memory"]
+
+
+def test_waiting_backend_requery_preserves_confirmed_identity_source():
+    state = handle_waiting_backend(
+        {
+            "active_workflow": "withdrawal_blocked_or_rollover",
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {
+                "account_or_phone": "3043080826",
+                "identity_kind": "phone",
+                "identity_source": "confirmed_by_user",
+            },
+            "attachments": [],
+            "raw_user_input": "El retiro sigue fallando",
+            "llm_sop_dialogue_plan": {
+                "status": "accepted",
+                "intent_relation": "current_sop_supplement",
+                "slot_updates": {},
+                "slot_confidence": {},
+                "reason": "customer continues the same withdrawal issue",
+            },
+        }
+    )
+
+    assert state["commands"][0]["type"] == CommandType.BACKEND_QUERY
+    assert state["commands"][0]["payload"]["account_or_phone"] == "3043080826"
+    assert state["commands"][0]["payload"]["identity_source"] == "confirmed_by_user"
 
 
 def test_waiting_backend_acknowledgement_does_not_append_or_expose_case_id():

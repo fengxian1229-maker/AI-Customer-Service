@@ -12,14 +12,6 @@ tmp
 *.pid
 *.log
 backups
-legacy/bot66tornado/node
-legacy/bot66tornado/node_modules
-legacy/bot66tornado/.npm
-legacy/bot66tornado/Downloads
-legacy/bot66tornado/reports
-legacy/bot66tornado/runtime
-legacy/bot66tornado/src/runtime
-legacy/bot66tornado/.env
 *.tar.gz
 Ai_Jtest_*.pdf
 .env

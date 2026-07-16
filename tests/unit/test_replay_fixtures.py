@@ -25,6 +25,7 @@ def test_replay_fixtures_have_required_contract():
         "pending_reply_lookup.json",
         "waiting_backend_supplement.json",
         "human_handoff.json",
+        "livechat_repeated_backend_dispute_es.json",
     }
 
     assert {path.name for path in fixture_dir.glob("*.json")} == expected_files

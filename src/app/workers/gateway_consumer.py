@@ -4,6 +4,8 @@ import inspect
 import json
 import logging
 import socket
+from datetime import datetime
+from typing import Any
 
 from app.channels.livechat.sender_client import LiveChatSenderClient
 from app.core.settings import Settings
@@ -14,6 +16,7 @@ from app.db.repositories import (
     InboundEventRepository,
     KnowledgeDocumentRepository,
 )
+from app.db.telegram_repositories import TelegramCaseRepository
 from app.graph.checkpointing import build_async_checkpointer as build_checkpointer
 from app.llm.provider import build_llm_provider
 from app.schemas.events import InboundEvent
@@ -165,6 +168,7 @@ async def _build_gateway_dependencies(pool, checkpoint_mode: str, settings):
             }
         )
     service = GatewayService(**service_kwargs)
+    service.telegram_case_repository = TelegramCaseRepository(pool)
     return inbound_repository, service, managed_checkpointer
 
 
@@ -243,7 +247,9 @@ async def _process_one_row(service, row: dict, inbound_repository=None) -> tuple
     inbound_event_id = row.pop("id")
     event = InboundEvent(**row)
     try:
-        return await service.process_event(inbound_event_id, event), None
+        result = await service.process_event(inbound_event_id, event)
+        result["inbound_queue_timing"] = _inbound_queue_timing(row)
+        return result, None
     except Exception as exc:
         if inbound_repository is not None and hasattr(inbound_repository, "release_lease"):
             await inbound_repository.release_lease(inbound_event_id)
@@ -253,6 +259,38 @@ async def _process_one_row(service, row: dict, inbound_repository=None) -> tuple
             "error_type": type(exc).__name__,
             "error_message": str(exc),
         }
+
+
+def _inbound_queue_timing(row: dict) -> dict:
+    occurred_at = row.get("occurred_at")
+    attempted_at = row.get("attempted_at")
+    processed_at = row.get("processed_at")
+    return {
+        "occurred_at": occurred_at,
+        "attempted_at": attempted_at,
+        "processed_at": processed_at,
+        "occurred_to_attempted_seconds": _seconds_between(occurred_at, attempted_at),
+        "attempted_to_processed_seconds": _seconds_between(attempted_at, processed_at),
+    }
+
+
+def _seconds_between(start: Any, end: Any) -> float | None:
+    start_dt = _parse_datetime(start)
+    end_dt = _parse_datetime(end)
+    if start_dt is None or end_dt is None:
+        return None
+    return (end_dt - start_dt).total_seconds()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 def _build_llm_summary(settings) -> dict:

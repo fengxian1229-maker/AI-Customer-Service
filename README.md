@@ -10,11 +10,6 @@ The production Python service lives exclusively under `src/app/`. Tests use
 the `src` layout configured in `pyproject.toml`; there is no root-level Python
 compatibility package or second runtime entry point.
 
-The previous Node.js prototype is retained under `legacy/bot66tornado/` for
-historical reference and emergency comparison only. It is not part of the
-Python service runtime. Its own README and commands must be run from that
-legacy directory.
-
 Current scope:
 
 - Poll LiveChat Agent Chat API for allowed groups.
@@ -165,10 +160,6 @@ PYTHONPATH=src uv run --group dev python -m app.workers.withdrawal_backend_smoke
 PYTHONPATH=src uv run --group dev python -m app.workers.backend_sop_smoke_admin latest-backend --chat-id <chat_id>
 ```
 
-See [docs/p9-a-telegram-sop-closed-loop.md](/Users/andy/ai-agent/docs/p9-a-telegram-sop-closed-loop.md).
-See [docs/smoke/p10-a1-tac-backend-query-client-smoke.md](/Users/andy/ai-agent/docs/smoke/p10-a1-tac-backend-query-client-smoke.md).
-See [docs/smoke/p10-a2-withdrawal-blocked-backend-closed-loop-smoke.md](/Users/andy/ai-agent/docs/smoke/p10-a2-withdrawal-blocked-backend-closed-loop-smoke.md).
-
 Human handoff real execution:
 
 ```bash
@@ -262,7 +253,7 @@ PYTHONPATH=src uv run --group dev python -m app.workers.faq_smoke_admin latest-c
 PYTHONPATH=src uv run --group dev python -m app.workers.faq_smoke_admin latest-errors --limit 5
 ```
 
-See [docs/p7-a7-faq-single-text-closed-loop-smoke.md](/Users/andy/ai-agent/docs/p7-a7-faq-single-text-closed-loop-smoke.md). The diagnostics are read-only, output JSON with Chinese text preserved, and do not query LangGraph saver internal tables.
+The diagnostics are read-only, output JSON with Chinese text preserved, and do not query LangGraph saver internal tables.
 
 Lightweight knowledge admin CLI:
 
@@ -326,7 +317,7 @@ PYTHONPATH=src uv run --group dev python -m app.workers.llm_shadow_admin latest 
 PYTHONPATH=src uv run --group dev python -m app.workers.llm_shadow_admin summary --conversation-id livechat:<chat-id> --limit 20
 ```
 
-See [docs/p7-a8-llm-shadow-gateway-smoke.md](/Users/andy/ai-agent/docs/p7-a8-llm-shadow-gateway-smoke.md). The admin reads project-owned metadata only and never reads LangGraph saver internal tables.
+The admin reads project-owned metadata only and never reads LangGraph saver internal tables.
 
 Enable guarded authoritative router mode for controlled smoke only:
 
@@ -337,7 +328,7 @@ LLM_ROUTER_MIN_CONFIDENCE=0.75
 LLM_ROUTER_FALLBACK_TO_DETERMINISTIC=true
 ```
 
-See [docs/p8-a-llm-guarded-authoritative-router.md](/Users/andy/ai-agent/docs/p8-a-llm-guarded-authoritative-router.md). This mode still does not generate final customer replies, call tools, create external commands, or decide FAQ image/buttons output.
+This mode still does not generate final customer replies, call tools, create external commands, or decide FAQ image/buttons output.
 
 Run Tests
 ---------

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from app.channels.livechat.sender_client import LiveChatSenderClient
+from app.channels.telegram.updates_client import TelegramUpdatesClient
 from app.core.settings import Settings
 from app.db.mysql import create_pool
 from app.db.repositories import (
@@ -19,6 +20,7 @@ from app.db.repositories import (
     InboundEventRepository,
     OutboundMessageRepository,
 )
+from app.db.telegram_repositories import TelegramCaseRepository
 from app.services.final_reply_factory import build_final_reply_service_from_settings
 from app.workers import (
     external_command_worker,
@@ -411,6 +413,11 @@ async def sender_tick(context: ServiceRunnerContext) -> dict:
         limit=context.config.sender_limit,
         concurrency=context.config.sender_concurrency,
         lease_seconds=context.config.worker_lease_seconds,
+        telegram_client=TelegramUpdatesClient(
+            bot_token=context.settings.telegram_bot_token,
+            api_base=getattr(context.settings, "telegram_api_base", "https://api.telegram.org"),
+            timeout_seconds=getattr(context.settings, "telegram_request_timeout_seconds", 15.0),
+        ),
     )
     return {
         "worker": "sender_worker",
@@ -430,12 +437,14 @@ async def external_command_tick(context: ServiceRunnerContext) -> dict:
         result_repository=ExternalCommandResultRepository(context.pool),
         conversation_repository=ConversationRepository(context.pool),
         outbound_repository=OutboundMessageRepository(context.pool),
+        telegram_case_repository=TelegramCaseRepository(context.pool),
         limit=context.config.external_command_limit,
         dry_run=False,
         emit_result=True,
         execute_human_handoff=True,
         execute_telegram=True,
         execute_backend=True,
+        execute_pending_reply_lookup=True,
         settings=context.settings,
         worker_id=context.external_command_worker_id,
         lease_seconds=context.config.worker_lease_seconds,

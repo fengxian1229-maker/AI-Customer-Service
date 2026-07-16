@@ -11,6 +11,7 @@ from app.db.repositories import (
     ExternalCommandResultRepository,
     ExternalResultTransactionRepository,
     FaqSmokeReadRepository,
+    GatewayTransactionRepository,
     GraphCheckpointRunRepository,
     GraphRunErrorRepository,
     InboundEventRepository,
@@ -106,6 +107,32 @@ class SequentialCursor(FakeCursor):
         return []
 
 
+class FakeConversationStateRepository:
+    def __init__(self) -> None:
+        self.updated_graph_state = None
+
+    async def get_or_create_on_connection(self, conn, chat_id: str, thread_id: str | None = None) -> dict:
+        return {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "slot_memory": {
+                "telegram_case_id": "tg:123",
+                "telegram_message_id": 123,
+                "amount": 72,
+            },
+        }
+
+    async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict) -> None:
+        self.updated_graph_state = graph_state
+
+
+class NoopTransactionalRepository:
+    async def insert_idempotent_on_connection(self, conn, item: dict) -> dict:
+        return {"inserted": True}
+
+    async def mark_processed_on_connection(self, conn, item_id: int) -> None:
+        return None
+
+
 def make_inbound_event() -> InboundEvent:
     return InboundEvent(
         source="polling_fallback",
@@ -165,6 +192,112 @@ def test_conversation_update_workflow_state_allows_clearing_active_workflow():
     assert cursor.args[2] == "completed"
 
 
+def test_conversation_update_workflow_state_cannot_downgrade_human_active():
+    import asyncio
+
+    cursor = SequentialCursor(fetchone_results=[{"status": "HUMAN_ACTIVE"}], rowcount=0)
+    repository = ConversationRepository(FakePool(cursor))
+
+    applied = asyncio.run(
+        repository.update_workflow_state(
+            "livechat:chat-1:thread-1",
+            {
+                "status": "WAITING_EXTERNAL",
+                "active_workflow": "deposit_missing",
+                "workflow_stage": "waiting_backend",
+                "slot_memory": {"telegram_case_id": "tg:123"},
+            },
+        )
+    )
+
+    assert applied is False
+    assert "status NOT IN ('HANDOFF_REQUESTED', 'HUMAN_ACTIVE')" in cursor.executions[0][0]
+
+
+def test_conversation_update_workflow_state_cannot_downgrade_handoff_requested():
+    import asyncio
+
+    cursor = SequentialCursor(fetchone_results=[{"status": "HANDOFF_REQUESTED"}], rowcount=0)
+    repository = ConversationRepository(FakePool(cursor))
+
+    applied = asyncio.run(
+        repository.update_workflow_state(
+            "livechat:chat-1:thread-1",
+            {
+                "status": "AI_ACTIVE",
+                "active_workflow": None,
+                "workflow_stage": "completed",
+                "slot_memory": {},
+            },
+        )
+    )
+
+    assert applied is False
+
+
+def test_conversation_update_workflow_state_treats_idempotent_ai_update_as_applied():
+    import asyncio
+
+    cursor = SequentialCursor(
+        fetchone_results=[{"status": "WAITING_EXTERNAL"}],
+        rowcount=0,
+    )
+    repository = ConversationRepository(FakePool(cursor))
+
+    applied = asyncio.run(
+        repository.update_workflow_state_on_connection(
+            FakeConnection(cursor),
+            "livechat:chat-1:thread-1",
+            {
+                "status": "WAITING_EXTERNAL",
+                "active_workflow": "deposit_missing",
+                "workflow_stage": "waiting_backend",
+                "slot_memory": {},
+            },
+        )
+    )
+
+    assert applied is True
+
+
+def test_conversation_record_handoff_failure_preserves_requested_state_and_merges_audit():
+    import asyncio
+
+    cursor = SequentialCursor(
+        fetchone_results=[
+            {
+                "status": "HANDOFF_REQUESTED",
+                "handoff_state": json.dumps({"requested_reason": "repeated_dispute"}),
+            }
+        ],
+        rowcount=1,
+    )
+    repository = ConversationRepository(FakePool(cursor))
+
+    assert hasattr(repository, "record_handoff_failure")
+    recorded = asyncio.run(
+        repository.record_handoff_failure(
+            "livechat:chat-1:thread-1",
+            {
+                "stage": "handoff_ack",
+                "command_id": 15,
+                "status": "FAILED_DEPENDENCY",
+                "error": "handoff ack outbound message is missing",
+            },
+        )
+    )
+
+    assert recorded is True
+    assert "FOR UPDATE" in cursor.executions[0][0]
+    update_sql, update_args = cursor.executions[1]
+    assert "status = 'HANDOFF_REQUESTED'" in update_sql
+    assert "status <> 'HUMAN_ACTIVE'" in update_sql
+    handoff_state = json.loads(update_args[0])
+    assert handoff_state["requested_reason"] == "repeated_dispute"
+    assert handoff_state["failure"]["stage"] == "handoff_ack"
+    assert handoff_state["failure"]["command_id"] == 15
+
+
 def test_conversation_thread_state_inheritance_only_allows_unfinished_workflows():
     repository = ConversationRepository(FakePool(FakeCursor(rowcount=1)))
     fresh = {
@@ -205,6 +338,84 @@ def test_conversation_thread_state_inheritance_only_allows_unfinished_workflows(
             },
         )
         assert not_inherited == fresh
+
+    resolved_previous = repository._inherit_unfinished_thread_state(
+        dict(fresh),
+        {
+            "conversation_id": "livechat:chat-1:old-thread",
+            "current_thread_id": "old-thread",
+            "status": "WAITING_EXTERNAL",
+            "active_workflow": "deposit_missing",
+            "workflow_stage": "completed",
+            "slot_memory": {
+                "telegram_case_resolved_at": "2026-07-13 02:51:30",
+                "telegram_case_id": "tg:123",
+            },
+        },
+    )
+    assert resolved_previous == fresh
+
+
+def test_mark_human_active_cancels_pending_business_work_for_same_thread():
+    import asyncio
+
+    event = make_inbound_event()
+    event.payload_json = {
+        "human_agent_public_reply": True,
+        "human_agent_id": "human@example.com",
+        "human_agent_event_id": "agent-event-1",
+    }
+    cursor = SequentialCursor(fetchone_results=[{"slot_memory": "{}", "handoff_state": "{}"}])
+    connection = FakeConnection(cursor)
+
+    asyncio.run(ConversationRepository.mark_human_active_on_connection(connection, event))
+
+    sql = "\n".join(statement for statement, _args in cursor.executions)
+    assert "UPDATE outbound_messages" in sql
+    assert "UPDATE external_commands" in sql
+    assert "UPDATE external_command_results" in sql
+    assert sql.count("SKIPPED_HUMAN_ACTIVE") == 3
+    cancellation_args = [args for statement, args in cursor.executions if "SKIPPED_HUMAN_ACTIVE" in statement]
+    assert cancellation_args == [
+        ("livechat:chat-1:thread-1",),
+        ("livechat:chat-1:thread-1",),
+        ("livechat:chat-1:thread-1",),
+    ]
+
+
+def test_external_result_transaction_deletes_requested_slot_memory_keys():
+    import asyncio
+
+    conversation_repository = FakeConversationStateRepository()
+    transaction_repository = ExternalResultTransactionRepository(
+        FakePool(FakeCursor(rowcount=1)),
+        conversation_repository=conversation_repository,
+        outbound_repository=NoopTransactionalRepository(),
+        external_command_repository=NoopTransactionalRepository(),
+        result_repository=NoopTransactionalRepository(),
+        conversation_message_repository=NoopTransactionalRepository(),
+    )
+
+    asyncio.run(
+        transaction_repository.process_result_transactionally(
+            result={"id": 501, "chat_id": "chat-1", "thread_id": "thread-1"},
+            graph_state={
+                "status": "AI_ACTIVE",
+                "active_workflow": None,
+                "workflow_stage": "completed",
+                "slot_memory": {"telegram_case_resolved_at": "2026-07-13 02:51:30"},
+                "delete_slot_memory_keys": ["telegram_case_id", "telegram_message_id"],
+            },
+            outbound_messages=[],
+        )
+    )
+
+    slot_memory = conversation_repository.updated_graph_state["slot_memory"]
+    assert slot_memory == {
+        "amount": 72,
+        "telegram_case_resolved_at": "2026-07-13 02:51:30",
+    }
+    assert "delete_slot_memory_keys" not in conversation_repository.updated_graph_state
 
 
 def test_conversation_get_or_create_raises_when_thread_state_not_persisted():
@@ -2017,8 +2228,34 @@ def test_external_command_result_insert_idempotent_uses_dedup_key():
     assert "INSERT INTO external_command_results" in cursor.sql
     assert "ON DUPLICATE KEY UPDATE id = id" in cursor.sql
     assert cursor.args[6] == "backend.query"
-    assert cursor.args[12].startswith("default:livechat:chat-1:55:backend.query:backend.query.mock_result:")
+    assert cursor.args[13].startswith("default:livechat:chat-1:55:backend.query:backend.query.mock_result:")
     assert result == {"inserted": True, "duplicate": False, "id": 456}
+
+
+def test_external_command_result_processed_status_sets_processed_at_by_default():
+    import asyncio
+
+    result = make_external_command_result()
+    result["status"] = "PROCESSED"
+    cursor = FakeCursor(rowcount=1)
+    cursor.lastrowid = 456
+    repository = ExternalCommandResultRepository(FakePool(cursor))
+
+    asyncio.run(repository.insert_idempotent(result))
+
+    assert "CASE WHEN %s = 'PROCESSED' THEN NOW(6)" in cursor.sql
+    assert cursor.args[10] is None
+    assert cursor.args[11] == "PROCESSED"
+
+
+def test_external_command_result_pending_status_keeps_processed_at_null():
+    import asyncio
+
+    result, cursor = asyncio.run(run_external_result_insert_idempotent(rowcount=1))
+
+    assert cursor.args[9] == "PENDING"
+    assert cursor.args[10] is None
+    assert cursor.args[11] == "PENDING"
 
 
 def test_external_command_result_insert_idempotent_reports_duplicate():
@@ -2192,6 +2429,341 @@ def test_external_result_transaction_repository_commits_state_outbox_and_process
     assert calls == ["get_conversation", "update_state", "insert_outbound", "mark_processed"]
     assert pool.last_connection.committed is True
     assert pool.last_connection.rolled_back is False
+
+
+def test_external_result_transaction_discards_late_result_after_human_takeover():
+    import asyncio
+
+    calls = []
+
+    class ConversationRepo:
+        async def get_or_create_on_connection(self, conn, chat_id: str, thread_id: str | None = None):
+            calls.append("get_conversation")
+            return {
+                "conversation_id": "livechat:chat-1:thread-1",
+                "status": "HUMAN_ACTIVE",
+                "slot_memory": {"telegram_case_id": "tg:123"},
+            }
+
+        async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict):
+            calls.append("update_state")
+
+    class ResultRepo:
+        async def mark_processed_on_connection(self, conn, result_id: int):
+            calls.append("mark_processed")
+
+    class BusinessRepo:
+        async def insert_idempotent_on_connection(self, conn, item: dict):
+            calls.append("insert_business_work")
+            return {"inserted": True}
+
+    pool = FakePool(FakeCursor(rowcount=1))
+    repository = ExternalResultTransactionRepository(
+        pool,
+        conversation_repository=ConversationRepo(),
+        outbound_repository=BusinessRepo(),
+        external_command_repository=BusinessRepo(),
+        result_repository=ResultRepo(),
+        conversation_message_repository=BusinessRepo(),
+    )
+
+    result = asyncio.run(
+        repository.process_result_transactionally(
+            {
+                "id": 7,
+                "chat_id": "chat-1",
+                "thread_id": "thread-1",
+                "conversation_id": "livechat:chat-1:thread-1",
+            },
+            graph_state={"status": "WAITING_EXTERNAL", "workflow_stage": "waiting_backend", "slot_memory": {}},
+            outbound_messages=[{"status": "PENDING"}],
+            external_commands=[{"command_type": "telegram.append_to_case"}],
+            summary_message={"sender_role": "telegram"},
+        )
+    )
+
+    assert calls == ["get_conversation", "mark_processed"]
+    assert result["human_active_skipped"] is True
+    assert result["outbound_inserts"] == []
+    assert result["external_command_inserts"] == []
+
+
+def test_external_result_transaction_discards_late_result_while_handoff_is_requested():
+    import asyncio
+
+    calls = []
+
+    class ConversationRepo:
+        async def get_or_create_on_connection(self, conn, chat_id: str, thread_id: str | None = None):
+            calls.append("get_conversation")
+            return {
+                "conversation_id": "livechat:chat-1:thread-1",
+                "status": "HANDOFF_REQUESTED",
+                "slot_memory": {},
+            }
+
+    class ResultRepo:
+        async def mark_processed_on_connection(self, conn, result_id: int):
+            calls.append("mark_processed")
+
+    class BusinessRepo:
+        async def insert_idempotent_on_connection(self, conn, item: dict):
+            calls.append("insert_business_work")
+            return {"inserted": True}
+
+    repository = ExternalResultTransactionRepository(
+        FakePool(FakeCursor(rowcount=1)),
+        conversation_repository=ConversationRepo(),
+        outbound_repository=BusinessRepo(),
+        external_command_repository=BusinessRepo(),
+        result_repository=ResultRepo(),
+        conversation_message_repository=BusinessRepo(),
+    )
+
+    result = asyncio.run(
+        repository.process_result_transactionally(
+            {"id": 8, "chat_id": "chat-1", "thread_id": "thread-1"},
+            graph_state={"status": "AI_ACTIVE", "slot_memory": {}},
+            outbound_messages=[{"status": "PENDING"}],
+        )
+    )
+
+    assert calls == ["get_conversation", "mark_processed"]
+    assert result["human_active_skipped"] is True
+    assert result["outbound_inserts"] == []
+
+
+def test_gateway_transaction_discards_stale_graph_work_after_human_takeover():
+    import asyncio
+
+    calls = []
+
+    class ConversationRepo:
+        async def get_or_create_on_connection(self, conn, chat_id: str, thread_id: str | None = None):
+            calls.append("get_conversation")
+            return {
+                "conversation_id": "livechat:chat-1:thread-1",
+                "status": "HUMAN_ACTIVE",
+                "active_workflow": "deposit_missing",
+                "workflow_stage": "human_active",
+                "slot_memory": {},
+            }
+
+        async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict):
+            calls.append("update_state")
+
+    class InboundRepo:
+        async def mark_processed_on_connection(self, conn, inbound_event_id: int):
+            calls.append("mark_processed")
+
+    class BusinessRepo:
+        async def insert_idempotent_on_connection(self, conn, item: dict):
+            calls.append("insert_business_work")
+            return {"inserted": True}
+
+    class MessageRepo:
+        async def insert_idempotent_on_connection(self, conn, item: dict):
+            calls.append("insert_customer_message")
+            return {"inserted": True}
+
+    pool = FakePool(FakeCursor(rowcount=1))
+    repository = GatewayTransactionRepository(
+        pool,
+        inbound_repository=InboundRepo(),
+        conversation_repository=ConversationRepo(),
+        outbound_repository=BusinessRepo(),
+        external_command_repository=BusinessRepo(),
+        conversation_message_repository=MessageRepo(),
+    )
+
+    result = asyncio.run(
+        repository.process_event_transactionally(
+            88,
+            make_inbound_event(),
+            customer_message={"sender_role": "customer"},
+            outbound_message=[{"status": "PENDING"}],
+            external_commands=[{"command_type": "telegram.append_to_case"}],
+            graph_state={
+                "status": "WAITING_EXTERNAL",
+                "active_workflow": "deposit_missing",
+                "workflow_stage": "waiting_backend",
+                "slot_memory": {},
+            },
+            assistant_messages=[{"sender_role": "assistant"}],
+        )
+    )
+
+    assert calls == ["get_conversation", "insert_customer_message", "mark_processed"]
+    assert result["human_active_skipped"] is True
+    assert result["message_insert"] == {"inserted": True}
+    assert result["outbound_inserts"] == []
+    assert result["external_command_inserts"] == []
+
+
+def test_gateway_transaction_discards_work_when_human_takeover_wins_state_update_race():
+    import asyncio
+
+    calls = []
+
+    class ConversationRepo:
+        async def get_or_create_on_connection(self, conn, chat_id: str, thread_id: str | None = None):
+            calls.append("get_conversation")
+            return {
+                "conversation_id": "livechat:chat-1:thread-1",
+                "status": "AI_ACTIVE",
+                "slot_memory": {},
+            }
+
+        async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict):
+            calls.append("update_state_rejected")
+            return False
+
+    class InboundRepo:
+        async def mark_processed_on_connection(self, conn, inbound_event_id: int):
+            calls.append("mark_processed")
+
+    class BusinessRepo:
+        async def insert_idempotent_on_connection(self, conn, item: dict):
+            calls.append("insert_business_work")
+            return {"inserted": True}
+
+    class MessageRepo:
+        async def insert_idempotent_on_connection(self, conn, item: dict):
+            calls.append("insert_customer_message")
+            return {"inserted": True}
+
+    repository = GatewayTransactionRepository(
+        FakePool(FakeCursor(rowcount=1)),
+        inbound_repository=InboundRepo(),
+        conversation_repository=ConversationRepo(),
+        outbound_repository=BusinessRepo(),
+        external_command_repository=BusinessRepo(),
+        conversation_message_repository=MessageRepo(),
+    )
+
+    result = asyncio.run(
+        repository.process_event_transactionally(
+            89,
+            make_inbound_event(),
+            customer_message={"sender_role": "customer"},
+            outbound_message=[{"status": "PENDING"}],
+            external_commands=[{"command_type": "telegram.append_to_case"}],
+            graph_state={"status": "WAITING_EXTERNAL", "workflow_stage": "waiting_backend", "slot_memory": {}},
+            assistant_messages=[{"sender_role": "assistant"}],
+        )
+    )
+
+    assert calls == ["get_conversation", "update_state_rejected", "insert_customer_message", "mark_processed"]
+    assert result["human_active_skipped"] is True
+    assert result["message_insert"] == {"inserted": True}
+    assert result["outbound_inserts"] == []
+    assert result["external_command_inserts"] == []
+
+
+def test_gateway_transaction_applies_internal_telegram_case_update_atomically():
+    import asyncio
+
+    calls = []
+
+    class ConversationRepo:
+        async def get_or_create_on_connection(self, conn, chat_id, thread_id=None):
+            return {"conversation_id": "livechat:chat-1:thread-new", "status": "AI_ACTIVE", "slot_memory": {}}
+
+        async def update_workflow_state_on_connection(self, conn, conversation_id, graph_state):
+            assert "telegram_case_update" not in graph_state
+            calls.append(("conversation", graph_state["workflow_stage"]))
+            return True
+
+    class CaseRepo:
+        async def update_case_status_on_connection(self, conn, telegram_case_id, status):
+            calls.append(("case", telegram_case_id, status))
+
+    class InboundRepo:
+        async def mark_processed_on_connection(self, conn, inbound_event_id):
+            calls.append(("inbound", inbound_event_id))
+
+    class BusinessRepo:
+        async def insert_idempotent_on_connection(self, conn, item):
+            return {"inserted": True}
+
+    repository = GatewayTransactionRepository(
+        FakePool(FakeCursor(rowcount=1)),
+        inbound_repository=InboundRepo(),
+        conversation_repository=ConversationRepo(),
+        outbound_repository=BusinessRepo(),
+        external_command_repository=BusinessRepo(),
+        conversation_message_repository=BusinessRepo(),
+        telegram_case_repository=CaseRepo(),
+    )
+
+    asyncio.run(
+        repository.process_event_transactionally(
+            90,
+            make_inbound_event(),
+            customer_message=None,
+            outbound_message=None,
+            graph_state={
+                "status": "WAITING_EXTERNAL",
+                "workflow_stage": "waiting_backend",
+                "slot_memory": {},
+                "telegram_case_update": {"telegram_case_id": 9, "status": "completion_disputed"},
+            },
+        )
+    )
+
+    assert calls[:2] == [("case", 9, "completion_disputed"), ("conversation", "waiting_backend")]
+
+
+def test_external_result_transaction_applies_staff_case_status_atomically():
+    import asyncio
+
+    calls = []
+
+    class ConversationRepo:
+        async def get_or_create_on_connection(self, conn, chat_id, thread_id=None):
+            return {"conversation_id": "livechat:chat-1:thread-new", "status": "AI_ACTIVE", "slot_memory": {}}
+
+        async def update_workflow_state_on_connection(self, conn, conversation_id, graph_state):
+            assert "telegram_case_update" not in graph_state
+            calls.append("conversation")
+            return True
+
+    class CaseRepo:
+        async def update_case_status_on_connection(self, conn, telegram_case_id, status):
+            calls.append(("case", telegram_case_id, status))
+
+    class ResultRepo:
+        async def mark_processed_on_connection(self, conn, result_id):
+            calls.append("result")
+
+    class BusinessRepo:
+        async def insert_idempotent_on_connection(self, conn, item):
+            return {"inserted": True}
+
+    repository = ExternalResultTransactionRepository(
+        FakePool(FakeCursor(rowcount=1)),
+        conversation_repository=ConversationRepo(),
+        outbound_repository=BusinessRepo(),
+        external_command_repository=BusinessRepo(),
+        result_repository=ResultRepo(),
+        conversation_message_repository=BusinessRepo(),
+        telegram_case_repository=CaseRepo(),
+    )
+
+    asyncio.run(
+        repository.process_result_transactionally(
+            {"id": 7, "chat_id": "chat-1", "thread_id": "thread-new"},
+            graph_state={
+                "status": "AI_ACTIVE",
+                "workflow_stage": "completed",
+                "slot_memory": {},
+                "telegram_case_update": {"telegram_case_id": 9, "status": "completed_by_staff"},
+            },
+            outbound_messages=[],
+        )
+    )
+
+    assert calls[:2] == [("case", 9, "completed_by_staff"), "conversation"]
 
 
 def test_external_result_transaction_repository_writes_external_commands_in_same_transaction():

@@ -100,6 +100,17 @@ def test_canonical_multimodal_seed_contains_only_four_supported_faqs():
     }.isdisjoint({document["title"] for document in payload})
 
 
+def test_forgot_password_seed_explains_error_screenshot_handoff():
+    seed_path = Path(__file__).resolve().parents[2] / "data" / "knowledge" / "default_multimodal_faq_seed.json"
+    payload = json.loads(seed_path.read_text(encoding="utf-8"))
+    forgot = next(document for document in payload if document["metadata_json"]["intent_id"] == "forgot_password_howto")
+    text_block = next(block["text"] for block in forgot["answer_blocks"] if block["type"] == "text")
+
+    assert "人工客服" in forgot["content"]
+    assert "人工客服" in text_block
+    assert "錯誤截圖" in forgot["content"]
+
+
 def test_seed_knowledge_documents_do_not_contain_backend_fact_answers():
     banned = ("已到账", "审核通过", "余额是", "订单已", "提款成功")
 
@@ -169,24 +180,24 @@ def test_seed_knowledge_loads_multimodal_seed_file():
         filename = tutorial_filenames[intent_id]
         assert document["answer_blocks"][0]["platform_asset_map"] == {
             **{
-                platform: f"legacy/bot66tornado/assets/tutorials/{platform}/{filename}"
+                platform: f"data/assets/customer-service/tutorials/{platform}/{filename}"
                 for platform in platforms
             },
-            "default": f"legacy/bot66tornado/assets/tutorials/CON777/{filename}",
+            "default": f"data/assets/customer-service/tutorials/CON777/{filename}",
         }
 
     deposit = repository.inserted[0]
     assert deposit["question_aliases"]
     assert [block["type"] for block in deposit["answer_blocks"]] == ["image", "text"]
     assert deposit["answer_blocks"][0]["platform_asset_map"] == {
-        "JUE999": "legacy/bot66tornado/assets/tutorials/JUE999/deposit.jpg",
-        "GNA777": "legacy/bot66tornado/assets/tutorials/GNA777/deposit.jpg",
-        "JG7": "legacy/bot66tornado/assets/tutorials/JG7/deposit.jpg",
-        "PAG99": "legacy/bot66tornado/assets/tutorials/PAG99/deposit.jpg",
-        "CUM777": "legacy/bot66tornado/assets/tutorials/CUM777/deposit.jpg",
-        "CON777": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg",
-        "ZAP69": "legacy/bot66tornado/assets/tutorials/ZAP69/deposit.jpg",
-        "default": "legacy/bot66tornado/assets/tutorials/CON777/deposit.jpg",
+        "JUE999": "data/assets/customer-service/tutorials/JUE999/deposit.jpg",
+        "GNA777": "data/assets/customer-service/tutorials/GNA777/deposit.jpg",
+        "JG7": "data/assets/customer-service/tutorials/JG7/deposit.jpg",
+        "PAG99": "data/assets/customer-service/tutorials/PAG99/deposit.jpg",
+        "CUM777": "data/assets/customer-service/tutorials/CUM777/deposit.jpg",
+        "CON777": "data/assets/customer-service/tutorials/CON777/deposit.jpg",
+        "ZAP69": "data/assets/customer-service/tutorials/ZAP69/deposit.jpg",
+        "default": "data/assets/customer-service/tutorials/CON777/deposit.jpg",
     }
     assert deposit["metadata_json"]["intent_id"] == "deposit_howto"
     assert deposit["metadata_json"]["is_canonical"] is True

@@ -198,4 +198,9 @@ def chinese_script_mismatch(text: str | None, reply_language: str | None) -> boo
         return any(char in TRADITIONAL_MARKERS for char in value)
     if language == "zh-Hant":
         return any(char in SIMPLIFIED_MARKERS for char in value)
+    if language not in {"unknown", "zh-Hans", "zh-Hant"}:
+        return any(
+            "\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff"
+            for char in value
+        )
     return False

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import socket
+from datetime import UTC, datetime
 from typing import Any
 
 from app.channels.telegram.updates_client import TelegramUpdatesClient
@@ -29,12 +30,23 @@ from app.services.language_policy import normalize_language_code
 from app.services.message_history import build_external_result_summary_message
 from app.services.outbox import build_text_outbox
 from app.services.staff_reply_processor import StaffReplyProcessor
+from app.services.telegram_case_status import classify_money_case_status
 from app.workflows.final_reply_policy import build_reply_plan
 
 logger = logging.getLogger(__name__)
 
 RESULT_TYPE = "telegram.staff_reply.received"
 COMMAND_TYPE = "telegram.staff_reply"
+ACTIVE_TELEGRAM_CASE_SLOT_KEYS = {
+    "telegram_case_id",
+    "telegram_message_id",
+    "telegram_case_status",
+    "telegram_append_status",
+    "last_telegram_append_message_id",
+    "telegram_staff_reply_status",
+    "last_telegram_staff_reply_type",
+    "last_telegram_staff_reply_message_id",
+}
 
 
 async def process_telegram_updates(
@@ -69,9 +81,9 @@ async def process_telegram_updates(
         except Exception as exc:
             logger.exception("Failed to process Telegram update %s", update_id)
             processed.append({"update_id": update_id, "status": "FAILED", "error": str(exc)})
-        finally:
-            if offset_repository is not None and offset_key and update_id:
-                await offset_repository.save_offset(offset_key, update_id)
+            break
+        if offset_repository is not None and offset_key and update_id:
+            await offset_repository.save_offset(offset_key, update_id)
     return processed
 
 
@@ -109,19 +121,20 @@ async def process_single_update(
     )
     if not case:
         return {"update_id": update_id, "status": "IGNORED", "reason": "case_not_found"}
-    raw_text = _message_text(message)
-    attachment_file_ids = _attachment_file_ids(message)
-    if not raw_text and not attachment_file_ids:
-        return {"update_id": update_id, "status": "IGNORED", "reason": "empty_staff_reply"}
-    if not raw_text and attachment_file_ids:
+    if hasattr(transaction_repository, "is_human_active") and await transaction_repository.is_human_active(
+        case["conversation_id"]
+    ):
         return {
             "update_id": update_id,
             "status": "IGNORED",
-            "reason": "attachment_only_staff_reply_unsupported",
+            "reason": "conversation_human_active",
             "telegram_case_id": case["id"],
-            "attachment_count": len(attachment_file_ids),
         }
-
+    raw_text = _message_text(message)
+    largest_photo_file_id = _largest_photo_file_id(message)
+    attachment_file_ids = [largest_photo_file_id] if largest_photo_file_id else []
+    if not raw_text and not attachment_file_ids:
+        return {"update_id": update_id, "status": "IGNORED", "reason": "empty_staff_reply"}
     result_row = _build_result_row(update, message, case, raw_text, attachment_file_ids, telegram_chat_id, message_thread_id)
     insert = await result_repository.insert_idempotent(result_row)
     if not insert.get("inserted"):
@@ -133,28 +146,52 @@ async def process_single_update(
         }
 
     result_row["id"] = insert["id"]
-    handler = build_staff_reply_handler(result_row, staff_reply_processor=staff_reply_processor)
-    handler = await finalize_staff_reply_handler(
-        handler,
-        result_row,
-        final_reply_service=final_reply_service,
-        llm_final_reply_enabled=llm_final_reply_enabled,
-    )
-    outbound = build_text_outbox(
-        chat_id=result_row["chat_id"],
-        thread_id=result_row.get("thread_id"),
-        conversation_id=result_row["conversation_id"],
-        inbound_event_id=result_row.get("inbound_event_id"),
-        text=handler["text"],
-    )
-    outbound["dedup_key"] = f"{result_row['dedup_key']}:outbound"
-    outbound["command_type"] = COMMAND_TYPE
-    outbound["message_kind"] = "telegram_staff_reply"
+    if raw_text:
+        handler = build_staff_reply_handler(result_row, staff_reply_processor=staff_reply_processor)
+        handler = await finalize_staff_reply_handler(
+            handler,
+            result_row,
+            final_reply_service=final_reply_service,
+            llm_final_reply_enabled=llm_final_reply_enabled,
+        )
+    else:
+        handler = _build_photo_only_handler(result_row)
+    outbounds = []
+    if attachment_file_ids:
+        image_outbound = _build_telegram_photo_outbox(result_row, attachment_file_ids[0], "")
+        image_outbound["dedup_key"] = f"{result_row['dedup_key']}:outbound:image"
+        image_outbound["block_index"] = 0
+        outbounds.append(image_outbound)
+        if raw_text and handler["text"]:
+            caption_outbound = build_text_outbox(
+                chat_id=result_row["chat_id"],
+                thread_id=result_row.get("thread_id"),
+                conversation_id=result_row["conversation_id"],
+                inbound_event_id=result_row.get("inbound_event_id"),
+                text=handler["text"],
+            )
+            caption_outbound["dedup_key"] = f"{result_row['dedup_key']}:outbound:caption"
+            caption_outbound["block_index"] = 1
+            caption_outbound["command_type"] = COMMAND_TYPE
+            caption_outbound["message_kind"] = "telegram_staff_reply_caption"
+            outbounds.append(caption_outbound)
+    else:
+        outbound = build_text_outbox(
+            chat_id=result_row["chat_id"],
+            thread_id=result_row.get("thread_id"),
+            conversation_id=result_row["conversation_id"],
+            inbound_event_id=result_row.get("inbound_event_id"),
+            text=handler["text"],
+        )
+        outbound["dedup_key"] = f"{result_row['dedup_key']}:outbound"
+        outbound["command_type"] = COMMAND_TYPE
+        outbound["message_kind"] = "telegram_staff_reply"
+        outbounds.append(outbound)
     try:
         await transaction_repository.process_result_transactionally(
             result_row,
             graph_state=handler["graph_state"],
-            outbound_messages=[outbound],
+            outbound_messages=outbounds,
             external_commands=[],
             summary_message=handler["summary_message"],
         )
@@ -177,39 +214,119 @@ async def process_single_update(
     }
 
 
+def _build_photo_only_handler(row: dict) -> dict:
+    result_json = row.get("result_json") or {}
+    active_workflow = result_json.get("active_workflow") or result_json.get("intent")
+    resolved = {
+        "text": "",
+        "summary_sender_role": "telegram",
+        "summary_text": "Telegram 人工客服提供了图片附件并准备回写用户。",
+        "graph_state": {
+            "status": "WAITING_EXTERNAL",
+            "active_workflow": active_workflow,
+            "workflow_stage": "waiting_backend",
+            "slot_memory": {
+                "telegram_staff_reply_status": "received",
+                "last_telegram_staff_reply_message_id": result_json.get("telegram_message_id"),
+                "last_telegram_staff_reply_type": "attachment",
+                "last_telegram_staff_reply_source": "telegram_photo",
+            },
+        },
+    }
+    resolved["summary_message"] = build_external_result_summary_message(row, resolved)
+    return resolved
+
+
+def _build_telegram_photo_outbox(row: dict, file_id: str, caption: str) -> dict:
+    return {
+        "chat_id": row.get("chat_id"),
+        "thread_id": row.get("thread_id"),
+        "action_type": "livechat.send_image",
+        "command_type": "livechat.send_image",
+        "message_type": "image",
+        "message_kind": "telegram_staff_reply_image",
+        "payload_json": {
+            "asset_source": "telegram",
+            "telegram_file_id": file_id,
+            "caption": caption,
+        },
+        "status": "PENDING",
+        "conversation_id": row.get("conversation_id"),
+        "inbound_event_id": row.get("inbound_event_id"),
+    }
+
+
 def build_staff_reply_handler(row: dict, staff_reply_processor: StaffReplyProcessor | None = None) -> dict:
     result_json = row.get("result_json") or {}
     processor = staff_reply_processor or StaffReplyProcessor(enabled=False)
     reply_language = _result_reply_language(result_json)
-    polished = processor.process(result_json.get("raw_text") or result_json.get("caption") or "", target_lang=reply_language)
+    raw_reply = result_json.get("raw_text") or result_json.get("caption") or ""
+    polished = processor.process(raw_reply, target_lang=reply_language)
     active_workflow = result_json.get("active_workflow") or result_json.get("intent")
-    if polished.type == "long_wait":
+    case_status = classify_money_case_status(
+        str(active_workflow or ""),
+        str(raw_reply or ""),
+        result_json.get("telegram_case_status"),
+    )
+    if case_status in {"awaiting_review", "under_review", "completion_disputed"}:
         status = "WAITING_EXTERNAL"
         workflow_stage = "waiting_backend"
-    elif polished.type == "ask_customer":
+        next_active_workflow = active_workflow
+        slot_memory = {
+            "telegram_staff_reply_status": "received",
+            "last_telegram_staff_reply_message_id": result_json.get("telegram_message_id"),
+            "last_telegram_staff_reply_type": polished.type,
+            "last_telegram_staff_reply_source": polished.source,
+        }
+        delete_slot_memory_keys = []
+    elif case_status == "waiting_customer":
         status = "WAITING_EXTERNAL"
         workflow_stage = "waiting_customer_supplement"
+        next_active_workflow = active_workflow
+        slot_memory = {
+            "telegram_staff_reply_status": "received",
+            "last_telegram_staff_reply_message_id": result_json.get("telegram_message_id"),
+            "last_telegram_staff_reply_type": polished.type,
+            "last_telegram_staff_reply_source": polished.source,
+        }
+        delete_slot_memory_keys = []
     else:
         status = "AI_ACTIVE"
-        workflow_stage = "backend_replied"
+        workflow_stage = "completed"
+        next_active_workflow = None
+        slot_memory = {
+            "telegram_case_resolved_at": _format_datetime(row.get("created_at") or datetime.now(UTC)),
+            "telegram_case_resolution_text": str(raw_reply or "").strip(),
+            "telegram_case_resolution_type": polished.type,
+            "telegram_case_resolution_source": polished.source,
+            "telegram_case_resolution_workflow": active_workflow,
+            "customer_confirmed_resolved": False,
+        }
+        delete_slot_memory_keys = sorted(ACTIVE_TELEGRAM_CASE_SLOT_KEYS)
     resolved = {
         "text": polished.text,
         "summary_sender_role": "telegram",
         "summary_text": "Telegram 人工客服回复已润色并准备回写用户。",
         "graph_state": {
             "status": status,
-            "active_workflow": active_workflow,
+            "active_workflow": next_active_workflow,
             "workflow_stage": workflow_stage,
-            "slot_memory": {
-                "telegram_staff_reply_status": "received",
-                "last_telegram_staff_reply_message_id": result_json.get("telegram_message_id"),
-                "last_telegram_staff_reply_type": polished.type,
-                "last_telegram_staff_reply_source": polished.source,
+            "slot_memory": slot_memory,
+            "delete_slot_memory_keys": delete_slot_memory_keys,
+            "telegram_case_update": {
+                "telegram_case_id": result_json.get("telegram_case_id"),
+                "status": case_status,
             },
         },
     }
     resolved["summary_message"] = build_external_result_summary_message(row, resolved)
     return resolved
+
+
+def _format_datetime(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S.%f")
+    return str(value or "")
 
 
 async def finalize_staff_reply_handler(
@@ -453,6 +570,7 @@ def _build_result_row(
         "telegram_message_thread_id": message_thread_id,
         "intent": case.get("intent"),
         "active_workflow": case.get("active_workflow") or case.get("intent"),
+        "telegram_case_status": case.get("status"),
         "language": _case_reply_language(case),
     }
     return {
@@ -505,15 +623,11 @@ def _result_reply_language(result_json: dict[str, Any]) -> str:
     return language if language != "unknown" else "zh-Hans"
 
 
-def _attachment_file_ids(message: dict[str, Any]) -> list[str]:
-    file_ids = []
-    for photo in message.get("photo") or []:
-        if photo.get("file_id"):
-            file_ids.append(str(photo["file_id"]))
-    document = message.get("document") or {}
-    if document.get("file_id"):
-        file_ids.append(str(document["file_id"]))
-    return list(dict.fromkeys(file_ids))
+def _largest_photo_file_id(message: dict[str, Any]) -> str | None:
+    photos = [photo for photo in (message.get("photo") or []) if photo.get("file_id")]
+    if not photos:
+        return None
+    return str(photos[-1]["file_id"])
 
 
 def _sender_name(sender: dict[str, Any]) -> str | None:

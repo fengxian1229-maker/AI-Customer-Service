@@ -1,5 +1,7 @@
 import json
+import mimetypes
 import socket
+from pathlib import PurePosixPath
 from typing import Any
 from urllib import error, request
 
@@ -12,10 +14,12 @@ class TelegramUpdatesClient:
         bot_token: str,
         api_base: str = "https://api.telegram.org",
         timeout_seconds: float = 15.0,
+        attachment_max_bytes: int = 20 * 1024 * 1024,
     ) -> None:
         self.bot_token = bot_token
         self.api_base = api_base.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.attachment_max_bytes = attachment_max_bytes
 
     def request(self, method: str, body: dict[str, Any], timeout_seconds: float | None = None) -> dict[str, Any]:
         url = f"{self.api_base}/bot{self.bot_token}/{method}"
@@ -59,6 +63,40 @@ class TelegramUpdatesClient:
 
     def get_me(self) -> dict[str, Any]:
         return self.request("getMe", {})
+
+    def download_file(self, file_id: str) -> dict[str, Any]:
+        file_id = str(file_id or "").strip()
+        if not file_id:
+            raise ValueError("telegram_file_id is required")
+        data = self.request("getFile", {"file_id": file_id})
+        file_path = str((data.get("result") or {}).get("file_path") or "").strip()
+        if not file_path:
+            raise TelegramApiError("Telegram getFile returned no file_path", retryable=False)
+        url = f"{self.api_base}/file/bot{self.bot_token}/{file_path.lstrip('/')}"
+        req = request.Request(url, method="GET")
+        try:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                content = response.read(self.attachment_max_bytes + 1)
+                content_type = (
+                    response.headers.get_content_type()
+                    or mimetypes.guess_type(file_path)[0]
+                    or "application/octet-stream"
+                )
+        except error.HTTPError as exc:
+            raise TelegramApiError(
+                _redact_token(str(exc), self.bot_token),
+                status=exc.code,
+                retryable=exc.code in {429, 500, 502, 503, 504},
+            ) from exc
+        except (error.URLError, TimeoutError, socket.timeout) as exc:
+            raise TelegramApiError(_redact_token(str(exc), self.bot_token), retryable=True) from exc
+        if len(content) > self.attachment_max_bytes:
+            raise TelegramApiError("Telegram photo exceeds attachment size limit", retryable=False)
+        return {
+            "content": content,
+            "content_type": content_type,
+            "filename": PurePosixPath(file_path).name or "telegram-photo.jpg",
+        }
 
 
 def _safe_json(raw: bytes) -> dict[str, Any]:

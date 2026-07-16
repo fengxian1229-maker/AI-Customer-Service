@@ -10,6 +10,7 @@ class CommandType(StrEnum):
     LIVECHAT_SEND_BUTTONS = "livechat.send_buttons"
     TELEGRAM_SEND_CASE_CARD = "telegram.send_case_card"
     TELEGRAM_APPEND_TO_CASE = "telegram.append_to_case"
+    TELEGRAM_REMIND_CASE = "telegram.remind_case"
     BACKEND_QUERY = "backend.query"
     PENDING_REPLY_LOOKUP = "pending_reply.lookup"
     HUMAN_HANDOFF_REQUESTED = "human_handoff.requested"

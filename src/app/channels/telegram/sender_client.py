@@ -410,6 +410,38 @@ class TelegramSenderClient:
             "attachment_results": attachment_results,
         }
 
+    def send_case_followup(self, followup: dict[str, Any]) -> dict[str, Any]:
+        main = self.send_message(
+            followup["chat_id"],
+            followup["text"],
+            message_thread_id=followup.get("thread_id"),
+            reply_to_message_id=int(followup["root_message_id"]),
+        )
+        message_id = int(main["result"]["message_id"])
+        attachment_results = []
+        attachment_errors = []
+        for attachment in followup.get("attachments") or []:
+            try:
+                attachment_results.append(
+                    self.send_photo_from_url(
+                        followup["chat_id"],
+                        attachment["url"],
+                        caption=attachment.get("name"),
+                        message_thread_id=followup.get("thread_id"),
+                        reply_to_message_id=message_id,
+                    )
+                )
+            except Exception as exc:
+                attachment_errors.append(
+                    {"name": attachment.get("name"), "url": attachment.get("url"), "error": str(exc)}
+                )
+        return {
+            "ok": True,
+            "message_id": message_id,
+            "attachment_results": attachment_results,
+            "attachment_errors": attachment_errors,
+        }
+
 
 def _safe_json(raw: bytes) -> dict[str, Any]:
     try:

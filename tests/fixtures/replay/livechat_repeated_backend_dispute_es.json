@@ -1,0 +1,36 @@
+{
+  "name": "livechat_repeated_backend_dispute_es",
+  "identity": "test-player-3043",
+  "backend_result": {
+    "status": "success",
+    "intent": "withdrawal_blocked_or_rollover",
+    "reply_intent": "backend_turnover_remaining",
+    "reply_facts": {
+      "remaining_turnover": "18.88"
+    },
+    "identity_source": "user_text"
+  },
+  "messages": [
+    "Por qué me rechazan los retiros",
+    "test-player-3043",
+    "Ya intenté retirar cuatro veces y siempre lo devuelven",
+    "Siempre me dicen que juegue y después aparece retiro fallido"
+  ],
+  "input_messages": [
+    "Ya intenté retirar cuatro veces y siempre lo devuelven",
+    "Siempre me dicen que juegue y después aparece retiro fallido"
+  ],
+  "expected_intent": "withdrawal_blocked_or_rollover",
+  "expected_active_workflow": "withdrawal_blocked_or_rollover",
+  "expected_workflow_stage": "waiting_backend",
+  "expected_required_slots": [],
+  "expected_outbound_command_types": [
+    "livechat.send_text"
+  ],
+  "expected_external_command_types": [
+    "backend.query"
+  ],
+  "expected_status": "HANDOFF_REQUESTED",
+  "expected_handoff_commands": 1,
+  "expected_handoff_acks": 1
+}

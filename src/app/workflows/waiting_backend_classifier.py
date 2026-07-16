@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 from typing import Any
 
 from app.workflows.command_contracts import CommandType
@@ -8,6 +9,7 @@ from app.workflows.sop_command_builder import build_sop_command
 from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
 from app.workflows.slot_extractors import is_explicit_human_request
+from app.services.telegram_case_followup import build_money_case_followup_dedup_key
 
 CASE_PENDING_REPLY = "案件仍在建立或确认中，我们会继续跟进，请稍候。"
 
@@ -17,6 +19,8 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     active_workflow = str(state.get("active_workflow") or "")
     dialogue_plan = plan_sop_dialogue_from_state(state, active_workflow)
     slot_memory = dialogue_plan["slot_memory"]
+    if _is_delayed_supplement_for_resolved_case(state, slot_memory):
+        return _delayed_resolved_supplement_state(state, slot_memory)
     urls = [
         url
         for url in (slot_memory.get("forwarded_attachment_urls") or [])
@@ -52,6 +56,17 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
         or (waiting_customer_supplement and _has_customer_supplement_signal(text))
         or (dialogue_plan.get("status") == "accepted" and relation == "current_sop_supplement")
     )
+
+    matched_case = state.get("matched_telegram_money_case")
+    if matched_case:
+        return _money_case_followup_state(
+            state,
+            slot_memory,
+            matched_case,
+            text=text,
+            urls=urls,
+            slot_updates=dialogue_plan.get("slot_updates") or {},
+        )
 
     if has_supplement:
         if active_workflow == "withdrawal_blocked_or_rollover" and slot_memory.get("account_or_phone"):
@@ -96,7 +111,11 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
             ],
         }
 
-    if explicit_human or policy["action"] == "human_handoff":
+    if explicit_human:
+        return _build_handoff_state(state, slot_memory)
+    if slot_memory.get("backend_recheck_pending"):
+        return _waiting_followup_state(state, slot_memory)
+    if policy["action"] == "human_handoff":
         return _build_handoff_state(state, slot_memory)
     if _is_waiting_backend_dispute(text):
         count = _increment_handoff_counter(slot_memory, "waiting_backend_dispute_count")
@@ -130,6 +149,78 @@ def handle_waiting_backend(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _money_case_followup_state(
+    state: dict[str, Any],
+    slot_memory: dict[str, Any],
+    case: dict[str, Any],
+    *,
+    text: str,
+    urls: list[str],
+    slot_updates: dict[str, Any],
+) -> dict[str, Any]:
+    previous_status = str(case.get("status") or "under_review")
+    kind = "completion_dispute" if previous_status == "completed_by_staff" else "pending_follow_up"
+    reply = _followup_acknowledgement(str(state.get("reply_language") or "es"))
+    slot_memory = {**slot_memory, "telegram_internal_case_id": int(case["id"])}
+    payload = {
+        "telegram_case_id": int(case["id"]),
+        "intent": case.get("intent") or state.get("active_workflow"),
+        "follow_up_kind": kind,
+        "previous_status": previous_status,
+        "raw_user_input": text,
+        "supplement": {
+            "text": text,
+            "attachment_urls": urls,
+            "slot_updates": slot_updates,
+        },
+    }
+    result = {
+        **state,
+        "slot_memory": slot_memory,
+        "active_workflow": case.get("intent") or state.get("active_workflow"),
+        "workflow_stage": "waiting_backend",
+        "sop_action": "remind_case",
+        "response_text": reply,
+        "response_text_fallback": reply,
+        "node_reply_template": "backend_waiting",
+        "node_facts": {
+            "sop_action": "remind_case",
+            "slot_memory": slot_memory,
+            "fallback_text": reply,
+        },
+        "reply_plan": build_reply_plan(
+            kind="backend_waiting",
+            fallback_text=reply,
+            allowed_facts=[reply],
+            must_not_say=["Telegram", "TG", "case ID", "already replied"],
+        ),
+        "commands": [
+            {
+                "type": CommandType.TELEGRAM_REMIND_CASE,
+                "payload": payload,
+                "dedup_key": build_money_case_followup_dedup_key(case, str(state.get("thread_id") or "")),
+            }
+        ],
+    }
+    if kind == "completion_dispute":
+        result["telegram_case_update"] = {
+            "telegram_case_id": int(case["id"]),
+            "status": "completion_disputed",
+        }
+    return result
+
+
+def _followup_acknowledgement(language: str) -> str:
+    normalized = language.lower()
+    if normalized.startswith("zh"):
+        return "我们正在重新查询这笔交易，最新结果会在当前会话通知你。"
+    if normalized.startswith("en"):
+        return "We are rechecking this transaction and will update you in this conversation."
+    if normalized.startswith("tl"):
+        return "Sinusuri naming muli ang transaksyong ito at magbibigay kami ng update dito."
+    return "Estamos verificando nuevamente esta transacción y te informaremos por esta conversación."
+
+
 def _backend_query_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
     return {
         **state,
@@ -155,6 +246,7 @@ def _backend_query_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> 
                     "intent": "withdrawal_blocked_or_rollover",
                     "account_or_phone": slot_memory["account_or_phone"],
                     "identity_kind": slot_memory.get("identity_kind"),
+                    "identity_source": slot_memory.get("identity_source"),
                     "reply_language": state.get("reply_language"),
                     "conversation_language": state.get("conversation_language"),
                     "detected_language": state.get("detected_language"),
@@ -256,7 +348,7 @@ def _resolved_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[
     text = _resolved_ack_text(str(state.get("reply_language") or "es"))
     next_slot_memory = dict(slot_memory)
     next_slot_memory["customer_confirmed_resolved"] = True
-    return {
+    result = {
         **state,
         "slot_memory": next_slot_memory,
         "active_workflow": None,
@@ -274,6 +366,34 @@ def _resolved_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[
         ),
         "commands": [],
     }
+    if next_slot_memory.get("telegram_internal_case_id") is not None:
+        result["telegram_case_update"] = {
+            "telegram_case_id": int(next_slot_memory["telegram_internal_case_id"]),
+            "status": "completed_confirmed_by_customer",
+        }
+    return result
+
+
+def _delayed_resolved_supplement_state(state: dict[str, Any], slot_memory: dict[str, Any]) -> dict[str, Any]:
+    text = _resolved_case_ack_text(str(state.get("reply_language") or "es"))
+    return {
+        **state,
+        "slot_memory": slot_memory,
+        "active_workflow": None,
+        "workflow_stage": "completed",
+        "sop_action": "acknowledgement",
+        "response_text": text,
+        "response_text_fallback": text,
+        "node_reply_template": "acknowledgement",
+        "node_facts": {"sop_action": "delayed_resolved_supplement", "slot_memory": slot_memory, "fallback_text": text},
+        "reply_plan": build_reply_plan(
+            kind="acknowledgement",
+            fallback_text=text,
+            must_not_say=["仍在确认", "请稍等", "waiting", "checking", "tg:"],
+            allowed_facts=[text],
+        ),
+        "commands": [],
+    }
 
 
 def _resolved_ack_text(language: str) -> str:
@@ -283,6 +403,37 @@ def _resolved_ack_text(language: str) -> str:
     if normalized.startswith("en"):
         return "Thanks for letting us know. I'm glad it has arrived. If you need help with anything else, you can message me here."
     return "感谢告知，款项已到账就好。如还需要其他协助，可以继续在这里告诉我。"
+
+
+def _resolved_case_ack_text(language: str) -> str:
+    normalized = language.lower()
+    if normalized.startswith("es"):
+        return "Gracias por la información. La revisión anterior ya fue completada; si necesita ayuda con otro caso, puede escribirme aquí."
+    if normalized.startswith("en"):
+        return "Thanks for the information. The previous review has already been completed; if you need help with another case, you can message me here."
+    return "感谢补充，前一个案件已核实完成。如还需要协助其他问题，可以继续在这里告诉我。"
+
+
+def _is_delayed_supplement_for_resolved_case(state: dict[str, Any], slot_memory: dict[str, Any]) -> bool:
+    resolved_at = _parse_datetime(slot_memory.get("telegram_case_resolved_at"))
+    occurred_at = _parse_datetime(state.get("occurred_at"))
+    if resolved_at is None or occurred_at is None:
+        return False
+    created_at = _parse_datetime(slot_memory.get("telegram_case_created_at"))
+    if created_at is not None and occurred_at <= created_at:
+        return False
+    return occurred_at < resolved_at
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 def _waiting_reply_plan(kind: str, fallback_text: str) -> dict[str, Any]:

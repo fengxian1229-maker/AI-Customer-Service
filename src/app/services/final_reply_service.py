@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -25,15 +26,21 @@ class FinalReplyService:
         self,
         provider=None,
         *,
+        failover_provider=None,
         enabled: bool = False,
         min_confidence: float = 0.70,
         fallback_enabled: bool = True,
+        timeout_seconds: float | None = None,
+        failover_timeout_seconds: float | None = None,
         tenant_persona: dict[str, Any] | None = None,
     ) -> None:
         self.provider = provider
+        self.failover_provider = failover_provider
         self.enabled = bool(enabled)
         self.min_confidence = float(min_confidence)
         self.fallback_enabled = bool(fallback_enabled)
+        self.timeout_seconds = timeout_seconds
+        self.failover_timeout_seconds = failover_timeout_seconds
         self.tenant_persona = {
             "default_language": "es",
             "tone": "polite",
@@ -66,15 +73,57 @@ class FinalReplyService:
         payload_fallback_text = normalize_text(_sanitize_customer_visible_internal_labels(fallback_text_raw or fallback_text))
         payload = self._build_payload(state, payload_fallback_text)
         try:
-            output = await self.provider.compose_final_reply(payload)
+            output = await self._compose_with_provider(self.provider, payload, self.timeout_seconds)
         except Exception as exc:
-            return self._fallback_state(state, fallback_text, "exception", error=exc)
+            primary_error = exc
+            if self.failover_provider and hasattr(self.failover_provider, "compose_final_reply"):
+                try:
+                    output = await self._compose_with_provider(
+                        self.failover_provider,
+                        payload,
+                        self.failover_timeout_seconds,
+                    )
+                    output = {**(output or {}), "provider": "failover"}
+                except Exception as failover_exc:
+                    reason = "timeout" if isinstance(primary_error, TimeoutError) or isinstance(failover_exc, TimeoutError) else "provider_failure"
+                    return self._fallback_state(
+                        state,
+                        fallback_text,
+                        reason,
+                        error=primary_error,
+                        metadata={
+                            "primary_error_type": type(primary_error).__name__,
+                            "failover_error_type": type(failover_exc).__name__,
+                            "failover_error_message": str(failover_exc)[:1000],
+                        },
+                    )
+            else:
+                reason = "timeout" if isinstance(primary_error, TimeoutError) else "exception"
+                return self._fallback_state(state, fallback_text, reason, error=primary_error)
 
         confidence = float((output or {}).get("confidence") or 0.0)
         text = normalize_text((output or {}).get("text"))
         if not text:
             return self._fallback_state(state, fallback_text, "empty_model_text")
         violations = validate_final_reply_output(state, output or {})
+        language_guard_violations = sorted(
+            set(violations).intersection(
+                {"language_mismatch", "language_script_mismatch", "assistant_identity_leak"}
+            )
+        )
+        if language_guard_violations:
+            return self._fallback_state(
+                state,
+                fallback_text,
+                "language_guard",
+                violations=violations,
+                metadata={
+                    "language_guard_violation": True,
+                    "requested_language": reply_language,
+                    "output_language": normalize_language_code((output or {}).get("language")),
+                    **_provider_metadata(output or {}),
+                },
+            )
         warning_reason = None
         if confidence < self.min_confidence:
             warning_reason = "low_confidence"
@@ -88,15 +137,22 @@ class FinalReplyService:
                     output or {},
                     violations=violations,
                     warning_reason=warning_reason or "guardrail_audit",
-                ),
+                )
+                | _provider_metadata(output or {}),
             }
 
         return {
             **state,
             "response_text_fallback": fallback_text,
             "final_response_text": text,
-            "final_reply_result": accepted_result(output or {}),
+            "final_reply_result": {**accepted_result(output or {}), **_provider_metadata(output or {})},
         }
+
+    async def _compose_with_provider(self, provider, payload: dict[str, Any], timeout_seconds: float | None) -> dict:
+        coroutine = provider.compose_final_reply(payload)
+        if timeout_seconds is None or float(timeout_seconds) <= 0:
+            return await coroutine
+        return await asyncio.wait_for(coroutine, timeout=float(timeout_seconds))
 
     def _render_structured_fallback(self, state: dict[str, Any]) -> str | None:
         customer_reply = state.get("customer_reply") if isinstance(state.get("customer_reply"), dict) else {}
@@ -119,13 +175,17 @@ class FinalReplyService:
         *,
         violations: list[str] | None = None,
         error: Exception | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         final_text = fallback_text if self.fallback_enabled else None
+        result = fallback_result(reason, violations=violations, error=error)
+        if metadata:
+            result.update(metadata)
         return {
             **state,
             "response_text_fallback": fallback_text,
             "final_response_text": final_text,
-            "final_reply_result": fallback_result(reason, violations=violations, error=error),
+            "final_reply_result": result,
         }
 
     def _build_payload(self, state: dict[str, Any], fallback_text: str) -> dict[str, Any]:
@@ -208,3 +268,8 @@ def _sanitize_customer_visible_internal_labels(text: str) -> str:
     sanitized = re.sub(r"\bbackend\s+shows\b", "the check result shows", sanitized, flags=re.I)
     sanitized = re.sub(r"\bbackend\b", "support team", sanitized, flags=re.I)
     return sanitized
+
+
+def _provider_metadata(output: dict[str, Any]) -> dict[str, Any]:
+    provider = output.get("provider")
+    return {"provider": provider} if provider else {}

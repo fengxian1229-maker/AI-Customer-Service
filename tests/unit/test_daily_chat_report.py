@@ -1,5 +1,234 @@
 import asyncio
+import logging
 from datetime import datetime
+from types import SimpleNamespace
+
+import pytest
+
+
+def test_gemini_translator_extracts_only_visible_text_from_response_blocks():
+    from app.reporting.daily_chat_report.translation import GeminiTraditionalChineseTranslator
+
+    translator = GeminiTraditionalChineseTranslator(settings=object())
+    translator._model = SimpleNamespace(
+        invoke=lambda _prompt: SimpleNamespace(
+            content=[
+                {
+                    "type": "text",
+                    "text": "繁體結果",
+                    "extras": {"signature": "secret"},
+                }
+            ]
+        )
+    )
+
+    assert translator.translate("简体输入") == "繁體結果"
+
+
+@pytest.mark.parametrize(
+    "response_content",
+    [
+        "",
+        [],
+        {"type": "text", "text": ""},
+        [{"type": "text", "text": ""}],
+    ],
+    ids=["empty-string", "empty-list", "empty-block", "empty-block-list"],
+)
+def test_gemini_translator_falls_back_to_input_when_response_has_no_visible_text(response_content):
+    from app.reporting.daily_chat_report.translation import GeminiTraditionalChineseTranslator
+
+    translator = GeminiTraditionalChineseTranslator(settings=object())
+    translator._model = SimpleNamespace(
+        invoke=lambda _prompt: SimpleNamespace(content=response_content)
+    )
+
+    assert translator.translate("保留原始输入") == "保留原始输入"
+
+
+def test_format_message_content_extracts_only_visible_text_from_livechat_blocks():
+    from app.reporting.daily_chat_report.formatting import format_message_content
+    from app.reporting.daily_chat_report.models import ReportMessage
+    from app.reporting.daily_chat_report.translation import NullTranslator
+
+    message = ReportMessage(
+        id=1,
+        chat_id="chat-1",
+        thread_id="thread-1",
+        sender_role="customer",
+        message_type="text",
+        text_content="[{'type': 'text', 'text': '你好', 'extras': {'signature': 'xxxxx'}}]",
+        attachment_refs=[],
+        source="lingxi_dialogue_messages2",
+        occurred_at=datetime(2026, 7, 10, 1, 0, 0),
+        created_at=datetime(2026, 7, 10, 1, 0, 0),
+    )
+
+    rendered = format_message_content(message, NullTranslator())
+
+    assert rendered == "你好"
+
+
+def test_format_message_content_extracts_visible_text_from_json_blocks():
+    from app.reporting.daily_chat_report.formatting import format_message_content
+    from app.reporting.daily_chat_report.models import ReportMessage
+    from app.reporting.daily_chat_report.translation import NullTranslator
+
+    message = ReportMessage(
+        id=1,
+        chat_id="chat-1",
+        thread_id="thread-1",
+        sender_role="customer",
+        message_type="text",
+        text_content='[{"type":"text","text":"你好","extras":{"signature":"xxxxx","verified":true},"metadata":null}]',
+        attachment_refs=[],
+        source="lingxi_dialogue_messages2",
+        occurred_at=datetime(2026, 7, 10, 1, 0, 0),
+        created_at=datetime(2026, 7, 10, 1, 0, 0),
+    )
+
+    assert format_message_content(message, NullTranslator()) == "你好"
+
+
+@pytest.mark.parametrize(
+    "text_content",
+    [
+        [{"type": "text", "text": "你好", "extras": {"signature": "xxxxx"}}],
+        {"type": "text", "text": "你好", "metadata": {"private": True}},
+    ],
+)
+def test_format_message_content_accepts_livechat_list_and_dict_values(text_content):
+    from app.reporting.daily_chat_report.formatting import format_message_content
+    from app.reporting.daily_chat_report.models import ReportMessage
+    from app.reporting.daily_chat_report.translation import NullTranslator
+
+    message = ReportMessage(
+        id=1,
+        chat_id="chat-1",
+        thread_id="thread-1",
+        sender_role="customer",
+        message_type="text",
+        text_content=text_content,
+        attachment_refs=[],
+        source="lingxi_dialogue_messages2",
+        occurred_at=datetime(2026, 7, 10, 1, 0, 0),
+        created_at=datetime(2026, 7, 10, 1, 0, 0),
+    )
+
+    assert format_message_content(message, NullTranslator()) == "你好"
+
+
+def test_format_message_content_keeps_plain_text_unchanged():
+    from app.reporting.daily_chat_report.formatting import format_message_content
+    from app.reporting.daily_chat_report.models import ReportMessage
+    from app.reporting.daily_chat_report.translation import NullTranslator
+
+    message = ReportMessage(
+        id=1,
+        chat_id="chat-1",
+        thread_id="thread-1",
+        sender_role="customer",
+        message_type="text",
+        text_content="hello world",
+        attachment_refs=[],
+        source="lingxi_dialogue_messages2",
+        occurred_at=datetime(2026, 7, 10, 1, 0, 0),
+        created_at=datetime(2026, 7, 10, 1, 0, 0),
+    )
+
+    assert format_message_content(message, NullTranslator()) == "hello world"
+
+
+@pytest.mark.parametrize(
+    "text_content",
+    [
+        '{"foo":"bar"}',
+        '{"text":"hello","details":"important"}',
+        "[1,2,3]",
+        '[{"foo":"bar"},{"text":"hello"}]',
+        '[{"type":"text","text":"unfinished"}',
+    ],
+    ids=["json-dict", "json-text-field", "json-array", "mixed-structure", "malformed-json"],
+)
+def test_format_message_content_keeps_non_livechat_json_unchanged(text_content):
+    from app.reporting.daily_chat_report.formatting import format_message_content
+    from app.reporting.daily_chat_report.models import ReportMessage
+    from app.reporting.daily_chat_report.translation import NullTranslator
+
+    message = ReportMessage(
+        id=1,
+        chat_id="chat-1",
+        thread_id="thread-1",
+        sender_role="customer",
+        message_type="text",
+        text_content=text_content,
+        attachment_refs=[],
+        source="lingxi_dialogue_messages2",
+        occurred_at=datetime(2026, 7, 10, 1, 0, 0),
+        created_at=datetime(2026, 7, 10, 1, 0, 0),
+    )
+
+    assert format_message_content(message, NullTranslator()) == text_content
+
+
+def test_pdf_renderer_fails_loudly_when_no_cjk_font_is_available(tmp_path, monkeypatch, caplog):
+    from pathlib import Path
+
+    from reportlab.pdfbase import pdfmetrics
+
+    from app.reporting.daily_chat_report.pdf_renderer import render_daily_chat_report_pdf
+    from app.reporting.daily_chat_report.translation import NullTranslator
+
+    original_exists = Path.exists
+
+    def exists_without_system_fonts(path):
+        if str(path).endswith((".ttf", ".ttc", ".otf")):
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", exists_without_system_fonts)
+    monkeypatch.setattr(pdfmetrics, "getRegisteredFontNames", lambda: [])
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="CJK font"):
+        render_daily_chat_report_pdf(
+            [],
+            start_at=datetime(2026, 7, 10, 0, 0, 0),
+            end_at=datetime(2026, 7, 11, 0, 0, 0),
+            output_path=tmp_path / "report.pdf",
+            translator=NullTranslator(),
+        )
+
+    assert "CJK font" in caplog.text
+
+
+def test_pdf_message_rows_use_three_aligned_columns():
+    from reportlab.platypus import Paragraph, Table
+
+    from app.reporting.daily_chat_report.models import ReportMessage
+    from app.reporting.daily_chat_report.pdf_renderer import _message_story, _styles
+    from app.reporting.daily_chat_report.translation import NullTranslator
+
+    message = ReportMessage(
+        id=1,
+        chat_id="chat-1",
+        thread_id="thread-1",
+        sender_role="customer",
+        speaker_name="Cliente",
+        message_type="text",
+        text_content="hello world",
+        attachment_refs=[],
+        source="lingxi_dialogue_messages2",
+        occurred_at=datetime(2026, 7, 10, 1, 2, 3),
+        created_at=datetime(2026, 7, 10, 1, 2, 3),
+    )
+
+    flowables = _message_story(message, _styles("Helvetica"), NullTranslator())
+    message_tables = [flowable for flowable in flowables if isinstance(flowable, Table)]
+
+    assert len(message_tables) == 1
+    assert message_tables[0]._ncols == 3
+    assert isinstance(message_tables[0]._cellvalues[0][2], Paragraph)
+    assert message_tables[0]._cellvalues[0][2].getPlainText() == "hello world"
 
 
 def test_aggregate_threads_filters_groups_and_classifies_robot_handoff():
@@ -865,13 +1094,21 @@ def test_pdf_renderer_outputs_expected_report_text(tmp_path):
         translator=NullTranslator(),
     )
 
-    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output)).pages)
+    reader = PdfReader(str(output))
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    fonts = [
+        font.get_object()
+        for page in reader.pages
+        for font in (page["/Resources"].get("/Font") or {}).values()
+    ]
     assert "LingXi 正式群組對話紀錄" in text
     assert "LingXi 實際有發出訊息的 thread" in text
     assert "分類定義" in text
     assert "統計" in text
     assert "機器人獨立完成" in text
     assert "Chat ID：chat-1" in text
+    assert "■" not in text
+    assert any(font.get("/FontDescriptor") or font.get("/DescendantFonts") for font in fonts)
 
 
 def test_lingxi_pdf_renderer_outputs_three_category_sections(tmp_path):
@@ -970,7 +1207,9 @@ def test_pdf_renderer_paginates_very_long_message_content(tmp_path):
         translator=NullTranslator(),
     )
 
-    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output)).pages)
+    reader = PdfReader(str(output))
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    assert len(reader.pages) > 1
     assert "Chat ID：chat-long" in text
     assert "真人客服（Prez）" in text
     assert "line 259" in text

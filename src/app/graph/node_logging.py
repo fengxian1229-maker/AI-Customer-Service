@@ -84,6 +84,8 @@ def summarize_state(state: dict[str, Any] | None) -> dict[str, Any]:
         "router_status": llm_router_result.get("status"),
         "router_mode": llm_router_result.get("mode"),
         "final_reply_status": final_reply_result.get("status"),
+        "fallback_reason": final_reply_result.get("fallback_reason"),
+        "language_guard_violation": final_reply_result.get("language_guard_violation"),
         "attachments_count": len(state.get("attachments") or []),
         "recent_messages_count": len(state.get("recent_messages") or []),
         "slot_keys": sorted(str(key) for key in slot_memory.keys()),

@@ -1,3 +1,5 @@
+import asyncio
+
 from app.graph.nodes import (
     build_graph_state_from_event,
     command_planner_node,
@@ -5,6 +7,7 @@ from app.graph.nodes import (
     intent_router_node,
     make_intent_router_node,
     prepare_route_state,
+    rag_node,
     rewrite_question_node,
     sop_node,
 )
@@ -54,13 +57,72 @@ def test_build_graph_state_from_event_extracts_text_context_and_attachments():
     )
 
     assert state["conversation_id"] == "livechat:chat-1"
+    assert state["event_id"] == "event-1"
     assert state["active_workflow"] == "deposit_missing"
     assert state["event_type"] == "FILE_RECEIVED"
+    assert state["occurred_at"] == "2026-06-24 00:00:00.000000"
     assert state["attachments"] == [{"url": "https://cdn.example/screenshot.png", "name": "screenshot.png"}]
     assert state["llm_rewrite_result"] is None
     assert state["llm_intent_result"] is None
     assert state["route_source"] == "deterministic"
     assert state["rewrite_source"] == "deterministic"
+
+
+def test_build_graph_state_copies_internal_money_case_candidates():
+    candidates = [{"id": 8, "intent": "withdrawal_missing", "root_message_id": 200}]
+
+    state = build_graph_state_from_event(
+        make_event("still not received"),
+        {
+            "conversation_id": "livechat:chat-1:thread-new",
+            "slot_memory": {},
+            "telegram_money_case_candidates": candidates,
+        },
+    )
+
+    assert state["telegram_money_case_candidates"] == candidates
+
+
+def test_intent_router_matches_cross_thread_money_case_before_generic_route():
+    state = prepare_route_state(
+        {
+            "raw_user_input": "TX200 is still not received",
+            "slot_memory": {},
+            "telegram_money_case_candidates": [
+                {
+                    "id": 8,
+                    "intent": "withdrawal_missing",
+                    "status": "under_review",
+                    "telegram_chat_id": "-1001",
+                    "root_message_id": 200,
+                    "slot_memory": {"order_id": "TX200"},
+                }
+            ],
+        }
+    )
+
+    assert state["route"] == "sop"
+    assert state["active_workflow"] == "withdrawal_missing"
+    assert state["workflow_stage"] == "waiting_backend"
+    assert state["matched_telegram_money_case"]["id"] == 8
+
+
+def test_intent_router_clarifies_when_multiple_money_cases_are_ambiguous():
+    state = prepare_route_state(
+        {
+            "raw_user_input": "still not received",
+            "slot_memory": {},
+            "reply_language": "en",
+            "telegram_money_case_candidates": [
+                {"id": 8, "intent": "deposit_missing", "status": "under_review", "root_message_id": 200},
+                {"id": 9, "intent": "withdrawal_missing", "status": "under_review", "root_message_id": 201},
+            ],
+        }
+    )
+
+    assert state["route"] == "final_reply"
+    assert "transaction" in state["response_text"].lower()
+    assert state["commands"] == []
 
 
 def test_build_graph_state_preserves_image_attachment_metadata_and_candidates():
@@ -125,6 +187,67 @@ def test_sop_node_resolves_active_workflow_even_when_stage_is_collecting_slots()
     assert result["active_workflow"] is None
     assert result["slot_memory"]["customer_confirmed_resolved"] is True
     assert result["response_text"].startswith("Thanks for letting us know")
+
+
+def test_llm_router_cannot_override_cross_thread_money_case_match():
+    class RouterService:
+        async def route(self, payload):
+            raise AssertionError("Cross-thread money-case matching must run before the LLM router")
+
+    result = asyncio.run(
+        make_intent_router_node(RouterService())(
+            {
+                "raw_user_input": "TX200 is still not received",
+                "rewritten_question": "TX200 is still not received",
+                "slot_memory": {},
+                "telegram_money_case_candidates": [
+                    {
+                        "id": 8,
+                        "intent": "withdrawal_missing",
+                        "status": "under_review",
+                        "telegram_chat_id": "-1001",
+                        "root_message_id": 200,
+                        "slot_memory": {"order_id": "TX200"},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result["route"] == "sop"
+    assert result["route_locked"] is True
+    assert result["matched_telegram_money_case"]["id"] == 8
+    assert result["llm_router_result"]["fallback_reason"] == "cross_thread_money_case_guard"
+
+
+def test_cross_thread_customer_confirmation_routes_to_resolution_without_reminder():
+    routed = intent_router_node(
+        {
+            "raw_user_input": "TX200 has arrived now",
+            "rewritten_question": "TX200 has arrived now",
+            "slot_memory": {},
+            "telegram_money_case_candidates": [
+                {
+                    "id": 8,
+                    "intent": "withdrawal_missing",
+                    "status": "completed_by_staff",
+                    "root_message_id": 200,
+                    "slot_memory": {"order_id": "TX200"},
+                }
+            ],
+        }
+    )
+
+    assert routed["route"] == "sop"
+    assert routed["intent_result"]["workflow_relation"] == "current_workflow_resolution"
+    assert routed["slot_memory"]["telegram_internal_case_id"] == 8
+
+    resolved = sop_node({**routed, "reply_language": "en", "attachments": []})
+    assert resolved["commands"] == []
+    assert resolved["telegram_case_update"] == {
+        "telegram_case_id": 8,
+        "status": "completed_confirmed_by_customer",
+    }
 
 
 def test_sop_node_does_not_resolve_plain_thanks_without_resolution_context():
@@ -391,6 +514,81 @@ def test_canonical_howto_questions_route_to_faq():
         assert result["intent_result"]["intent"] == expected_intent
 
 
+def test_forgot_password_faq_marks_followup_context():
+    result = rag_node(
+        {
+            "intent_result": {"intent": "forgot_password_howto", "faq_query": "忘记密码"},
+            "raw_user_input": "忘记密码",
+        }
+    )
+
+    assert result["active_workflow"] == "forgot_password_howto"
+    assert result["workflow_stage"] == "awaiting_password_reset_result"
+
+
+def test_forgot_password_followup_failure_routes_to_handoff():
+    result = intent_router_node(
+        {
+            "active_workflow": "forgot_password_howto",
+            "workflow_stage": "awaiting_password_reset_result",
+            "raw_user_input": "还是不行",
+            "rewritten_question": "还是不行",
+        }
+    )
+
+    assert result["route"] == "human_handoff"
+    assert result["intent_result"]["intent"] == "forgot_password_followup_failed"
+
+
+def test_forgot_password_followup_screenshot_routes_to_handoff():
+    result = intent_router_node(
+        {
+            "active_workflow": "forgot_password_howto",
+            "workflow_stage": "awaiting_password_reset_result",
+            "event_type": "FILE_RECEIVED",
+            "attachments": [{"url": "https://cdn.example/error.png", "mime_type": "image/png"}],
+            "raw_user_input": "",
+            "rewritten_question": "",
+        }
+    )
+
+    assert result["route"] == "human_handoff"
+    assert result["intent_result"]["intent"] == "forgot_password_followup_failed"
+
+
+def test_forgot_password_followup_overrides_llm_authoritative_image_route():
+    result = intent_router_node(
+        {
+            "active_workflow": "forgot_password_howto",
+            "workflow_stage": "awaiting_password_reset_result",
+            "event_type": "FILE_RECEIVED",
+            "attachments": [{"url": "https://cdn.example/error.png", "mime_type": "image/png"}],
+            "raw_user_input": "",
+            "rewritten_question": "",
+            "route": "final_reply",
+            "route_source": "llm_guarded_authoritative",
+            "intent_result": {"intent": "image_unknown", "route": "final_reply"},
+        }
+    )
+
+    assert result["route"] == "human_handoff"
+    assert result["intent_result"]["intent"] == "forgot_password_followup_failed"
+
+
+def test_attachment_without_forgot_password_context_does_not_route_to_handoff():
+    result = intent_router_node(
+        {
+            "event_type": "FILE_RECEIVED",
+            "attachments": [{"url": "https://cdn.example/unknown.png", "mime_type": "image/png"}],
+            "raw_user_input": "",
+            "rewritten_question": "",
+        }
+    )
+
+    assert result["route"] == "final_reply"
+    assert result["intent_result"]["intent"] == "clarification_needed"
+
+
 def test_howto_issue_must_not_route_to_sop():
     text = "Cómo puedo retirar"
     result = intent_router_node({"rewritten_question": text, "raw_user_input": text})
@@ -563,7 +761,196 @@ def test_sop_node_backend_replied_phone_supplement_appends_to_case():
     assert result["slot_memory"]["account_or_phone"] == "3135426895"
     assert result["commands"][0]["type"] == CommandType.TELEGRAM_APPEND_TO_CASE
     assert result["commands"][0]["payload"]["telegram_case_id"] == "tg:59117"
-    assert result["commands"][0]["payload"]["supplement"]["slot_updates"] == {"phone": "3135426895"}
+    supplement_updates = result["commands"][0]["payload"]["supplement"]["slot_updates"]
+    assert supplement_updates["phone"] == "3135426895"
+    assert supplement_updates["identity_source"] == "user_text"
+
+
+def test_intent_router_handoffs_when_customer_disputes_recent_telegram_resolution():
+    from app.graph.nodes import human_handoff_node, intent_router_node
+
+    routed = intent_router_node(
+        {
+            "raw_user_input": "Ya mire y no me a llegafo",
+            "rewritten_question": "Ya mire y no me a llegafo",
+            "occurred_at": "2026-07-13 08:07:53",
+            "slot_memory": {
+                "telegram_case_resolved_at": "2026-07-13 08:07:12",
+                "telegram_case_resolution_workflow": "withdrawal_missing",
+                "telegram_case_resolution_type": "resolution",
+                "customer_confirmed_resolved": False,
+            },
+        }
+    )
+
+    assert routed["route"] == "human_handoff"
+    assert routed["intent_result"]["intent"] == "authoritative_result_disputed"
+    assert routed["intent_result"]["workflow_relation"] == "human_escalation"
+
+    handed_off = human_handoff_node(routed)
+    assert handed_off["status"] == "HANDOFF_REQUESTED"
+    assert [command["type"] for command in handed_off["commands"]] == [
+        CommandType.LIVECHAT_SEND_TEXT,
+        CommandType.HUMAN_HANDOFF_REQUESTED,
+    ]
+    assert handed_off["commands"][1]["payload"]["reason"] == "authoritative_result_disputed"
+
+
+def test_graph_state_event_time_activates_recent_resolution_dispute_guard():
+    event = make_event(text="Ya mire y no me a llegafo")
+    state = build_graph_state_from_event(
+        event,
+        {
+            "conversation_id": "livechat:chat-1",
+            "slot_memory": {
+                "telegram_case_resolved_at": "2026-06-23 23:59:30.000000",
+                "telegram_case_resolution_workflow": "withdrawal_missing",
+                "customer_confirmed_resolved": False,
+            },
+        },
+    )
+
+    routed = intent_router_node(state)
+
+    assert routed["route"] == "human_handoff"
+    assert routed["intent_result"]["intent"] == "authoritative_result_disputed"
+
+
+def test_intent_router_does_not_force_handoff_for_recent_resolution_acknowledgement():
+    from app.graph.nodes import intent_router_node
+
+    routed = intent_router_node(
+        {
+            "raw_user_input": "Gracias",
+            "rewritten_question": "Gracias",
+            "occurred_at": "2026-07-13 08:07:53",
+            "slot_memory": {
+                "telegram_case_resolved_at": "2026-07-13 08:07:12",
+                "telegram_case_resolution_workflow": "withdrawal_missing",
+                "customer_confirmed_resolved": False,
+            },
+        }
+    )
+
+    assert (routed.get("intent_result") or {}).get("intent") != "authoritative_result_disputed"
+
+
+def test_llm_intent_router_cannot_override_recent_resolution_dispute_guard():
+    from app.graph.nodes import make_intent_router_node
+
+    class RouterService:
+        async def route(self, payload):
+            raise AssertionError("Resolution dispute guard must run before the LLM router")
+
+    routed = asyncio.run(
+        make_intent_router_node(RouterService())(
+            {
+                "raw_user_input": "I checked and still have not received it",
+                "occurred_at": "2026-07-13 08:10:00",
+                "slot_memory": {
+                    "telegram_case_resolved_at": "2026-07-13 08:07:12",
+                    "telegram_case_resolution_workflow": "withdrawal_missing",
+                    "customer_confirmed_resolved": False,
+                },
+            }
+        )
+    )
+
+    assert routed["route"] == "human_handoff"
+    assert routed["intent_result"]["intent"] == "authoritative_result_disputed"
+    assert routed["llm_router_result"]["fallback_reason"] == "authoritative_result_disputed_guard"
+
+
+def _backend_dispute_memory(count: int = 0) -> dict:
+    return {
+        "backend_conclusion": {
+            "intent": "withdrawal_blocked_or_rollover",
+            "reply_intent": "backend_turnover_remaining",
+            "reply_facts": {"remaining_turnover": "18.88"},
+            "fingerprint": "fp-18.88",
+            "recorded_at": "2026-07-15T03:19:41Z",
+        },
+        "backend_dispute_count": count,
+    }
+
+
+def test_intent_router_rechecks_first_backend_dispute_and_waits_on_second_while_pending():
+    first = intent_router_node(
+        {
+            "event_id": "event-1",
+            "raw_user_input": "Ya intenté retirar cuatro veces y siempre lo devuelven",
+            "rewritten_question": "Ya intenté retirar cuatro veces y siempre lo devuelven",
+            "slot_memory": _backend_dispute_memory(),
+        }
+    )
+    second = intent_router_node(
+        {
+            **first,
+            "event_id": "event-2",
+            "raw_user_input": "Siempre me dicen que juegue y después aparece retiro fallido",
+            "rewritten_question": "Siempre me dicen que juegue y después aparece retiro fallido",
+        }
+    )
+
+    assert first["route"] == "sop"
+    assert first["slot_memory"]["backend_dispute_count"] == 1
+    assert first["slot_memory"]["backend_recheck_pending"] is True
+    assert second["route"] == "sop"
+    assert second["slot_memory"]["backend_dispute_count"] == 1
+    assert second["slot_memory"]["backend_recheck_queued_dispute"] is True
+    assert second["intent_result"]["intent"] == "withdrawal_blocked_or_rollover"
+
+
+def test_llm_intent_router_cannot_override_pending_backend_recheck_wait():
+    class RouterService:
+        async def route(self, payload):
+            raise AssertionError("Repeated backend dispute guard must run before the LLM router")
+
+    routed = asyncio.run(
+        make_intent_router_node(RouterService())(
+            {
+                "event_id": "event-2",
+                "raw_user_input": "Siempre me dicen que juegue y después aparece retiro fallido",
+                "slot_memory": {
+                    **_backend_dispute_memory(count=1),
+                    "backend_recheck_pending": True,
+                    "backend_recheck_origin_fingerprint": "fp-18.88",
+                },
+            }
+        )
+    )
+
+    assert routed["route"] == "sop"
+    assert routed["intent_result"]["intent"] == "withdrawal_blocked_or_rollover"
+    assert routed["slot_memory"]["backend_recheck_queued_dispute"] is True
+    assert routed["llm_router_result"]["fallback_reason"] == "backend_conclusion_disputed_guard"
+
+
+def test_backend_dispute_counter_clears_on_acceptance():
+    routed = intent_router_node(
+        {
+            "event_id": "event-2",
+            "raw_user_input": "Gracias, listo",
+            "rewritten_question": "Gracias, listo",
+            "slot_memory": _backend_dispute_memory(count=1),
+        }
+    )
+
+    assert "backend_dispute_count" not in routed["slot_memory"]
+
+
+def test_backend_dispute_counter_clears_when_customer_changes_business_topic():
+    routed = intent_router_node(
+        {
+            "event_id": "event-2",
+            "raw_user_input": "Cómo puedo hacer un depósito",
+            "rewritten_question": "Cómo puedo hacer un depósito",
+            "slot_memory": _backend_dispute_memory(count=1),
+        }
+    )
+
+    assert routed["intent_result"]["intent"] != "withdrawal_blocked_or_rollover"
+    assert "backend_dispute_count" not in routed["slot_memory"]
 
 
 def test_conversation_memory_lookup_uses_recent_customer_message():
@@ -726,6 +1113,33 @@ def test_human_handoff_node_emits_ack_text_before_handoff_request():
             "payload": {"reason": "service_frustration"},
         },
     ]
+
+
+def test_forgot_password_handoff_ack_mentions_visible_error_screenshot():
+    result = human_handoff_node(
+        {
+            "intent_result": {"intent": "forgot_password_followup_failed"},
+            "attachments": [{"url": "https://cdn.example/error.png"}],
+        }
+    )
+
+    assert "当前聊天中的错误截图" in result["response_text"]
+    assert result["commands"][1] == {
+        "type": CommandType.HUMAN_HANDOFF_REQUESTED,
+        "payload": {"reason": "forgot_password_followup_failed"},
+    }
+
+
+def test_forgot_password_handoff_without_image_mentions_only_chat_history():
+    result = human_handoff_node(
+        {
+            "intent_result": {"intent": "forgot_password_followup_failed"},
+            "attachments": [],
+        }
+    )
+
+    assert "当前聊天记录" in result["response_text"]
+    assert "错误截图" not in result["response_text"]
 
 
 def test_command_planner_node_preserves_handoff_ack_when_updating_text():

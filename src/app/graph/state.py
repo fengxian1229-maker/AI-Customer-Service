@@ -7,6 +7,7 @@ class GraphState(TypedDict, total=False):
     conversation_id: str
     chat_id: str
     thread_id: str | None
+    event_id: str | None
     payload_json: dict[str, Any]
 
     raw_user_input: str
@@ -49,6 +50,9 @@ class GraphState(TypedDict, total=False):
 
     recent_messages: list[dict[str, Any]]
     previous_thread_memory: list[dict[str, Any]]
+    telegram_money_case_candidates: list[dict[str, Any]]
+    matched_telegram_money_case: dict[str, Any] | None
+    telegram_case_update: dict[str, Any] | None
 
     reply_plan: dict[str, Any] | None
     customer_reply: dict[str, Any] | None

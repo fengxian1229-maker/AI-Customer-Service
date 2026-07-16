@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS telegram_case_followups (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  telegram_case_id BIGINT UNSIGNED NOT NULL,
+  external_command_id BIGINT UNSIGNED NOT NULL,
+  source_conversation_id VARCHAR(128) NOT NULL,
+  source_thread_id VARCHAR(128) NOT NULL,
+  follow_up_kind VARCHAR(64) NOT NULL,
+  follow_up_number INT NOT NULL,
+  customer_update_en VARCHAR(300) NULL,
+  previous_status VARCHAR(64) NOT NULL,
+  telegram_message_id BIGINT NULL,
+  status VARCHAR(64) NOT NULL DEFAULT 'reserved',
+  last_error TEXT NULL,
+  sent_at DATETIME(6) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_telegram_case_followups_case_thread (telegram_case_id, source_thread_id),
+  UNIQUE KEY uk_telegram_case_followups_case_number (telegram_case_id, follow_up_number),
+  UNIQUE KEY uk_telegram_case_followups_command (external_command_id),
+  KEY idx_telegram_case_followups_status_created (status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

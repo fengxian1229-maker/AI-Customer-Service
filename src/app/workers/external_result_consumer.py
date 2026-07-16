@@ -25,6 +25,7 @@ from app.services.user_visible_finalizer import finalize_user_visible_text
 from app.services.reply_intents import CustomerReplyIntent, build_customer_reply
 from app.services.reply_renderer import render_customer_reply
 from app.workflows.command_contracts import CommandType
+from app.workflows.backend_dispute_escalation import resolve_backend_recheck
 from app.workflows.final_reply_policy import build_reply_plan
 
 BACKEND_NOT_FOUND_HANDOFF_THRESHOLD = 2
@@ -97,6 +98,13 @@ async def process_pending_results(
         try:
             async with semaphore:
                 conversation = await _load_conversation_for_result(row, conversation_repository)
+                if _is_handoff_locked(conversation):
+                    await result_repository.mark_processed(row["id"])
+                    return {
+                        "id": row["id"],
+                        "result_type": row.get("result_type"),
+                        "status": "SKIPPED_HUMAN_ACTIVE",
+                    }
                 handler = build_result_handler(row, conversation=conversation)
                 recent_messages = (
                     await _load_recent_messages(row, conversation_message_repository) if llm_final_reply_enabled else []
@@ -109,7 +117,11 @@ async def process_pending_results(
                     llm_final_reply_enabled=llm_final_reply_enabled,
                 )
                 graph_state = handler["graph_state"]
-                outbound = build_result_outbox(row, handler["text"])
+                outbound = build_result_outbox(
+                    row,
+                    handler["text"],
+                    handoff_ack=graph_state.get("status") == "HANDOFF_REQUESTED",
+                )
                 transaction_result = await transaction_repository.process_result_transactionally(
                     row,
                     graph_state=graph_state,
@@ -163,6 +175,13 @@ async def process_result_by_id(
         conversation_message_repository = ConversationMessageRepository(result_repository.pool)
     try:
         conversation = await _load_conversation_for_result(row, conversation_repository)
+        if _is_handoff_locked(conversation):
+            await result_repository.mark_processed(row["id"])
+            return {
+                "id": row["id"],
+                "result_type": row.get("result_type"),
+                "status": "SKIPPED_HUMAN_ACTIVE",
+            }
         handler = build_result_handler(row, conversation=conversation)
         recent_messages = await _load_recent_messages(row, conversation_message_repository) if llm_final_reply_enabled else []
         handler = await _apply_backend_final_reply(
@@ -172,10 +191,15 @@ async def process_result_by_id(
             final_reply_service=final_reply_service,
             llm_final_reply_enabled=llm_final_reply_enabled,
         )
-        outbound = build_result_outbox(row, handler["text"])
+        graph_state = handler["graph_state"]
+        outbound = build_result_outbox(
+            row,
+            handler["text"],
+            handoff_ack=graph_state.get("status") == "HANDOFF_REQUESTED",
+        )
         transaction_result = await transaction_repository.process_result_transactionally(
             row,
-            graph_state=handler["graph_state"],
+            graph_state=graph_state,
             outbound_messages=[outbound],
             external_commands=handler.get("external_commands") or [],
             summary_message=handler["summary_message"],
@@ -191,7 +215,7 @@ async def process_result_by_id(
         return {"id": row["id"], "result_type": row.get("result_type"), "status": "FAILED", "error": str(exc)}
 
 
-def build_result_outbox(row: dict, text: str) -> dict:
+def build_result_outbox(row: dict, text: str, *, handoff_ack: bool = False) -> dict:
     outbound = build_text_outbox(
         chat_id=row["chat_id"],
         thread_id=row.get("thread_id"),
@@ -199,6 +223,8 @@ def build_result_outbox(row: dict, text: str) -> dict:
         inbound_event_id=row.get("inbound_event_id"),
         text=text,
     )
+    if handoff_ack:
+        outbound["payload_json"]["handoff_ack"] = True
     if row.get("result_type") == "backend.query.result":
         tenant_id = row.get("tenant_id") or "default"
         outbound |= {
@@ -219,6 +245,10 @@ async def _load_conversation_for_result(row: dict, conversation_repository: Conv
         chat_id=row["chat_id"],
         thread_id=row.get("thread_id"),
     )
+
+
+def _is_handoff_locked(conversation: dict | None) -> bool:
+    return str((conversation or {}).get("status") or "").upper() in {"HANDOFF_REQUESTED", "HUMAN_ACTIVE"}
 
 
 def build_result_handler(row: dict, conversation: dict | None = None) -> dict:
@@ -353,21 +383,60 @@ def build_result_handler(row: dict, conversation: dict | None = None) -> dict:
             conversation=conversation,
             kind="not_found",
             value=result_json.get("account_or_phone") or (result_json.get("query") or {}).get("account_or_phone"),
+            identity_source=result_json.get("identity_source"),
         ) if _is_backend_player_not_found(result_json, reply_intent) else _backend_lookup_reset()
-        if escalation["should_handoff"]:
+        recheck_resolution = resolve_backend_recheck(
+            dict((conversation or {}).get("slot_memory") or {}),
+            {
+                **result_json,
+                "reply_intent": str(reply_intent),
+                "reply_facts": reply_facts,
+            },
+            recorded_at=row.get("created_at"),
+        )
+        deferred_dispute_handoff = recheck_resolution["should_handoff"]
+        if deferred_dispute_handoff:
+            text = _backend_recheck_handoff_text(reply_language)
+        elif escalation["should_handoff"]:
             text = _handoff_text_for_language(reply_language, kind="not_found")
+        should_handoff = bool(escalation["should_handoff"] or deferred_dispute_handoff)
+        external_commands = list(escalation["external_commands"])
+        if deferred_dispute_handoff:
+            external_commands.append(
+                build_external_command_record(
+                    tenant_id=row.get("tenant_id") or "default",
+                    chat_id=row.get("chat_id"),
+                    thread_id=row.get("thread_id"),
+                    conversation_id=row["conversation_id"],
+                    inbound_event_id=row.get("inbound_event_id"),
+                    command={
+                        "type": CommandType.HUMAN_HANDOFF_REQUESTED,
+                        "payload": {
+                            "reason": "backend_conclusion_disputed_after_recheck",
+                            "same_conclusion": True,
+                            "queued_dispute": True,
+                        },
+                    },
+                )
+            )
         resolved = {
             "text": text,
             "summary_sender_role": "backend",
-            "summary_text": "后台连续未定位到账户，已请求人工复核。" if escalation["should_handoff"] else "后台查询成功，已生成可回复摘要。",
+            "summary_text": "后台复查结论未变化，已根据排队的再次质疑请求人工复核。" if deferred_dispute_handoff else (
+                "后台连续未定位到账户，已请求人工复核。" if escalation["should_handoff"] else "后台查询成功，已生成可回复摘要。"
+            ),
             "graph_state": {
-                "status": "HANDOFF_REQUESTED" if escalation["should_handoff"] else "AI_ACTIVE",
-                "active_workflow": "human_handoff" if escalation["should_handoff"] else None,
-                "workflow_stage": "handoff_requested" if escalation["should_handoff"] else "completed",
-                "slot_memory": {"backend_query_status": "success", **escalation["slot_memory"]},
+                "status": "HANDOFF_REQUESTED" if should_handoff else "AI_ACTIVE",
+                "active_workflow": "human_handoff" if should_handoff else None,
+                "workflow_stage": "handoff_requested" if should_handoff else "completed",
+                "slot_memory": {
+                    **recheck_resolution["slot_memory"],
+                    "backend_query_status": "success",
+                    **escalation["slot_memory"],
+                },
                 "customer_reply": build_customer_reply(reply_intent, facts=reply_facts, language=reply_language, text=text),
             },
-            "external_commands": escalation["external_commands"],
+            "external_commands": external_commands,
         }
         resolved["summary_message"] = build_external_result_summary_message(row, resolved)
         return resolved
@@ -585,6 +654,7 @@ def _backend_lookup_escalation(
     conversation: dict | None,
     kind: str,
     value: Any,
+    identity_source: str | None = None,
     threshold: int = BACKEND_NOT_FOUND_HANDOFF_THRESHOLD,
 ) -> dict:
     slot_memory = dict((conversation or {}).get("slot_memory") or {})
@@ -596,6 +666,16 @@ def _backend_lookup_escalation(
         count_key = "backend_not_found_count"
         hash_key = "backend_not_found_last_value_hash"
         handoff_reason = "backend_player_not_found_repeated"
+        if identity_source not in {"user_text", "confirmed_by_user"}:
+            return {
+                "should_handoff": False,
+                "slot_memory": {
+                    key: slot_memory[key]
+                    for key in (count_key, hash_key, "backend_not_found_handoff_requested")
+                    if key in slot_memory
+                },
+                "external_commands": [],
+            }
 
     existing_count = int(slot_memory.get(count_key) or 0)
     value_hash = _stable_lookup_value_hash(value)
@@ -658,6 +738,15 @@ def _handoff_text_for_language(reply_language: str | None, *, kind: str) -> str:
     if kind == "failed":
         return BACKEND_QUERY_FAILED_HANDOFF_TEXT
     return BACKEND_NOT_FOUND_HANDOFF_TEXT
+
+
+def _backend_recheck_handoff_text(reply_language: str | None) -> str:
+    language = str(reply_language or "").lower()
+    if language.startswith("es"):
+        return "La nueva verificación confirmó el mismo resultado. Solicitaré que un agente humano continúe revisando su caso."
+    if language.startswith("en"):
+        return "The new verification confirmed the same result. I will ask a human agent to continue reviewing your case."
+    return "再次复查后后台结论仍未变化，我会为您转接真人客服继续核实。"
 
 
 def _has_human_handoff_command(handler: dict) -> bool:

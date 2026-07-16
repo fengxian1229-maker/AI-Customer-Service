@@ -72,6 +72,59 @@ def test_append_to_case_edits_original_card_and_replies_with_new_attachments(mon
     assert calls[1][1]["reply_to_message_id"] == 123
 
 
+def test_send_case_followup_replies_to_root_without_editing(monkeypatch):
+    calls = []
+    client = TelegramSenderClient("secret", upload_attachments_via_download=False)
+
+    def fake_request(method, body, timeout_seconds=None):
+        calls.append((method, body))
+        message_id = 456 if method == "sendMessage" else 457
+        return {"ok": True, "result": {"message_id": message_id}}
+
+    monkeypatch.setattr(client, "request", fake_request)
+
+    result = client.send_case_followup(
+        {
+            "chat_id": "-100test",
+            "thread_id": 12,
+            "root_message_id": 123,
+            "text": "FOLLOW-UP REQUIRED",
+            "attachments": [{"url": "https://cdn.example/new.png", "name": "supplement"}],
+        }
+    )
+
+    assert result["message_id"] == 456
+    assert calls[0][0] == "sendMessage"
+    assert calls[0][1]["reply_to_message_id"] == 123
+    assert all(method != "editMessageText" for method, _body in calls)
+    assert calls[1][1]["reply_to_message_id"] == 456
+
+
+def test_send_case_followup_keeps_main_delivery_when_attachment_fails(monkeypatch):
+    client = TelegramSenderClient("secret", upload_attachments_via_download=False)
+
+    def fake_request(method, body, timeout_seconds=None):
+        if method == "sendMessage":
+            return {"ok": True, "result": {"message_id": 456}}
+        raise TelegramApiError("rate limited", status=429, error_code=429)
+
+    monkeypatch.setattr(client, "request", fake_request)
+
+    result = client.send_case_followup(
+        {
+            "chat_id": "-100test",
+            "thread_id": 12,
+            "root_message_id": 123,
+            "text": "FOLLOW-UP REQUIRED",
+            "attachments": [{"url": "https://cdn.example/new.png", "name": "supplement"}],
+        }
+    )
+
+    assert result["message_id"] == 456
+    assert result["attachment_results"] == []
+    assert result["attachment_errors"][0]["name"] == "supplement"
+
+
 def test_send_photo_from_url_downloads_private_attachment_and_uploads_multipart(monkeypatch):
     client = TelegramSenderClient("secret", attachment_auth_header="Basic abc", upload_attachments_via_download=True)
     calls = []

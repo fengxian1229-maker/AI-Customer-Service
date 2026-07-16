@@ -1,5 +1,6 @@
 from collections import Counter
 from datetime import datetime
+import logging
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -14,6 +15,9 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from app.reporting.daily_chat_report.formatting import datetime_label, format_message_content, speaker_label, time_label
 from app.reporting.daily_chat_report.models import CATEGORY_ORDER, LINGXI_CATEGORY_ORDER, ReportCategory, ReportThread
 from app.reporting.daily_chat_report.translation import Translator
+
+
+logger = logging.getLogger(__name__)
 
 
 def render_daily_chat_report_pdf(
@@ -98,28 +102,53 @@ def _message_header_table(styles):
 
 
 def _message_story(message, styles, translator: Translator) -> list:
-    meta = Table(
-        [[Paragraph(time_label(message.sort_at), styles["TableCell"]), Paragraph(speaker_label(message), styles["TableCell"])]],
-        colWidths=[0.72 * inch, 1.3 * inch],
-    )
-    meta.setStyle(
-        TableStyle(
+    rows = []
+    for content in _message_content_chunks(format_message_content(message, translator)):
+        row = Table(
             [
-                ("BOX", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
+                [
+                    Paragraph(time_label(message.sort_at), styles["TableCell"]),
+                    Paragraph(speaker_label(message), styles["TableCell"]),
+                    Paragraph(_escape_lines(content), styles["TableCell"]),
+                ]
+            ],
+            colWidths=[0.72 * inch, 1.3 * inch, 5.15 * inch],
         )
-    )
-    return [
-        meta,
-        Paragraph(_escape_lines(format_message_content(message, translator)), styles["MessageContent"]),
-        Spacer(1, 4),
-    ]
+        row.setStyle(
+            TableStyle(
+                [
+                    ("BOX", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        rows.append(row)
+    return [*rows, Spacer(1, 4)]
+
+
+def _message_content_chunks(text: str, *, max_lines: int = 45, max_chars: int = 1800) -> list[str]:
+    chunks = []
+    current_lines = []
+    current_chars = 0
+    lines = (text or "").splitlines() or [""]
+    for line in lines:
+        pieces = [line[index : index + max_chars] for index in range(0, len(line), max_chars)] or [""]
+        for piece in pieces:
+            if current_lines and (len(current_lines) >= max_lines or current_chars + len(piece) > max_chars):
+                chunks.append("\n".join(current_lines))
+                current_lines = []
+                current_chars = 0
+            current_lines.append(piece)
+            current_chars += len(piece)
+    if current_lines:
+        chunks.append("\n".join(current_lines))
+    return chunks
 
 
 def _definition_table(styles, category_order):
@@ -196,19 +225,6 @@ def _styles(base_font: str):
     styles.add(ParagraphStyle("ThreadTitle", parent=styles["Heading3"], fontName=base_font, fontSize=11, leading=14, spaceAfter=4))
     styles.add(ParagraphStyle("TableHeader", parent=styles["BodyText"], fontName=base_font, fontSize=8, leading=10))
     styles.add(ParagraphStyle("TableCell", parent=styles["BodyText"], fontName=base_font, fontSize=7.8, leading=10))
-    styles.add(
-        ParagraphStyle(
-            "MessageContent",
-            parent=styles["BodyText"],
-            fontName=base_font,
-            fontSize=7.8,
-            leading=10,
-            borderColor=colors.HexColor("#cbd5e1"),
-            borderWidth=0.35,
-            borderPadding=4,
-            spaceAfter=1,
-        )
-    )
     return styles
 
 
@@ -218,6 +234,7 @@ def _register_cjk_font() -> str:
         return font_name
     candidates = [
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
@@ -229,9 +246,11 @@ def _register_cjk_font() -> str:
         try:
             pdfmetrics.registerFont(TTFont(font_name, str(path)))
             return font_name
-        except Exception:
-            continue
-    return "Helvetica"
+        except Exception as exc:
+            logger.warning("Failed to register CJK font %s: %s", path, exc)
+    message = "CJK font is required to render the daily chat report, but no supported font was available"
+    logger.error(message)
+    raise RuntimeError(message)
 
 
 def _base_table_style() -> TableStyle:
@@ -250,8 +269,7 @@ def _base_table_style() -> TableStyle:
 
 def _page_footer(canvas, document) -> None:
     canvas.saveState()
-    footer_font = "DailyChatReportCJK" if "DailyChatReportCJK" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
-    canvas.setFont(footer_font, 8)
+    canvas.setFont("DailyChatReportCJK", 8)
     canvas.setFillColor(colors.HexColor("#6b7280"))
     canvas.drawRightString(letter[0] - 0.45 * inch, 0.35 * inch, str(document.page))
     canvas.drawRightString(letter[0] - 0.55 * inch, letter[1] - 0.35 * inch, "LingXi 正式群組對話紀錄")

@@ -6,6 +6,7 @@ from datetime import datetime
 import aiomysql
 
 from app.schemas.events import InboundEvent
+from app.db.telegram_repositories import TelegramCaseRepository
 from app.services.conversations import conversation_id_for_chat
 from app.services.knowledge_blocks import normalize_metadata_json, normalize_question_aliases, validate_answer_blocks
 from app.services.rag import ALLOWED_FAQ_INTENTS, is_allowed_faq_document, rank_knowledge_document
@@ -513,7 +514,7 @@ class ConversationRepository:
             "slot_memory": inherited_slot_memory,
         }
 
-    async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict) -> None:
+    async def update_workflow_state_on_connection(self, conn, conversation_id: str, graph_state: dict) -> bool:
         sql = """
         UPDATE conversation_states
         SET status = COALESCE(%s, status),
@@ -522,6 +523,10 @@ class ConversationRepository:
             slot_memory = %s,
             handoff_state = COALESCE(%s, handoff_state)
         WHERE conversation_id = %s
+          AND (
+              status NOT IN ('HANDOFF_REQUESTED', 'HUMAN_ACTIVE')
+              OR %s IN ('HANDOFF_REQUESTED', 'HUMAN_ACTIVE')
+          )
         """
         args = (
             graph_state.get("status"),
@@ -530,13 +535,65 @@ class ConversationRepository:
             json_dumps(graph_state.get("slot_memory") or {}),
             json_dumps(graph_state.get("handoff_state")) if graph_state.get("handoff_state") is not None else None,
             conversation_id,
+            graph_state.get("status"),
         )
-        async with conn.cursor() as cur:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(sql, args)
+            if cur.rowcount > 0:
+                return True
+            await cur.execute(
+                "SELECT status FROM conversation_states WHERE conversation_id = %s LIMIT 1",
+                (conversation_id,),
+            )
+            row = await cur.fetchone()
+            return bool(
+                row
+                and (
+                    str(row.get("status") or "").upper() not in {"HANDOFF_REQUESTED", "HUMAN_ACTIVE"}
+                    or str(graph_state.get("status") or "").upper() in {"HANDOFF_REQUESTED", "HUMAN_ACTIVE"}
+                )
+            )
 
-    async def update_workflow_state(self, conversation_id: str, graph_state: dict) -> None:
+    async def update_workflow_state(self, conversation_id: str, graph_state: dict) -> bool:
         async with self.pool.acquire() as conn:
-            await self.update_workflow_state_on_connection(conn, conversation_id, graph_state)
+            return await self.update_workflow_state_on_connection(conn, conversation_id, graph_state)
+
+    async def record_handoff_failure(self, conversation_id: str, failure: dict) -> bool:
+        select_sql = """
+        SELECT status, handoff_state
+        FROM conversation_states
+        WHERE conversation_id = %s
+        FOR UPDATE
+        """
+        update_sql = """
+        UPDATE conversation_states
+        SET status = 'HANDOFF_REQUESTED',
+            active_workflow = 'human_handoff',
+            workflow_stage = 'handoff_requested',
+            handoff_state = %s
+        WHERE conversation_id = %s
+          AND status <> 'HUMAN_ACTIVE'
+        """
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(select_sql, (conversation_id,))
+                    row = await cur.fetchone()
+                    if not row:
+                        await conn.rollback()
+                        return False
+                    if str(row.get("status") or "").upper() == "HUMAN_ACTIVE":
+                        await conn.commit()
+                        return False
+                    handoff_state = json_loads(row.get("handoff_state")) or {}
+                    handoff_state["failure"] = dict(failure)
+                    await cur.execute(update_sql, (json_dumps(handoff_state), conversation_id))
+                await conn.commit()
+                return True
+            except Exception:
+                await conn.rollback()
+                raise
 
     @staticmethod
     async def mark_human_active_on_connection(conn, event: InboundEvent) -> dict:
@@ -579,6 +636,40 @@ class ConversationRepository:
             WHERE conversation_id = %s
             """
             await cur.execute(update_sql, (json_dumps(slot_memory), json_dumps(handoff_state), conversation_id))
+            cancellation_sql = (
+                """
+                UPDATE outbound_messages
+                SET status = 'SKIPPED_HUMAN_ACTIVE',
+                    last_error = 'conversation is HUMAN_ACTIVE; outbound skipped',
+                    leased_at = NULL,
+                    lease_expires_at = NULL,
+                    locked_by = NULL
+                WHERE conversation_id = %s
+                  AND status IN ('PENDING', 'RETRYABLE')
+                """,
+                """
+                UPDATE external_commands
+                SET status = 'SKIPPED_HUMAN_ACTIVE',
+                    last_error = 'conversation is HUMAN_ACTIVE; external command skipped',
+                    leased_at = NULL,
+                    lease_expires_at = NULL,
+                    locked_by = NULL
+                WHERE conversation_id = %s
+                  AND status IN ('PENDING', 'RETRYABLE')
+                """,
+                """
+                UPDATE external_command_results
+                SET status = 'SKIPPED_HUMAN_ACTIVE',
+                    last_error = 'conversation is HUMAN_ACTIVE; external result skipped',
+                    leased_at = NULL,
+                    lease_expires_at = NULL,
+                    locked_by = NULL
+                WHERE conversation_id = %s
+                  AND status IN ('PENDING', 'RETRYABLE')
+                """,
+            )
+            for statement in cancellation_sql:
+                await cur.execute(statement, (conversation_id,))
         return {
             "status": "HUMAN_ACTIVE",
             "workflow_stage": "human_active",
@@ -599,7 +690,10 @@ def _is_fresh_ai_state(conversation: dict) -> bool:
 def _is_continuable_previous_thread(conversation: dict) -> bool:
     status = str(conversation.get("status") or "").upper()
     workflow_stage = str(conversation.get("workflow_stage") or "")
+    slot_memory = conversation.get("slot_memory") or {}
     if status in {"CLOSED", "HUMAN_ACTIVE", "HANDOFF_REQUESTED"}:
+        return False
+    if workflow_stage == "completed" or slot_memory.get("telegram_case_resolved_at"):
         return False
     return status in THREAD_CONTINUABLE_STATUSES or workflow_stage in THREAD_CONTINUABLE_WORKFLOW_STAGES
 
@@ -607,6 +701,14 @@ def _is_continuable_previous_thread(conversation: dict) -> bool:
 class OutboundMessageRepository:
     def __init__(self, pool) -> None:
         self.pool = pool
+
+    async def is_conversation_human_active(self, conversation_id: str) -> bool:
+        sql = "SELECT status FROM conversation_states WHERE conversation_id = %s LIMIT 1"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (conversation_id,))
+                row = await cur.fetchone()
+        return str((row or {}).get("status") or "").upper() == "HUMAN_ACTIVE"
 
     async def insert(self, message: dict) -> int:
         async with self.pool.acquire() as conn:
@@ -1326,6 +1428,7 @@ class ExternalCommandResultRepository:
             result_type=result["result_type"],
             result=result_json,
         )
+        status = result.get("status") or "PENDING"
         sql = """
         INSERT INTO external_command_results (
           external_command_id, tenant_id, conversation_id, chat_id, thread_id,
@@ -1334,7 +1437,7 @@ class ExternalCommandResultRepository:
         ) VALUES (
           %s, %s, %s, %s, %s,
           %s, %s, %s, %s, %s,
-          %s, %s, %s
+          COALESCE(%s, CASE WHEN %s = 'PROCESSED' THEN NOW(6) ELSE NULL END), %s, %s
         )
         ON DUPLICATE KEY UPDATE id = id
         """
@@ -1348,8 +1451,9 @@ class ExternalCommandResultRepository:
             result["command_type"],
             result["result_type"],
             json_dumps(result_json),
-            result.get("status") or "PENDING",
+            status,
             result.get("processed_at"),
+            status,
             result.get("last_error"),
             dedup_key,
         )
@@ -2371,6 +2475,7 @@ class ExternalResultTransactionRepository:
         external_command_repository: ExternalCommandRepository | None = None,
         result_repository: ExternalCommandResultRepository | None = None,
         conversation_message_repository: ConversationMessageRepository | None = None,
+        telegram_case_repository: TelegramCaseRepository | None = None,
     ) -> None:
         self.pool = pool
         self.conversation_repository = conversation_repository or ConversationRepository(pool)
@@ -2378,6 +2483,11 @@ class ExternalResultTransactionRepository:
         self.external_command_repository = external_command_repository or ExternalCommandRepository(pool)
         self.result_repository = result_repository or ExternalCommandResultRepository(pool)
         self.conversation_message_repository = conversation_message_repository or ConversationMessageRepository(pool)
+        self.telegram_case_repository = telegram_case_repository or TelegramCaseRepository(pool)
+
+    async def is_human_active(self, conversation_id: str) -> bool:
+        conversation = await self.conversation_repository.get_by_conversation_id(conversation_id)
+        return str((conversation or {}).get("status") or "").upper() == "HUMAN_ACTIVE"
 
     async def process_result_transactionally(
         self,
@@ -2396,23 +2506,58 @@ class ExternalResultTransactionRepository:
                     chat_id=result["chat_id"],
                     thread_id=result.get("thread_id"),
                 )
-                message_insert = None
-                if summary_message is not None:
-                    summary_message["conversation_id"] = conversation["conversation_id"]
-                    message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(conn, summary_message)
+                if str(conversation.get("status") or "").upper() in {"HANDOFF_REQUESTED", "HUMAN_ACTIVE"}:
+                    await self.result_repository.mark_processed_on_connection(conn, result["id"])
+                    await conn.commit()
+                    return {
+                        "conversation": conversation,
+                        "message_insert": None,
+                        "outbound_inserts": [],
+                        "external_command_inserts": [],
+                        "human_active_skipped": True,
+                    }
                 if "slot_memory" in graph_state:
+                    delete_slot_memory_keys = set(graph_state.get("delete_slot_memory_keys") or [])
+                    merged_slot_memory = {
+                        **(conversation.get("slot_memory") or {}),
+                        **(graph_state.get("slot_memory") or {}),
+                    }
+                    for key in delete_slot_memory_keys:
+                        merged_slot_memory.pop(key, None)
                     graph_state = {
                         **graph_state,
-                        "slot_memory": {
-                            **(conversation.get("slot_memory") or {}),
-                            **(graph_state.get("slot_memory") or {}),
-                        },
+                        "slot_memory": merged_slot_memory,
                     }
-                await self.conversation_repository.update_workflow_state_on_connection(
+                    graph_state.pop("delete_slot_memory_keys", None)
+                else:
+                    graph_state = dict(graph_state)
+                case_update = graph_state.pop("telegram_case_update", None)
+                if case_update:
+                    await self.telegram_case_repository.update_case_status_on_connection(
+                        conn,
+                        int(case_update["telegram_case_id"]),
+                        str(case_update["status"]),
+                    )
+                state_applied = await self.conversation_repository.update_workflow_state_on_connection(
                     conn,
                     conversation["conversation_id"],
                     graph_state,
                 )
+                if state_applied is False:
+                    await self.result_repository.mark_processed_on_connection(conn, result["id"])
+                    await conn.commit()
+                    return {
+                        "conversation": {**conversation, "status": "HUMAN_ACTIVE"},
+                        "message_insert": None,
+                        "outbound_inserts": [],
+                        "external_command_inserts": [],
+                        "human_active_skipped": True,
+                    }
+
+                message_insert = None
+                if summary_message is not None:
+                    summary_message["conversation_id"] = conversation["conversation_id"]
+                    message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(conn, summary_message)
 
                 outbound_inserts = []
                 for message in outbound_messages:
@@ -2436,6 +2581,7 @@ class ExternalResultTransactionRepository:
             "message_insert": message_insert,
             "outbound_inserts": outbound_inserts,
             "external_command_inserts": external_command_inserts,
+            "human_active_skipped": False,
         }
 
 
@@ -2609,6 +2755,7 @@ class GatewayTransactionRepository:
         outbound_repository: OutboundMessageRepository | None = None,
         external_command_repository: ExternalCommandRepository | None = None,
         conversation_message_repository: ConversationMessageRepository | None = None,
+        telegram_case_repository: TelegramCaseRepository | None = None,
     ) -> None:
         self.pool = pool
         self.inbound_repository = inbound_repository or InboundEventRepository(pool)
@@ -2616,6 +2763,7 @@ class GatewayTransactionRepository:
         self.outbound_repository = outbound_repository or OutboundMessageRepository(pool)
         self.external_command_repository = external_command_repository or ExternalCommandRepository(pool)
         self.conversation_message_repository = conversation_message_repository or ConversationMessageRepository(pool)
+        self.telegram_case_repository = telegram_case_repository or TelegramCaseRepository(pool)
 
     async def process_event_transactionally(
         self,
@@ -2642,6 +2790,56 @@ class GatewayTransactionRepository:
                     chat_id=event.chat_id or "unknown",
                     thread_id=event.thread_id,
                 )
+                if str(conversation.get("status") or "").upper() in {"HANDOFF_REQUESTED", "HUMAN_ACTIVE"}:
+                    message_insert = None
+                    if customer_message is not None:
+                        customer_message["conversation_id"] = conversation["conversation_id"]
+                        message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(
+                            conn, customer_message
+                        )
+                    await self.inbound_repository.mark_processed_on_connection(conn, inbound_event_id)
+                    await conn.commit()
+                    return {
+                        "conversation": conversation,
+                        "message_insert": message_insert,
+                        "outbound_insert": None,
+                        "outbound_inserts": [],
+                        "external_command_inserts": [],
+                        "assistant_message_inserts": [],
+                        "human_active_skipped": True,
+                    }
+                if graph_state is not None:
+                    graph_state = dict(graph_state)
+                    case_update = graph_state.pop("telegram_case_update", None)
+                    if case_update:
+                        await self.telegram_case_repository.update_case_status_on_connection(
+                            conn,
+                            int(case_update["telegram_case_id"]),
+                            str(case_update["status"]),
+                        )
+                    state_applied = await self.conversation_repository.update_workflow_state_on_connection(
+                        conn,
+                        conversation["conversation_id"],
+                        graph_state,
+                    )
+                    if state_applied is False:
+                        message_insert = None
+                        if customer_message is not None:
+                            customer_message["conversation_id"] = conversation["conversation_id"]
+                            message_insert = await self.conversation_message_repository.insert_idempotent_on_connection(
+                                conn, customer_message
+                            )
+                        await self.inbound_repository.mark_processed_on_connection(conn, inbound_event_id)
+                        await conn.commit()
+                        return {
+                            "conversation": {**conversation, "status": "HUMAN_ACTIVE"},
+                            "message_insert": message_insert,
+                            "outbound_insert": None,
+                            "outbound_inserts": [],
+                            "external_command_inserts": [],
+                            "assistant_message_inserts": [],
+                            "human_active_skipped": True,
+                        }
                 message_insert = None
                 if customer_message is not None:
                     customer_message["conversation_id"] = conversation["conversation_id"]
@@ -2651,12 +2849,6 @@ class GatewayTransactionRepository:
                     assistant_message["conversation_id"] = conversation["conversation_id"]
                     assistant_message_inserts.append(
                         await self.conversation_message_repository.insert_idempotent_on_connection(conn, assistant_message)
-                    )
-                if graph_state is not None:
-                    await self.conversation_repository.update_workflow_state_on_connection(
-                        conn,
-                        conversation["conversation_id"],
-                        graph_state,
                     )
                 outbound_inserts = []
                 for message in outbound_messages:
@@ -2678,4 +2870,5 @@ class GatewayTransactionRepository:
             "outbound_inserts": outbound_inserts,
             "external_command_inserts": external_command_inserts,
             "assistant_message_inserts": assistant_message_inserts,
+            "human_active_skipped": False,
         }

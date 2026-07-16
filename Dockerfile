@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv
 
@@ -25,7 +25,7 @@ RUN if [ "$INSTALL_DEV" = "true" ]; then \
 COPY src ./src
 COPY sql ./sql
 COPY data ./data
-COPY legacy/bot66tornado/assets ./legacy/bot66tornado/assets
+COPY data/assets/customer-service ./data/assets/customer-service
 COPY docs ./docs
 COPY tests ./tests
 

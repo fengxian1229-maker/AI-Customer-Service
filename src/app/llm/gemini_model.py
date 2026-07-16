@@ -1,9 +1,9 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 
-def build_gemini_chat_model(settings):
+def build_gemini_chat_model(settings, *, model_name: str | None = None):
     return ChatGoogleGenerativeAI(
-        model=settings.gemini_model,
+        model=model_name or settings.gemini_model,
         project=settings.gemini_project,
         location=settings.gemini_location,
         temperature=settings.gemini_temperature,

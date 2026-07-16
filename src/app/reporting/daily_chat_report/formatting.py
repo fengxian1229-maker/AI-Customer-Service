@@ -2,6 +2,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from app.reporting.daily_chat_report.content_blocks import visible_text
 from app.reporting.daily_chat_report.models import ReportMessage
 from app.reporting.daily_chat_report.translation import Translator
 
@@ -11,7 +12,7 @@ URL_RE = re.compile(r"https?://\S+")
 
 def format_message_content(message: ReportMessage, translator: Translator) -> str:
     parts = []
-    text = _replace_urls(message.text_content or "")
+    text = _replace_urls(visible_text(message.text_content))
     if text:
         parts.append(translator.translate(text))
     for attachment in message.attachment_refs:

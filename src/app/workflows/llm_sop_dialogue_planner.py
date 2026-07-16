@@ -25,6 +25,8 @@ INTENT_RELATIONS = {
 LOW_CONFIDENCE_THRESHOLD = 0.55
 IMAGE_COLLECTION_SOPS = {"deposit_missing", "withdrawal_missing"}
 ORDER_SLOT_KEYS = {"order_id", "deposit_order_id", "withdrawal_order_id"}
+IDENTITY_SLOT_KEYS = {"account_or_phone", "phone"}
+IDENTITY_SOURCE_KEYS = {"identity_source", "account_or_phone_source", "phone_source"}
 
 
 def build_llm_sop_dialogue_input(state: dict[str, Any], intent: str, definition: SopDefinition) -> dict[str, Any]:
@@ -78,15 +80,25 @@ def apply_llm_sop_plan(state: dict[str, Any], intent: str, llm_plan: dict[str, A
 
     for key, value in dict(llm_plan.get("slot_updates") or llm_plan.get("extracted_slots") or {}).items():
         key = str(key)
+        if key in IDENTITY_SOURCE_KEYS:
+            if value:
+                slot_updates[key] = value
+            continue
         if key in PROTECTED_SLOT_KEYS or key not in allowed_keys or (intent in IMAGE_COLLECTION_SOPS and key in ORDER_SLOT_KEYS):
             dropped_slots.append(key)
             continue
         if value in (None, ""):
             continue
+        if key in IDENTITY_SLOT_KEYS and not _identity_update_has_user_text_evidence(key, value, state):
+            _record_identity_hint(slot_memory, key, value)
+            dropped_slots.append(key)
+            continue
         if _slot_type(definition, key) == "attachment" and str(value) not in allowed_attachment_urls:
             dropped_slots.append(key)
             continue
         slot_updates[key] = value
+        if key in IDENTITY_SLOT_KEYS:
+            slot_updates["identity_source"] = "user_text"
 
     previous_slot_memory = dict(slot_memory)
     slot_memory.update(slot_updates)
@@ -165,6 +177,8 @@ def _normalise_llm_plan(plan: Any) -> dict[str, Any] | None:
 def _has_low_confidence(plan: dict[str, Any]) -> bool:
     confidence = plan.get("slot_confidence") or plan.get("confidence") or {}
     for key, value in dict(plan.get("slot_updates") or plan.get("extracted_slots") or {}).items():
+        if key in IDENTITY_SOURCE_KEYS:
+            continue
         if value and float(confidence.get(key) or 1.0) < LOW_CONFIDENCE_THRESHOLD:
             return True
     return False
@@ -264,6 +278,8 @@ def _sync_legacy_aliases(
     ):
         slot_memory["account_or_phone"] = slot_memory["phone"]
         slot_memory["identity_kind"] = "phone"
+        if slot_memory.get("identity_source"):
+            slot_memory.setdefault("account_or_phone_source", slot_memory["identity_source"])
     if slot_memory.get("receipt_screenshot"):
         slot_memory.setdefault(screenshot_key, slot_memory["receipt_screenshot"])
     elif slot_memory.get(screenshot_key):
@@ -319,11 +335,73 @@ def _drop_order_slots(slot_memory: dict[str, Any]) -> None:
 
 def _slot_present(intent: str, key: str, slot_memory: dict[str, Any]) -> bool:
     if key == "phone":
-        return bool(slot_memory.get("phone") or slot_memory.get("account_or_phone"))
+        return _identity_slot_present(slot_memory)
     if key == "receipt_screenshot":
         screenshot_key = "deposit_screenshot" if intent == "deposit_missing" else "withdrawal_screenshot"
         return bool(slot_memory.get("receipt_screenshot") or slot_memory.get(screenshot_key))
     return bool(slot_memory.get(key))
+
+
+def _identity_update_has_user_text_evidence(key: str, value: Any, state: dict[str, Any]) -> bool:
+    if str(state.get("identity_source") or "").lower() == "confirmed_by_user":
+        return True
+    raw = str(state.get("raw_user_input") or "")
+    if not raw:
+        return False
+    normalized_value = _normalize_identity_value(value)
+    if not normalized_value:
+        return False
+    if key == "phone" or normalized_value.isdigit():
+        normalized_raw = _normalize_identity_value(raw)
+        return normalized_value in normalized_raw and len(normalized_value) >= 5
+    return normalized_value.lower() in raw.lower()
+
+
+def _record_identity_hint(slot_memory: dict[str, Any], key: str, value: Any) -> None:
+    hint = str(value or "").strip()
+    if not hint:
+        return
+    slot_memory["image_identity_hint"] = hint
+    slot_memory["image_identity_hint_key"] = key
+    slot_memory["image_identity_hint_source"] = "llm_or_image"
+
+
+def _identity_slot_present(slot_memory: dict[str, Any]) -> bool:
+    value = slot_memory.get("phone") or slot_memory.get("account_or_phone")
+    if not value:
+        return False
+    source = str(
+        slot_memory.get("identity_source")
+        or slot_memory.get("phone_source")
+        or slot_memory.get("account_or_phone_source")
+        or ""
+    ).lower()
+    if source in {"user_text", "confirmed_by_user"}:
+        return True
+    if source in {"image", "ocr", "llm_or_image", "image_analysis"}:
+        return False
+    return not _looks_like_image_identity_hint(value)
+
+
+def _looks_like_image_identity_hint(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return True
+    if any(marker in text for marker in ("terminado", "ending", "last ", "últimos", "ultimos", "尾号", "尾號")):
+        return True
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits and len(digits) <= 4 and not text.isdigit():
+        return True
+    return False
+
+
+def _normalize_identity_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if any(ch.isdigit() for ch in text):
+        return "".join(ch for ch in text if ch.isdigit())
+    return text
 
 
 def _intent_relation(plan: dict[str, Any]) -> str:

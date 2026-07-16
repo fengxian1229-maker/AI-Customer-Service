@@ -30,6 +30,8 @@ class BackendQueryService:
                 tenant_id=tenant_id,
                 channel_type=channel_type,
                 channel_instance_id=channel_instance_id,
+                livechat_group_id=payload.get("livechat_group_id"),
+                platform=payload.get("platform"),
             )
             provider = self.factory.create(config)
             query_result = provider.query_turnover_requirement(str(account_or_phone))
@@ -47,6 +49,9 @@ class BackendQueryService:
             "reply_facts": reply_facts,
             "intent": intent,
             "account_or_phone": str(account_or_phone),
+            "livechat_group_id": config.livechat_group_id,
+            "platform": config.platform,
+            "merchant_code": config.merchant_code,
             "config_source": config.source,
             "query": sanitize_turnover_query_result(query_result),
         }

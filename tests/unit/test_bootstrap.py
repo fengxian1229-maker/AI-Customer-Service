@@ -130,6 +130,7 @@ def test_load_sql_files_in_order():
             "016_telegram_update_offsets.sql",
             "017_livechat_webhook_audit.sql",
             "018_daily_chat_reports.sql",
+            "019_telegram_case_followups.sql",
         ]
 
 
@@ -174,6 +175,70 @@ def test_inbound_and_outbound_schemas_have_lease_fields_and_indexes():
     assert "KEY idx_outbound_messages_locked_by (locked_by)" in outbound_sql
 
 
+def test_inbound_events_schema_has_effective_activity_timestamp_index():
+    from pathlib import Path
+
+    inbound_sql = Path("sql/001_inbound_events.sql").read_text()
+
+    assert "effective_activity_at DATETIME(6) GENERATED ALWAYS AS (COALESCE(occurred_at, created_at)) VIRTUAL" in inbound_sql
+    assert "KEY idx_inbound_events_chat_activity (chat_id, ignored, sender_role, effective_activity_at)" in inbound_sql
+
+
+def test_bootstrap_adds_effective_activity_timestamp_and_index_for_mysql():
+    import asyncio
+
+    from app.db.bootstrap import ensure_inbound_events_compat
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.statements = []
+            self.indexes = {
+                "idx_inbound_events_processed_lease_id",
+                "idx_inbound_events_locked_by",
+                "idx_inbound_events_chat_lease_id",
+            }
+
+        async def execute(self, sql):
+            self.statements.append(sql)
+            if sql.startswith("CREATE INDEX idx_inbound_events_chat_activity"):
+                self.indexes.add("idx_inbound_events_chat_activity")
+
+        async def fetchall(self):
+            if self.statements[-1] == "SHOW COLUMNS FROM inbound_events":
+                return [
+                    ("organization_id",),
+                    ("standard_event_type",),
+                    ("author_id",),
+                    ("ignored",),
+                    ("ignore_reason",),
+                    ("processed",),
+                    ("leased_at",),
+                    ("lease_expires_at",),
+                    ("locked_by",),
+                    ("attempted_at",),
+                    ("processed_at",),
+                    ("updated_at",),
+                    ("account_id",),
+                    ("created_at",),
+                ]
+            if self.statements[-1] == "SHOW INDEX FROM inbound_events":
+                return [(None, None, index) for index in sorted(self.indexes)]
+            return []
+
+    cur = FakeCursor()
+
+    asyncio.run(ensure_inbound_events_compat(cur))
+
+    assert (
+        "ALTER TABLE inbound_events ADD COLUMN effective_activity_at "
+        "DATETIME(6) GENERATED ALWAYS AS (COALESCE(occurred_at, created_at)) VIRTUAL"
+    ) in cur.statements
+    assert (
+        "CREATE INDEX idx_inbound_events_chat_activity "
+        "ON inbound_events (chat_id, ignored, sender_role, effective_activity_at)"
+    ) in cur.statements
+
+
 def test_deploy_files_expose_concurrency_and_memory_envs():
     from pathlib import Path
 
@@ -211,6 +276,26 @@ def test_telegram_cases_schema_has_reply_lookup_tables():
     assert "CREATE TABLE IF NOT EXISTS telegram_update_offsets" in offsets_sql
     assert "UNIQUE KEY uk_telegram_cases_target_root" in cases_sql
     assert "UNIQUE KEY uk_telegram_case_messages_chat_message" in messages_sql
+
+
+def test_telegram_followup_schema_is_once_per_case_and_thread():
+    from pathlib import Path
+
+    ddl = Path("sql/019_telegram_case_followups.sql").read_text()
+
+    assert "UNIQUE KEY uk_telegram_case_followups_case_thread" in ddl
+    assert "(telegram_case_id, source_thread_id)" in ddl
+    assert "UNIQUE KEY uk_telegram_case_followups_case_number" in ddl
+
+
+def test_telegram_cases_schema_tracks_current_livechat_route():
+    from pathlib import Path
+
+    ddl = Path("sql/014_telegram_cases.sql").read_text()
+
+    assert "current_conversation_id VARCHAR(128) NULL" in ddl
+    assert "current_thread_id VARCHAR(128) NULL" in ddl
+    assert "status VARCHAR(64) NOT NULL DEFAULT 'awaiting_review'" in ddl
 
 
 def test_conversation_states_schema_has_workflow_stage():

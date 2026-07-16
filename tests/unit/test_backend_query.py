@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 
 class FakeTransport:
     def __init__(self, responses):
@@ -43,7 +45,12 @@ def make_config(**overrides):
 
 
 def test_backend_config_repr_redacts_secrets():
-    config = make_config(authorization="Bearer secret-token", login_password="secret-password")
+    config = make_config(
+        authorization="Bearer secret-token",
+        login_password="secret-password",
+        livechat_group_id=13,
+        platform="PAG99",
+    )
 
     rendered = repr(config)
     safe = config.sanitized()
@@ -52,6 +59,8 @@ def test_backend_config_repr_redacts_secrets():
     assert "secret-password" not in rendered
     assert safe["authorization"] == "<redacted>"
     assert safe["login_password"] == "<redacted>"
+    assert safe["livechat_group_id"] == 13
+    assert safe["platform"] == "PAG99"
 
 
 def test_backend_config_repr_redacts_totp_secret():
@@ -144,6 +153,111 @@ def test_tenant_backend_config_resolver_accepts_operator_with_totp_without_passw
     assert config.login_operator == "operator-a"
     assert config.login_password is None
     assert config.totp_secret == "JBSWY3DPEHPK3PXP"
+
+
+def make_enabled_backend_settings(**overrides):
+    from app.core.settings import Settings
+
+    values = {
+        "livechat_agent_access_token": "unused",
+        "livechat_account_id": "unused",
+        "backend_query_enabled": True,
+        "backend_provider_type": "tac",
+        "backend_base_url": "https://tac.example",
+        "backend_authorization": "token",
+        "backend_merchant_code": "wrong-global-default",
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+@pytest.mark.parametrize(
+    ("group_id", "platform", "expected_platform", "expected_merchant"),
+    [
+        (2, "JUE999", "JUE999", "juecopf1"),
+        (11, "JG7", "JG7", "jgcops1"),
+        (12, "GNA777", "GNA777", "gnacops1"),
+        (13, " pag99 ", "PAG99", "pagcops1"),
+        (23, "TEST", "TEST", "zapcops1"),
+        (24, "CUM777", "CUM777", "cumcops1"),
+        (25, "CON777", "CON777", "concops1"),
+        (28, "ZAP69", "ZAP69", "zapcops1"),
+    ],
+)
+def test_resolver_records_authoritative_route(group_id, platform, expected_platform, expected_merchant):
+    from app.backends.resolver import TenantBackendConfigResolver
+
+    resolver = TenantBackendConfigResolver(make_enabled_backend_settings())
+    config = resolver.resolve(
+        tenant_id="default",
+        channel_type="livechat",
+        livechat_group_id=group_id,
+        platform=platform,
+    )
+
+    assert config.livechat_group_id == group_id
+    assert config.platform == expected_platform
+    assert config.merchant_code == expected_merchant
+    assert config.source == f"livechat_group:{group_id}"
+
+
+def test_resolver_derives_platform_when_payload_omits_it():
+    from app.backends.resolver import TenantBackendConfigResolver
+
+    resolver = TenantBackendConfigResolver(make_enabled_backend_settings())
+    config = resolver.resolve(
+        tenant_id="default",
+        channel_type="livechat",
+        livechat_group_id="13",
+        platform=None,
+    )
+
+    assert config.livechat_group_id == 13
+    assert config.platform == "PAG99"
+
+
+@pytest.mark.parametrize(
+    ("group_id", "platform", "message"),
+    [
+        (None, "PAG99", "livechat_group_id is required"),
+        (0, "PAG99", "must be a positive integer"),
+        ("bad", "PAG99", "must be a positive integer"),
+        (13.0, "PAG99", "must be a positive integer"),
+        (13.5, "PAG99", "must be a positive integer"),
+        (True, "PAG99", "must be a positive integer"),
+        (999, "PAG99", "has no backend merchant mapping"),
+        (13, "CUM777", "does not match"),
+    ],
+)
+def test_resolver_rejects_invalid_livechat_routing(group_id, platform, message):
+    from app.backends.resolver import BackendConfigError, TenantBackendConfigResolver
+
+    resolver = TenantBackendConfigResolver(make_enabled_backend_settings())
+    with pytest.raises(BackendConfigError, match=message) as exc_info:
+        resolver.resolve(
+            tenant_id="default",
+            channel_type="livechat",
+            livechat_group_id=group_id,
+            platform=platform,
+        )
+    assert exc_info.value.code == "FAILED_CONFIG"
+    message_text = str(exc_info.value)
+    assert "livechat_group_id=" in message_text
+    assert "platform=" in message_text
+
+
+def test_resolver_keeps_env_default_for_non_livechat_probe():
+    from app.backends.resolver import TenantBackendConfigResolver
+
+    config = TenantBackendConfigResolver(make_enabled_backend_settings()).resolve(
+        tenant_id="default",
+        channel_type="probe",
+    )
+
+    assert config.merchant_code == "wrong-global-default"
+    assert config.source == "env_default"
+    assert config.livechat_group_id is None
+    assert config.platform is None
 
 
 def test_tac_login_password_posts_login_endpoint_and_redacts_token():
@@ -582,8 +696,26 @@ def test_backend_query_service_generates_structured_reply_intent():
     from app.services.backend_query_service import BackendQueryService
 
     class FakeResolver:
-        def resolve(self, tenant_id, channel_type=None, channel_instance_id=None):
-            return make_config()
+        def __init__(self):
+            self.calls = []
+
+        def resolve(
+            self,
+            tenant_id,
+            channel_type=None,
+            channel_instance_id=None,
+            livechat_group_id=None,
+            platform=None,
+        ):
+            self.calls.append(
+                (tenant_id, channel_type, channel_instance_id, livechat_group_id, platform)
+            )
+            return make_config(
+                merchant_code="pagcops1",
+                source="livechat_group:13",
+                livechat_group_id=13,
+                platform="PAG99",
+            )
 
     class FakeProvider:
         def __init__(self, response):
@@ -607,16 +739,28 @@ def test_backend_query_service_generates_structured_reply_intent():
         "records": [],
         "query_windows": [],
     }
-    result = BackendQueryService(FakeResolver(), FakeFactory(active_response)).execute(
-        {"intent": "withdrawal_blocked_or_rollover", "account_or_phone": "andy"},
+    resolver = FakeResolver()
+    result = BackendQueryService(resolver, FakeFactory(active_response)).execute(
+        {
+            "intent": "withdrawal_blocked_or_rollover",
+            "account_or_phone": "3107939521",
+            "livechat_group_id": "13",
+            "platform": " pag99 ",
+        },
         tenant_id="tenant-a",
+        channel_type="livechat",
+        channel_instance_id="chat-1",
     )
 
+    assert resolver.calls == [("tenant-a", "livechat", "chat-1", "13", " pag99 ")]
     assert result["status"] == "success"
     assert "answer" not in result
     assert result["reply_intent"] == "backend_turnover_remaining"
     assert result["reply_facts"] == {"remaining_turnover": "88.5"}
-    assert result["config_source"] == "env_default"
+    assert result["livechat_group_id"] == 13
+    assert result["platform"] == "PAG99"
+    assert result["merchant_code"] == "pagcops1"
+    assert result["config_source"] == "livechat_group:13"
     assert "authorization" not in str(result).lower()
 
     not_found = BackendQueryService(FakeResolver(), FakeFactory({"player_found": False})).execute(
@@ -625,6 +769,34 @@ def test_backend_query_service_generates_structured_reply_intent():
     )
     assert "answer" not in not_found
     assert not_found["reply_intent"] == "backend_player_not_found"
+
+
+def test_backend_query_service_config_failure_does_not_create_provider():
+    from app.backends.resolver import TenantBackendConfigResolver
+    from app.services.backend_query_service import BackendQueryService
+
+    class ForbiddenFactory:
+        def create(self, config):
+            raise AssertionError("provider must not be created")
+
+    result = BackendQueryService(
+        TenantBackendConfigResolver(make_enabled_backend_settings()),
+        ForbiddenFactory(),
+    ).execute(
+        {
+            "intent": "withdrawal_blocked_or_rollover",
+            "account_or_phone": "andy",
+            "livechat_group_id": 13.5,
+            "platform": " pag99 ",
+        },
+        tenant_id="default",
+        channel_type="livechat",
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "FAILED_CONFIG"
+    assert "livechat_group_id=13.5" in result["error_message"]
+    assert "platform='PAG99'" in result["error_message"]
 
 
 def test_external_command_worker_execute_backend_success_emits_result(monkeypatch):
@@ -648,6 +820,9 @@ def test_external_command_worker_execute_backend_success_emits_result(monkeypatc
                     "payload_json": {
                         "intent": "withdrawal_blocked_or_rollover",
                         "account_or_phone": "andy",
+                        "livechat_group_id": "13",
+                        "platform": " pag99 ",
+                        "identity_source": "user_text",
                         "reply_language": "zh-Hans",
                         "conversation_language": "zh-Hans",
                         "detected_language": "zh-Hans",
@@ -671,7 +846,18 @@ def test_external_command_worker_execute_backend_success_emits_result(monkeypatc
     class FakeService:
         def execute(self, payload, tenant_id=None, channel_type=None, channel_instance_id=None):
             assert tenant_id == "tenant-a"
-            return {"status": "success", "answer": "后台查询完成", "query": {"intent": payload["intent"]}}
+            assert channel_type == "livechat"
+            assert payload["livechat_group_id"] == "13"
+            assert payload["platform"] == " pag99 "
+            return {
+                "status": "success",
+                "answer": "后台查询完成",
+                "query": {"intent": payload["intent"]},
+                "livechat_group_id": 13,
+                "platform": "PAG99",
+                "merchant_code": "pagcops1",
+                "config_source": "livechat_group:13",
+            }
 
     monkeypatch.setattr(external_command_worker, "_build_backend_query_service", lambda settings: FakeService())
     repository = FakeCommandRepository()
@@ -693,6 +879,11 @@ def test_external_command_worker_execute_backend_success_emits_result(monkeypatc
     assert result[0]["status"] == "SENT"
     assert result_repository.inserted[0]["result_type"] == "backend.query.result"
     assert result_repository.inserted[0]["result_json"]["answer"] == "后台查询完成"
+    assert result_repository.inserted[0]["result_json"]["livechat_group_id"] == 13
+    assert result_repository.inserted[0]["result_json"]["platform"] == "PAG99"
+    assert result_repository.inserted[0]["result_json"]["merchant_code"] == "pagcops1"
+    assert result_repository.inserted[0]["result_json"]["config_source"] == "livechat_group:13"
+    assert result_repository.inserted[0]["result_json"]["identity_source"] == "user_text"
     assert result_repository.inserted[0]["result_json"]["reply_language"] == "zh-Hans"
     assert result_repository.inserted[0]["result_json"]["conversation_language"] == "zh-Hans"
     assert result_repository.inserted[0]["result_json"]["detected_language"] == "zh-Hans"
@@ -760,6 +951,8 @@ def test_external_command_worker_execute_backend_config_failure_emits_failed_res
                     "payload_json": {
                         "intent": "withdrawal_blocked_or_rollover",
                         "account_or_phone": "andy",
+                        "livechat_group_id": 13,
+                        "platform": "PAG99",
                         "reply_language": "zh-Hans",
                     },
                 }
@@ -795,5 +988,7 @@ def test_external_command_worker_execute_backend_config_failure_emits_failed_res
         "status": "failed",
         "error_code": "FAILED_CONFIG",
         "error_message": "backend_query_enabled is false",
+        "livechat_group_id": 13,
+        "platform": "PAG99",
         "reply_language": "zh-Hans",
     }

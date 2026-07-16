@@ -17,7 +17,7 @@ from app.workflows.sop_policy import evaluate_sop_policy
 from app.workflows.sop_reply_planner import plan_sop_reply
 
 
-DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_ASSET = "legacy/bot66tornado/assets/examples/deposit-payment-success-onepay.jpg"
+DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_ASSET = "data/assets/customer-service/examples/deposit-payment-success-onepay.jpg"
 DEPOSIT_PAYMENT_SUCCESS_EXAMPLE_KEY = "deposit_payment_success_example"
 DEPOSIT_EXAMPLE_SENT_SLOT = "deposit_missing_example_sent"
 
@@ -136,10 +136,11 @@ def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
     rewritten_text = str(state.get("rewritten_question") or "")
     text = rewritten_text or raw_text
     reply_language = state.get("reply_language") or state.get("conversation_language") or state.get("detected_language")
-    identity = extract_identity_from_texts(raw_text, rewritten_text)
+    identity = extract_identity_from_texts(raw_text)
     if identity:
         slot_memory["account_or_phone"] = identity["value"]
         slot_memory["identity_kind"] = identity["type"]
+        slot_memory["identity_source"] = "user_text"
     elif slot_memory.get("account_or_phone") and explicit_phone_reference(raw_text):
         slot_memory["identity_kind"] = "phone"
     payment_channel = extract_channel(text)
@@ -245,6 +246,7 @@ def _withdrawal_blocked_sop(state: dict[str, Any]) -> dict[str, Any]:
                     "intent": "withdrawal_blocked_or_rollover",
                     "account_or_phone": slot_memory["account_or_phone"],
                     "identity_kind": slot_memory.get("identity_kind"),
+                    "identity_source": slot_memory.get("identity_source"),
                     "reply_language": state.get("reply_language"),
                     "conversation_language": state.get("conversation_language"),
                     "detected_language": state.get("detected_language"),

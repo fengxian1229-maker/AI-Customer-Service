@@ -1,6 +1,9 @@
+import pytest
+
 from app.config.platforms import (
     merchant_for_livechat_group_id,
     merchant_for_platform,
+    normalize_livechat_group_id,
     platform_for_livechat_group_id,
     topic_for_platform,
 )
@@ -49,6 +52,21 @@ def test_merchant_lookup_normalizes_platform_and_rejects_unknown_values():
     assert merchant_for_platform("unknown") is None
     assert merchant_for_livechat_group_id(999) is None
     assert merchant_for_livechat_group_id("invalid") is None
+
+
+@pytest.mark.parametrize("value", [13, "13", " 13 "])
+def test_normalize_livechat_group_id_accepts_positive_integers(value):
+    assert normalize_livechat_group_id(value) == 13
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", " ", True, False, 13.0, 13.5, 0, -13, "+13", "-13", "13.5", "bad"],
+)
+def test_normalize_livechat_group_id_rejects_non_integer_values(value):
+    assert normalize_livechat_group_id(value) is None
+    assert platform_for_livechat_group_id(value) is None
+    assert merchant_for_livechat_group_id(value) is None
 
 
 def test_settings_default_allowed_livechat_groups_include_official_and_test():

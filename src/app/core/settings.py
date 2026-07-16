@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     llm_final_reply_enabled: bool = True
     llm_final_reply_min_confidence: float = 0.70
     llm_final_reply_fallback_enabled: bool = True
+    llm_final_reply_timeout_seconds: float = 25.0
+    llm_final_reply_failover_timeout_seconds: float = 15.0
+    llm_final_reply_failover_model: str = "gemini-3.1-flash-lite"
     llm_final_reply_streaming_enabled: bool = True
     llm_final_reply_preview_enabled: bool = False
     llm_final_reply_preview_min_chars: int = 80
@@ -123,7 +126,7 @@ class Settings(BaseSettings):
     gemini_location: str = "global"
     gemini_temperature: float = 1.0
     gemini_max_tokens: int | None = None
-    gemini_timeout_seconds: float | None = None
+    gemini_timeout_seconds: float | None = 30.0
     gemini_max_retries: int = 2
     gemini_vertexai: bool = True
 

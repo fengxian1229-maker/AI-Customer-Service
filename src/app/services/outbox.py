@@ -122,7 +122,7 @@ def build_external_command_record(
     command: dict,
 ) -> dict:
     command_type = str(command["type"])
-    return {
+    record = {
         "tenant_id": tenant_id,
         "conversation_id": conversation_id,
         "chat_id": chat_id,
@@ -132,3 +132,6 @@ def build_external_command_record(
         "payload_json": command.get("payload") or {},
         "status": "PENDING",
     }
+    if command.get("dedup_key"):
+        record["dedup_key"] = command["dedup_key"]
+    return record

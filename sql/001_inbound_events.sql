@@ -22,11 +22,13 @@ CREATE TABLE IF NOT EXISTS inbound_events (
   attempted_at DATETIME(6) NULL,
   processed_at DATETIME(6) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  effective_activity_at DATETIME(6) GENERATED ALWAYS AS (COALESCE(occurred_at, created_at)) VIRTUAL,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_dedup_key (dedup_key),
   KEY idx_processed_ignored_id (processed, ignored, id),
   KEY idx_inbound_events_processed_lease_id (processed, ignored, lease_expires_at, id),
   KEY idx_inbound_events_locked_by (locked_by),
   KEY idx_inbound_events_chat_lease_id (chat_id, processed, lease_expires_at, id),
+  KEY idx_inbound_events_chat_activity (chat_id, ignored, sender_role, effective_activity_at),
   KEY idx_chat_thread (chat_id, thread_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

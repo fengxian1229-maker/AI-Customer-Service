@@ -285,6 +285,84 @@ def test_result_consumer_case_card_generates_waiting_reply_before_processed():
     assert processed[0]["status"] == "PROCESSED"
 
 
+def test_external_result_consumer_skips_late_result_when_conversation_human_active():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository([make_result("telegram.send_case_card.mock_result")])
+    conversation_repository = FakeConversationRepository(
+        {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "chat_id": "chat-1",
+            "current_thread_id": "thread-1",
+            "status": "HUMAN_ACTIVE",
+            "slot_memory": {},
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(
+        result_repository,
+        conversation_repository,
+        outbound_repository,
+    )
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            transaction_repository=transaction_repository,
+            worker_id="consumer-a",
+        )
+    )
+
+    assert processed == [
+        {
+            "id": 7,
+            "result_type": "telegram.send_case_card.mock_result",
+            "status": "SKIPPED_HUMAN_ACTIVE",
+        }
+    ]
+    assert result_repository.processed == [7]
+    assert transaction_repository.calls == []
+    assert outbound_repository.inserted == []
+
+
+def test_external_result_consumer_skips_late_result_while_handoff_is_requested():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository([make_result("telegram.send_case_card.mock_result")])
+    conversation_repository = FakeConversationRepository(
+        {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "chat_id": "chat-1",
+            "current_thread_id": "thread-1",
+            "status": "HANDOFF_REQUESTED",
+            "slot_memory": {},
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(
+        result_repository,
+        conversation_repository,
+        outbound_repository,
+    )
+
+    processed = asyncio.run(
+        process_pending_results(
+            result_repository=result_repository,
+            conversation_repository=conversation_repository,
+            outbound_repository=outbound_repository,
+            transaction_repository=transaction_repository,
+            worker_id="consumer-a",
+        )
+    )
+
+    assert processed[0]["status"] == "SKIPPED_HUMAN_ACTIVE"
+    assert result_repository.processed == [7]
+    assert transaction_repository.calls == []
+    assert outbound_repository.inserted == []
+
+
 def test_external_result_consumer_process_result_by_id_leases_only_requested_result():
     from app.workers.external_result_consumer import process_result_by_id
 
@@ -396,6 +474,230 @@ def test_backend_query_result_renders_structured_spanish_player_not_found_withou
     assert outbound_repository.inserted[0]["command_type"] == "backend.query.result"
 
 
+def test_backend_query_result_persists_authoritative_conclusion_for_dispute_tracking():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "created_at": "2026-07-15 03:19:41",
+                "result_json": {
+                    "status": "success",
+                    "intent": "withdrawal_blocked_or_rollover",
+                    "reply_intent": "backend_turnover_remaining",
+                    "reply_facts": {"remaining_turnover": "18.88"},
+                    "reply_language": "es",
+                    "query": {"player_found": True, "remaining_turnover": 18.88, "is_met": False},
+                },
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(
+        result_repository,
+        conversation_repository,
+        outbound_repository,
+    )
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    memory = conversation_repository.updated[0][1]["slot_memory"]
+    assert memory["backend_conclusion"]["intent"] == "withdrawal_blocked_or_rollover"
+    assert memory["backend_conclusion"]["reply_intent"] == "backend_turnover_remaining"
+    assert memory["backend_conclusion"]["reply_facts"] == {"remaining_turnover": "18.88"}
+    assert memory["backend_dispute_count"] == 0
+
+
+def test_changed_backend_conclusion_clears_existing_dispute_count():
+    from app.workflows.backend_dispute_escalation import backend_conclusion_record
+    from app.workers.external_result_consumer import process_pending_results
+
+    previous_result = {
+        "status": "success",
+        "intent": "withdrawal_blocked_or_rollover",
+        "reply_intent": "backend_turnover_remaining",
+        "reply_facts": {"remaining_turnover": "18.88"},
+    }
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "created_at": "2026-07-15 03:20:59",
+                "result_json": {
+                    **previous_result,
+                    "reply_facts": {"remaining_turnover": "0.00"},
+                    "reply_language": "es",
+                    "query": {"player_found": True, "remaining_turnover": 0.0, "is_met": True},
+                },
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository(
+        {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "slot_memory": {
+                "backend_conclusion": backend_conclusion_record(previous_result, recorded_at="2026-07-15 03:19:41"),
+                "backend_dispute_count": 1,
+                "backend_dispute_last_event_id": "event-1",
+            },
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=FakeTransactionRepository(
+                result_repository,
+                conversation_repository,
+                outbound_repository,
+            ),
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    memory = conversation_repository.updated[0][1]["slot_memory"]
+    assert memory["backend_dispute_count"] == 0
+    assert "backend_dispute_last_event_id" not in memory
+
+
+def test_same_backend_recheck_result_handoffs_only_after_queued_second_dispute():
+    from app.workflows.backend_dispute_escalation import backend_conclusion_record
+    from app.workers.external_result_consumer import process_pending_results
+
+    backend_result = {
+        "status": "success",
+        "intent": "withdrawal_blocked_or_rollover",
+        "reply_intent": "backend_turnover_remaining",
+        "reply_facts": {"remaining_turnover": "18.88"},
+    }
+    conclusion = backend_conclusion_record(backend_result, recorded_at="2026-07-15 03:19:41")
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "created_at": "2026-07-15 03:20:59",
+                "result_json": {
+                    **backend_result,
+                    "reply_language": "es",
+                    "query": {"player_found": True, "remaining_turnover": 18.88, "is_met": False},
+                },
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository(
+        {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "slot_memory": {
+                "backend_conclusion": conclusion,
+                "backend_dispute_count": 1,
+                "backend_dispute_last_event_id": "event-1",
+                "backend_recheck_pending": True,
+                "backend_recheck_origin_fingerprint": conclusion["fingerprint"],
+                "backend_recheck_queued_dispute": True,
+                "backend_recheck_queued_event_id": "event-2",
+            },
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(
+        result_repository,
+        conversation_repository,
+        outbound_repository,
+    )
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "HANDOFF_REQUESTED"
+    assert graph_state["active_workflow"] == "human_handoff"
+    assert outbound_repository.inserted[0]["payload_json"]["handoff_ack"] is True
+    assert transaction_repository.external_commands[0]["command_type"] == "human_handoff.requested"
+    assert transaction_repository.external_commands[0]["payload_json"]["reason"] == "backend_conclusion_disputed_after_recheck"
+
+
+def test_changed_backend_recheck_result_clears_queued_dispute_without_handoff():
+    from app.workflows.backend_dispute_escalation import backend_conclusion_record
+    from app.workers.external_result_consumer import process_pending_results
+
+    previous_result = {
+        "status": "success",
+        "intent": "withdrawal_blocked_or_rollover",
+        "reply_intent": "backend_turnover_remaining",
+        "reply_facts": {"remaining_turnover": "18.88"},
+    }
+    conclusion = backend_conclusion_record(previous_result, recorded_at="2026-07-15 03:19:41")
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "created_at": "2026-07-15 03:20:59",
+                "result_json": {
+                    **previous_result,
+                    "reply_facts": {"remaining_turnover": "0.00"},
+                    "reply_language": "es",
+                    "query": {"player_found": True, "remaining_turnover": 0.0, "is_met": True},
+                },
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository(
+        {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "slot_memory": {
+                "backend_conclusion": conclusion,
+                "backend_dispute_count": 1,
+                "backend_recheck_pending": True,
+                "backend_recheck_origin_fingerprint": conclusion["fingerprint"],
+                "backend_recheck_queued_dispute": True,
+                "backend_recheck_queued_event_id": "event-2",
+            },
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(
+        result_repository,
+        conversation_repository,
+        outbound_repository,
+    )
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "AI_ACTIVE"
+    assert transaction_repository.external_commands == []
+    assert "backend_recheck_pending" not in graph_state["slot_memory"]
+    assert "backend_recheck_queued_dispute" not in graph_state["slot_memory"]
+
+
 def test_backend_player_not_found_first_time_counts_without_handoff():
     from app.workers.external_result_consumer import process_pending_results
 
@@ -409,6 +711,7 @@ def test_backend_player_not_found_first_time_counts_without_handoff():
                     "reply_facts": {},
                     "reply_language": "zh-Hans",
                     "account_or_phone": "user-1",
+                    "identity_source": "user_text",
                     "query": {"player_found": False},
                 }
             }
@@ -436,6 +739,96 @@ def test_backend_player_not_found_first_time_counts_without_handoff():
     assert "转接真人客服" not in outbound_repository.inserted[0]["payload_json"]["text"]
 
 
+def test_backend_player_not_found_confirmed_identity_counts_without_handoff():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "success",
+                    "reply_intent": "backend_player_not_found",
+                    "reply_facts": {},
+                    "reply_language": "zh-Hans",
+                    "account_or_phone": "user-confirmed",
+                    "identity_source": "confirmed_by_user",
+                    "query": {"player_found": False},
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository()
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(
+        result_repository,
+        conversation_repository,
+        outbound_repository,
+    )
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "AI_ACTIVE"
+    assert graph_state["slot_memory"]["backend_not_found_count"] == 1
+    assert transaction_repository.external_commands == []
+
+
+def test_backend_player_not_found_from_untrusted_identity_does_not_count_toward_handoff():
+    from app.workers.external_result_consumer import process_pending_results
+
+    result_repository = FakeResultRepository(
+        [
+            make_result("backend.query.result")
+            | {
+                "result_json": {
+                    "status": "success",
+                    "reply_intent": "backend_player_not_found",
+                    "reply_facts": {},
+                    "reply_language": "zh-Hans",
+                    "account_or_phone": "20260714-201347",
+                    "identity_source": "image_rewrite",
+                    "query": {"player_found": False},
+                }
+            }
+        ]
+    )
+    conversation_repository = FakeConversationRepository(
+        {
+            "conversation_id": "livechat:chat-1:thread-1",
+            "slot_memory": {
+                "backend_not_found_count": 1,
+                "backend_not_found_last_value_hash": "trusted-value",
+            },
+        }
+    )
+    outbound_repository = FakeOutboundRepository()
+    transaction_repository = FakeTransactionRepository(result_repository, conversation_repository, outbound_repository)
+
+    asyncio.run(
+        process_pending_results(
+            result_repository,
+            conversation_repository,
+            outbound_repository,
+            transaction_repository=transaction_repository,
+            llm_final_reply_enabled=False,
+        )
+    )
+
+    graph_state = conversation_repository.updated[0][1]
+    assert graph_state["status"] == "AI_ACTIVE"
+    assert graph_state["slot_memory"]["backend_not_found_count"] == 1
+    assert transaction_repository.external_commands == []
+
+
 def test_backend_player_not_found_second_distinct_value_requests_handoff():
     from app.workers.external_result_consumer import process_pending_results
 
@@ -449,6 +842,7 @@ def test_backend_player_not_found_second_distinct_value_requests_handoff():
                     "reply_facts": {},
                     "reply_language": "zh-Hans",
                     "account_or_phone": "user-2",
+                    "identity_source": "user_text",
                     "query": {"player_found": False},
                 }
             }
@@ -478,6 +872,7 @@ def test_backend_player_not_found_second_distinct_value_requests_handoff():
     assert graph_state["slot_memory"]["backend_not_found_count"] == 2
     assert graph_state["slot_memory"]["backend_not_found_handoff_requested"] is True
     assert outbound_repository.inserted[0]["payload_json"]["text"] == "多次查询仍未定位到账户资料，我会为您转接真人客服继续核实。"
+    assert outbound_repository.inserted[0]["payload_json"]["handoff_ack"] is True
     assert transaction_repository.external_commands[0]["command_type"] == "human_handoff.requested"
     assert transaction_repository.external_commands[0]["payload_json"]["reason"] == "backend_player_not_found_repeated"
 
@@ -496,6 +891,7 @@ def test_backend_player_not_found_same_value_does_not_increment_or_handoff():
                     "reply_facts": {},
                     "reply_language": "zh-Hans",
                     "account_or_phone": "user-1",
+                    "identity_source": "user_text",
                     "query": {"player_found": False},
                 }
             }
@@ -536,6 +932,7 @@ def test_backend_player_not_found_existing_handoff_flag_does_not_duplicate_comma
                     "reply_facts": {},
                     "reply_language": "zh-Hans",
                     "account_or_phone": "user-3",
+                    "identity_source": "user_text",
                     "query": {"player_found": False},
                 }
             }

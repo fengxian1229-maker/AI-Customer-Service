@@ -28,10 +28,15 @@ async def bootstrap_database(pool, sql_dir: Path) -> None:
             await ensure_knowledge_documents_compat(cur)
             await ensure_graph_checkpoint_runs_compat(cur)
             await ensure_livechat_webhook_audit_compat(cur)
+            await ensure_telegram_cases_compat(cur)
 
 
 async def ensure_inbound_events_compat(cur) -> None:
     columns = await fetch_columns(cur, "inbound_events")
+    if "account_id" in columns:
+        await cur.execute("ALTER TABLE inbound_events MODIFY account_id VARCHAR(128) NULL")
+    if "created_at" in columns:
+        await cur.execute("ALTER TABLE inbound_events MODIFY created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)")
     await ensure_columns(
         cur,
         "inbound_events",
@@ -53,8 +58,14 @@ async def ensure_inbound_events_compat(cur) -> None:
                 "ALTER TABLE inbound_events "
                 "ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
             ),
+            "effective_activity_at": (
+                "ALTER TABLE inbound_events ADD COLUMN effective_activity_at "
+                "DATETIME(6) GENERATED ALWAYS AS (COALESCE(occurred_at, created_at)) VIRTUAL"
+            ),
         },
     )
+
+
     await ensure_indexes(
         cur,
         "inbound_events",
@@ -70,12 +81,27 @@ async def ensure_inbound_events_compat(cur) -> None:
                 "CREATE INDEX idx_inbound_events_chat_lease_id "
                 "ON inbound_events (chat_id, processed, lease_expires_at, id)"
             ),
+            "idx_inbound_events_chat_activity": (
+                "CREATE INDEX idx_inbound_events_chat_activity "
+                "ON inbound_events (chat_id, ignored, sender_role, effective_activity_at)"
+            ),
         },
     )
-    if "account_id" in columns:
-        await cur.execute("ALTER TABLE inbound_events MODIFY account_id VARCHAR(128) NULL")
-    if "created_at" in columns:
-        await cur.execute("ALTER TABLE inbound_events MODIFY created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)")
+
+
+async def ensure_telegram_cases_compat(cur) -> None:
+    await ensure_columns(
+        cur,
+        "telegram_cases",
+        {
+            "current_conversation_id": (
+                "ALTER TABLE telegram_cases ADD COLUMN current_conversation_id VARCHAR(128) NULL"
+            ),
+            "current_thread_id": (
+                "ALTER TABLE telegram_cases ADD COLUMN current_thread_id VARCHAR(128) NULL"
+            ),
+        },
+    )
 
 
 async def ensure_outbound_messages_compat(cur) -> None:

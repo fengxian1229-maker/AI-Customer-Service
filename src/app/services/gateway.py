@@ -1,4 +1,6 @@
 import copy
+import json
+import logging
 import re
 
 from app.db.repositories import ConversationMessageRepository, GraphRunErrorRepository
@@ -7,8 +9,13 @@ from app.graph.nodes import build_graph_state_from_event, prepare_route_state, _
 from app.llm.contracts import LLMIntentClassificationInput, LLMIntentShadowInput, LLMRewriteShadowInput, LLMSopSlotExtractionInput
 from app.llm.guardrails import contains_backend_fact_signal, validate_router_decision_output
 from app.schemas.events import InboundEvent
+from app.services.ai_failure_policy import (
+    ai_failure_handoff_notice,
+    faq_translation_failure_notice,
+    terminal_ai_failure_reason,
+)
 from app.services.conversations import conversation_id_for_chat
-from app.services.chinese_script import adapt_chinese_script
+from app.services.chinese_script import adapt_chinese_script, chinese_script_mismatch
 from app.services.faq_delivery import LIVECHAT_BUTTON_SOURCE, prepare_faq_context_for_delivery
 from app.services.faq_outbound_plan import build_faq_outbound_plan_from_rag_context, faq_plan_to_outbound_rows
 from app.services.language_policy import normalize_language_code, parse_supported_languages, resolve_language_policy
@@ -23,9 +30,13 @@ from app.workflows.slot_extractors import is_explicit_human_request, normalize_t
 from app.workflows.sop_handlers import run_sop
 
 
+logger = logging.getLogger(__name__)
+
+
 EXTERNAL_COMMAND_TYPES = {
     str(CommandType.TELEGRAM_SEND_CASE_CARD),
     str(CommandType.TELEGRAM_APPEND_TO_CASE),
+    str(CommandType.TELEGRAM_REMIND_CASE),
     str(CommandType.BACKEND_QUERY),
     str(CommandType.PENDING_REPLY_LOOKUP),
     str(CommandType.HUMAN_HANDOFF_REQUESTED),
@@ -70,10 +81,9 @@ PREVIEW_BLOCKED_INTENTS = {
 PREVIEW_BLOCKED_COMMANDS = {
     str(CommandType.BACKEND_QUERY),
     str(CommandType.TELEGRAM_SEND_CASE_CARD),
+    str(CommandType.TELEGRAM_REMIND_CASE),
     str(CommandType.HUMAN_HANDOFF_REQUESTED),
 }
-
-
 def should_enqueue_reply(event: InboundEvent) -> bool:
     return event.standard_event_type == "MESSAGE_CREATED" and not event.ignored
 
@@ -139,6 +149,7 @@ class GatewayService:
         language_fallback: str = "es",
         language_persist_to_slot_memory: bool = True,
         recent_message_limit: int = 10,
+        telegram_case_repository=None,
     ) -> None:
         self.inbound_repository = inbound_repository
         self.conversation_repository = conversation_repository
@@ -203,6 +214,7 @@ class GatewayService:
         self.language_fallback = normalize_language_code(language_fallback)
         self.language_persist_to_slot_memory = bool(language_persist_to_slot_memory)
         self.recent_message_limit = recent_message_limit
+        self.telegram_case_repository = telegram_case_repository
         self.workflow_graph = workflow_graph or build_workflow_graph(
             checkpointer=checkpointer,
             llm_rewrite_service=self.llm_rewrite_service,
@@ -255,21 +267,21 @@ class GatewayService:
                     "message_insert": result.get("message_insert"),
                 }
             conversation = self._reopen_closed_conversation_for_customer_event(conversation, event)
-            human_active = self._is_human_active(conversation)
-            event_for_graph = await self._event_with_image_analysis(event, conversation) if not human_active else event
-            fast_graph_state = await self._build_pre_graph_state(event, conversation) if not human_active else None
+            automation_suspended = self._is_automation_suspended(conversation)
+            event_for_graph = await self._event_with_image_analysis(event, conversation) if not automation_suspended else event
+            fast_graph_state = await self._build_pre_graph_state(event, conversation) if not automation_suspended else None
             recent_messages = (
                 await self._load_recent_messages(conversation)
-                if not human_active and fast_graph_state is None
+                if not automation_suspended and fast_graph_state is None
                 else []
             )
             previous_thread_memory = (
                 await self._load_previous_thread_memory(conversation)
-                if not human_active and fast_graph_state is None
+                if not automation_suspended and fast_graph_state is None
                 else []
             )
             graph_state = await self._run_final_reply(fast_graph_state) if fast_graph_state is not None else None
-            if graph_state is None and not human_active and (should_reply or event.standard_event_type == "FILE_RECEIVED"):
+            if graph_state is None and not automation_suspended and (should_reply or event.standard_event_type == "FILE_RECEIVED"):
                 graph_state = await self._run_graph_with_boundary(
                     inbound_event_id,
                     event_for_graph,
@@ -277,10 +289,12 @@ class GatewayService:
                     recent_messages,
                     previous_thread_memory,
                 )
+            graph_state = self._apply_final_reply_failure_handoff(graph_state)
             customer_message = (
                 build_customer_message_from_inbound(event, conversation, inbound_event_id)
                 if (
-                    (graph_state and event.standard_event_type in {"MESSAGE_CREATED", "FILE_RECEIVED"})
+                    not event.ignored
+                    and event.standard_event_type in {"MESSAGE_CREATED", "FILE_RECEIVED"}
                 )
                 else None
             )
@@ -333,17 +347,22 @@ class GatewayService:
                 "external_commands": [],
             }
         conversation = self._reopen_closed_conversation_for_customer_event(conversation, event)
-        human_active = self._is_human_active(conversation)
-        event_for_graph = await self._event_with_image_analysis(event, conversation) if not human_active else event
+        automation_suspended = self._is_automation_suspended(conversation)
+        event_for_graph = await self._event_with_image_analysis(event, conversation) if not automation_suspended else event
 
         graph_state = None
         outbound_messages = []
         assistant_messages = []
-        customer_message = None
-        fast_graph_state = await self._build_pre_graph_state(event, conversation) if not human_active else None
+        customer_message = (
+            build_customer_message_from_inbound(event, conversation, inbound_event_id)
+            if not event.ignored and event.standard_event_type in {"MESSAGE_CREATED", "FILE_RECEIVED"}
+            else None
+        )
+        fast_graph_state = await self._build_pre_graph_state(event, conversation) if not automation_suspended else None
         if fast_graph_state is not None:
             graph_state = fast_graph_state
             graph_state = await self._run_final_reply(graph_state)
+            graph_state = self._apply_final_reply_failure_handoff(graph_state)
             customer_message = (
                 build_customer_message_from_inbound(event, conversation, inbound_event_id)
                 if event.standard_event_type in {"MESSAGE_CREATED", "FILE_RECEIVED"}
@@ -375,7 +394,9 @@ class GatewayService:
             if self.external_command_repository:
                 for command in external_commands:
                     await self.external_command_repository.insert_idempotent(command)
-        elif human_active and (should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED"):
+        elif automation_suspended and (should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED"):
+            if self.message_repository and customer_message:
+                await self.message_repository.insert_idempotent(customer_message)
             external_commands = []
         elif should_enqueue_reply(event) or event.standard_event_type == "FILE_RECEIVED":
             recent_messages = await self._load_recent_messages(conversation)
@@ -387,6 +408,7 @@ class GatewayService:
                 recent_messages,
                 previous_thread_memory,
             )
+            graph_state = self._apply_final_reply_failure_handoff(graph_state)
             customer_message = build_customer_message_from_inbound(event, conversation, inbound_event_id)
             outbound_messages = await self._build_outbound_messages(
                 inbound_event_id,
@@ -428,8 +450,8 @@ class GatewayService:
             "external_commands": external_commands,
         }
 
-    def _is_human_active(self, conversation: dict) -> bool:
-        return str(conversation.get("status") or "").upper() == "HUMAN_ACTIVE"
+    def _is_automation_suspended(self, conversation: dict) -> bool:
+        return str(conversation.get("status") or "").upper() in {"HANDOFF_REQUESTED", "HUMAN_ACTIVE"}
 
     def _is_human_agent_public_reply(self, event: InboundEvent) -> bool:
         payload = event.payload_json if isinstance(event.payload_json, dict) else {}
@@ -636,7 +658,10 @@ class GatewayService:
         rag_result = answer_from_rag_context(state)
         fallback_text = rag_result["answer"]
         next_state = {**state}
-        if next_state.get("active_workflow"):
+        if (state.get("intent_result") or {}).get("intent") == "forgot_password_howto":
+            next_state["active_workflow"] = "forgot_password_howto"
+            next_state["workflow_stage"] = "awaiting_password_reset_result"
+        elif next_state.get("active_workflow"):
             next_state["active_workflow"] = None
             next_state["workflow_stage"] = None
         return {
@@ -862,6 +887,7 @@ class GatewayService:
         recent_messages: list[dict],
         previous_thread_memory: list[dict] | None = None,
     ) -> dict:
+        conversation = await self._with_money_case_candidates(conversation, event)
         graph_state = build_graph_state_from_event(
             event,
             conversation,
@@ -893,6 +919,16 @@ class GatewayService:
                 error=exc,
             )
             raise
+
+    async def _with_money_case_candidates(self, conversation: dict, event: InboundEvent) -> dict:
+        if not self.telegram_case_repository or not event.thread_id or not event.chat_id:
+            return conversation
+        candidates = await self.telegram_case_repository.list_money_case_candidates(
+            conversation.get("tenant_id") or event.organization_id or "default",
+            event.chat_id,
+            event.thread_id,
+        )
+        return {**conversation, "telegram_money_case_candidates": candidates}
 
     async def _maybe_stream_final_reply_preview(self, inbound_event_id: int, event: InboundEvent, graph_state: dict) -> dict:
         if self.llm_final_reply_streaming_enabled:
@@ -1471,7 +1507,8 @@ class GatewayService:
             return graph_state
         if self.llm_final_reply_service and hasattr(self.llm_final_reply_service, "compose"):
             composed_state = await self.llm_final_reply_service.compose(graph_state)
-            return self._guard_final_reply_state(composed_state, graph_state)
+            guarded_state = self._guard_final_reply_state(composed_state, graph_state)
+            return self._apply_final_reply_failure_handoff(guarded_state)
         if not self.llm_final_reply_enabled:
             return graph_state
         return {
@@ -1481,12 +1518,87 @@ class GatewayService:
             "final_reply_result": {"status": "fallback", "fallback_reason": "missing_service"},
         }
 
+    def _apply_final_reply_failure_handoff(self, graph_state: dict | None) -> dict | None:
+        if self._should_handoff_for_final_reply_failure(graph_state):
+            return self._build_ai_service_failure_handoff_state(graph_state)
+        return graph_state
+
+    def _should_handoff_for_final_reply_failure(self, graph_state: dict | None) -> bool:
+        if not graph_state or graph_state.get("channel_type") != "livechat":
+            return False
+        return terminal_ai_failure_reason(graph_state.get("final_reply_result")) is not None
+
+    def _build_ai_service_failure_handoff_state(self, graph_state: dict) -> dict:
+        reply_language = graph_state.get("reply_language") or graph_state.get("last_reply_language") or self._default_reply_language()
+        text = ai_failure_handoff_notice(str(reply_language or "es"))
+        slot_memory = dict(graph_state.get("slot_memory") or {})
+        final_reply_result = dict(graph_state.get("final_reply_result") or {})
+        slot_memory.update(
+            {
+                "ai_service_failure_handoff_at": graph_state.get("occurred_at") or graph_state.get("created_at") or "now",
+                "ai_service_failure_reason": final_reply_result.get("fallback_reason") or "final_reply_failure",
+                "ai_service_failure_source": "final_reply",
+            }
+        )
+        return {
+            **graph_state,
+            "status": "HANDOFF_REQUESTED",
+            "active_workflow": "human_handoff",
+            "workflow_stage": "handoff_requested",
+            "route": "human_handoff",
+            "route_source": "ai_service_failure",
+            "response_text": text,
+            "response_text_fallback": text,
+            "final_response_text": text,
+            "slot_memory": slot_memory,
+            "node_reply_template": "human_handoff",
+            "node_facts": {
+                "reason": "ai_service_failure",
+                "handoff_requested": True,
+                "fallback_text": text,
+                "allowed_facts": ["AI客服出现临时故障", "系统将提出转接人工客服"],
+            },
+            "reply_plan": build_reply_plan(
+                kind="human_handoff",
+                fallback_text=text,
+                must_say=["人工客服"],
+                semantic_required_items=["human_handoff_notice"],
+                must_not_say=["已接入", "马上处理", "已处理", "已到账", "已完成"],
+                allowed_facts=["AI客服出现临时故障", "系统将提出转接人工客服"],
+            ),
+            "intent_result": {
+                **dict(graph_state.get("intent_result") or {}),
+                "route": "human_handoff",
+                "intent": "ai_service_failure",
+                "requires_human": True,
+                "reason": "Final reply LLM failed; request human handoff.",
+            },
+            "commands": [
+                {
+                    "type": CommandType.LIVECHAT_SEND_TEXT,
+                    "payload": {"text": text, "handoff_ack": True},
+                },
+                {
+                    "type": CommandType.HUMAN_HANDOFF_REQUESTED,
+                    "payload": {"reason": "ai_service_failure"},
+                },
+            ],
+        }
+
     def _guard_final_reply_state(self, composed_state: dict, original_state: dict) -> dict:
         if not self._is_sop_missing_slot_reply(original_state):
             return composed_state
         final_text = normalize_text(composed_state.get("final_response_text"))
         if not final_text or not self._text_claims_backend_query_started(final_text):
             return composed_state
+        composed_result = composed_state.get("final_reply_result") or {}
+        if composed_result.get("status") == "fallback":
+            return {
+                **original_state,
+                "response_text_fallback": composed_state.get("response_text_fallback") or original_state.get("response_text_fallback"),
+                "final_response_text": None,
+                "final_reply_result": composed_result,
+            }
         return {
             **original_state,
             "final_response_text": None,
@@ -1814,11 +1926,7 @@ class GatewayService:
                 channel_type=graph_state.get("channel_type") or "livechat",
             )
             if rows:
-                if (
-                    not self.llm_final_reply_streaming_enabled
-                    and graph_state.get("route_source") != "livechat_button_fast_path"
-                ):
-                    rows = await self._finalize_faq_text_rows(rows, graph_state)
+                rows = await self._finalize_faq_text_rows(rows, graph_state)
                 return rows
         return [
             build_command_outbox(
@@ -1860,6 +1968,14 @@ class GatewayService:
 
     async def _finalize_faq_text_rows(self, rows: list[dict], graph_state: dict) -> list[dict]:
         final_text = normalize_text(graph_state.get("final_response_text"))
+        final_reply_result = graph_state.get("final_reply_result") or {}
+        if final_reply_result.get("status") == "fallback":
+            reply_language = graph_state.get("reply_language") or self._default_reply_language()
+            final_text = self._safe_faq_fallback_text(
+                final_text,
+                reply_language,
+                final_reply_result,
+            )
         text_row_indexes = [
             index
             for index, row in enumerate(rows)
@@ -1878,6 +1994,11 @@ class GatewayService:
                     "text": normalize_text(adapt_chinese_script(final_text, reply_language)) or final_text,
                 },
             }
+            self._log_faq_finalization(
+                graph_state,
+                row,
+                graph_state.get("final_reply_result") or {"status": "accepted"},
+            )
             return rows
 
         finalized_rows = []
@@ -1898,7 +2019,12 @@ class GatewayService:
         reply_language = graph_state.get("reply_language") or self._default_reply_language()
         fallback_text = normalize_text(adapt_chinese_script(text, reply_language))
         if not self.llm_final_reply_enabled or not self.llm_final_reply_service:
-            return fallback_text
+            self._log_faq_finalization(
+                graph_state,
+                row,
+                {"status": "fallback", "fallback_reason": "disabled_or_missing_service"},
+            )
+            return self._safe_faq_fallback_text(fallback_text, reply_language)
         block_state = {
             **graph_state,
             "response_text": fallback_text,
@@ -1927,10 +2053,51 @@ class GatewayService:
         }
         try:
             result = await self.llm_final_reply_service.compose(block_state)
-        except Exception:
-            return fallback_text
+        except Exception as exc:
+            self._log_faq_finalization(
+                graph_state,
+                row,
+                {"status": "fallback", "fallback_reason": "exception", "error_type": type(exc).__name__},
+            )
+            return self._safe_faq_fallback_text(fallback_text, reply_language)
+        result_metadata = (result or {}).get("final_reply_result") or {}
+        self._log_faq_finalization(graph_state, row, result_metadata)
+        if result_metadata.get("status") == "fallback":
+            return self._safe_faq_fallback_text(fallback_text, reply_language, result_metadata)
         final_text = normalize_text((result or {}).get("final_response_text")) or fallback_text
         return normalize_text(adapt_chinese_script(final_text, reply_language)) or fallback_text
+
+    @staticmethod
+    def _safe_faq_fallback_text(text: str, reply_language: str, final_reply_result: dict | None = None) -> str:
+        result = final_reply_result or {}
+        language = normalize_language_code(reply_language)
+        unknown_language_with_chinese = language == "unknown" and bool(
+            re.search(r"[\u3400-\u9fff\uf900-\ufaff]", text or "")
+        )
+        if (
+            result.get("fallback_reason") == "language_guard"
+            or chinese_script_mismatch(text, language)
+            or unknown_language_with_chinese
+        ):
+            return faq_translation_failure_notice(reply_language)
+        return text
+
+    def _log_faq_finalization(self, graph_state: dict, row: dict, final_reply_result: dict) -> None:
+        logger.info(
+            "faq.finalization %s",
+            json.dumps(
+                {
+                    "requested_language": graph_state.get("reply_language"),
+                    "final_reply_status": final_reply_result.get("status"),
+                    "fallback_reason": final_reply_result.get("fallback_reason"),
+                    "language_guard_violation": final_reply_result.get("language_guard_violation"),
+                    "block_index": row.get("block_index"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ),
+        )
 
     def _has_handoff_ack_command(self, graph_state: dict | None) -> bool:
         if not graph_state:
@@ -1988,22 +2155,30 @@ class GatewayService:
                 thread_id=event.thread_id,
                 conversation_id=conversation_id,
                 inbound_event_id=inbound_event_id,
-                command=self._with_livechat_handoff_context(command, event),
+                command=self._with_livechat_command_context(command, event),
             )
             for command in graph_state.get("commands", [])
             if str(command["type"]) in EXTERNAL_COMMAND_TYPES
         ]
 
-    def _with_livechat_handoff_context(self, command: dict, event: InboundEvent) -> dict:
-        if str(command.get("type")) != str(CommandType.HUMAN_HANDOFF_REQUESTED):
+    def _with_livechat_command_context(self, command: dict, event: InboundEvent) -> dict:
+        command_type = str(command.get("type"))
+        contextual_types = {
+            str(CommandType.BACKEND_QUERY),
+            str(CommandType.HUMAN_HANDOFF_REQUESTED),
+        }
+        if command_type not in contextual_types:
             return command
         event_payload = event.payload_json if isinstance(event.payload_json, dict) else {}
         source_group_id = event_payload.get("livechat_group_id")
         source_platform = event_payload.get("platform")
-        if source_group_id is None and source_platform is None:
+        if command_type != str(CommandType.BACKEND_QUERY) and source_group_id is None and source_platform is None:
             return command
 
         payload = dict(command.get("payload") or {})
+        if command_type == str(CommandType.BACKEND_QUERY):
+            payload.pop("livechat_group_id", None)
+            payload.pop("platform", None)
         if source_group_id is not None:
             payload["livechat_group_id"] = source_group_id
         if source_platform is not None:

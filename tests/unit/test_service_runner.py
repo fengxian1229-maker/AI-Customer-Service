@@ -539,7 +539,7 @@ def test_sender_tick_uses_sender_worker_process_next_batch(monkeypatch):
     calls = {}
     context = make_context(service_runner, sender_limit=9)
 
-    async def fake_process_next_batch(pool, sender_client, limit, concurrency=None, lease_seconds=None):
+    async def fake_process_next_batch(pool, sender_client, limit, concurrency=None, lease_seconds=None, telegram_client=None):
         calls.update(
             {
                 "pool": pool,
@@ -547,6 +547,7 @@ def test_sender_tick_uses_sender_worker_process_next_batch(monkeypatch):
                 "limit": limit,
                 "concurrency": concurrency,
                 "lease_seconds": lease_seconds,
+                "telegram_client": telegram_client,
             }
         )
         return [{"status": "SENT"}, {"status": "RETRYABLE"}]
@@ -560,6 +561,7 @@ def test_sender_tick_uses_sender_worker_process_next_batch(monkeypatch):
     assert calls["limit"] == 9
     assert calls["concurrency"] == 15
     assert calls["lease_seconds"] == 300
+    assert calls["telegram_client"].bot_token == "telegram-token"
     assert result["processed"] == 2
     assert result["sent"] == 1
     assert result["retryable"] == 1
@@ -585,6 +587,8 @@ def test_external_command_tick_passes_real_execution_flags(monkeypatch):
     assert calls["execute_human_handoff"] is True
     assert calls["execute_telegram"] is True
     assert calls["execute_backend"] is True
+    assert calls["execute_pending_reply_lookup"] is True
+    assert calls["telegram_case_repository"].pool is context.pool
     assert calls["settings"] is context.settings
     assert result["emitted_result"] == 1
 

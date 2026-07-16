@@ -1,9 +1,13 @@
 import asyncio
+import json
+import logging
 
 import pytest
 
 from app.schemas.events import InboundEvent
+from app.services.ai_failure_policy import AI_FAILURE_HANDOFF_NOTICES, FAQ_TRANSLATION_FAILURE_NOTICES
 from app.services.gateway import GatewayService, build_fixed_reply, should_enqueue_reply
+from app.services.outbox import build_external_command_record
 from app.workflows.command_contracts import CommandType
 
 
@@ -25,6 +29,48 @@ def make_inbound_event() -> InboundEvent:
     )
 
 
+def test_external_command_record_preserves_case_followup_dedup_key():
+    record = build_external_command_record(
+        tenant_id="default",
+        chat_id="chat-1",
+        thread_id="thread-new",
+        conversation_id="livechat:chat-1:thread-new",
+        inbound_event_id=5,
+        command={
+            "type": CommandType.TELEGRAM_REMIND_CASE,
+            "payload": {"telegram_case_id": 9},
+            "dedup_key": "telegram.case.followup:-1001:200:thread-new",
+        },
+    )
+
+    assert record["dedup_key"] == "telegram.case.followup:-1001:200:thread-new"
+
+
+def test_gateway_enriches_current_thread_with_money_case_candidates():
+    class CaseRepository:
+        def __init__(self):
+            self.calls = []
+
+        async def list_money_case_candidates(self, tenant_id, chat_id, source_thread_id):
+            self.calls.append((tenant_id, chat_id, source_thread_id))
+            return [{"id": 8, "intent": "withdrawal_missing"}]
+
+    repository = CaseRepository()
+    service = GatewayService(telegram_case_repository=repository)
+    event = make_inbound_event()
+    event.thread_id = "thread-new"
+
+    conversation = asyncio.run(
+        service._with_money_case_candidates(
+            {"tenant_id": "tenant-a", "conversation_id": "livechat:chat-1:thread-new"},
+            event,
+        )
+    )
+
+    assert repository.calls == [("tenant-a", "chat-1", "thread-new")]
+    assert conversation["telegram_money_case_candidates"] == [{"id": 8, "intent": "withdrawal_missing"}]
+
+
 def make_event_with_text(text: str) -> InboundEvent:
     event = make_inbound_event()
     event.payload_json = {"event": {"type": "message", "text": text}}
@@ -35,6 +81,32 @@ def make_event_with_button(button_id: str, text: str = "") -> InboundEvent:
     event = make_inbound_event()
     event.payload_json = {"event": {"type": "message", "text": text, "postback_id": button_id}}
     return event
+
+
+def chinese_tutorial_context(intent: str) -> dict:
+    return {
+        "matched": True,
+        "answer": "中文教程",
+        "answer_blocks": [
+            {
+                "type": "image",
+                "asset_key": intent,
+                "platform_asset_map": {"default": f"assets/{intent}.jpg"},
+                "position": "before",
+            },
+            {"type": "text", "text": "中文教程"},
+        ],
+        "documents": [
+            {
+                "id": 1,
+                "content": "中文教程",
+                "language": "multi",
+                "metadata_json": {"intent_id": intent, "answer_mode": "direct", "is_canonical": True},
+            }
+        ],
+        "fallback_reason": None,
+        "source": "knowledge_documents",
+    }
 
 
 def make_event_with_livechat_postback(button_id: str, text: str = "") -> InboundEvent:
@@ -428,6 +500,29 @@ class FakeFinalReplyService:
         }
 
 
+class FailingFinalReplyService:
+    def __init__(self, reason: str = "exception", *, reply_language: str | None = None) -> None:
+        self.reason = reason
+        self.reply_language = reply_language
+        self.calls = []
+
+    async def compose(self, graph_state: dict) -> dict:
+        self.calls.append(graph_state)
+        result = {
+            **graph_state,
+            "response_text_fallback": graph_state.get("response_text"),
+            "final_response_text": graph_state.get("response_text"),
+            "final_reply_result": {
+                "status": "fallback",
+                "fallback_reason": self.reason,
+                "error_type": "OutputParserException",
+            },
+        }
+        if self.reply_language is not None:
+            result["reply_language"] = self.reply_language
+        return result
+
+
 class FakeImageAnalyzer:
     def __init__(self, result: dict | None = None) -> None:
         self.result = result or {
@@ -632,7 +727,7 @@ def test_gateway_faq_image_text_reply_skips_official_streaming_and_keeps_image_o
                     "asset_key": "withdrawal_howto",
                     "caption": "",
                     "position": "before",
-                    "platform_asset_map": {"CON777": "legacy/bot66tornado/assets/tutorials/CON777/withdrawal.jpg"},
+                    "platform_asset_map": {"CON777": "data/assets/customer-service/tutorials/CON777/withdrawal.jpg"},
                 },
                 {"type": "text", "text": "繁體 FAQ 文本"},
             ],
@@ -643,7 +738,7 @@ def test_gateway_faq_image_text_reply_skips_official_streaming_and_keeps_image_o
     )
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
-        conversation_repository=FakeConversationRepository(),
+        conversation_repository=FakeConversationRepositoryWithState(slot_memory={"last_reply_language": "zh-Hant"}),
         outbound_repository=outbound_repository,
         message_repository=message_repository,
         rag_service=rag_service,
@@ -1001,6 +1096,8 @@ def test_gateway_livechat_faq_button_routes_to_faq():
         message_repository=FakeConversationMessageRepository(),
         rag_service=rag_service,
         workflow_graph=FailIfCalledWorkflowGraph(),
+        llm_final_reply_service=FakeFinalReplyService("Respuesta FAQ"),
+        llm_final_reply_enabled=True,
     )
 
     result = asyncio.run(service.process_event(43, make_event_with_button("deposit_howto", "📘 Cómo recargar")))
@@ -1009,7 +1106,128 @@ def test_gateway_livechat_faq_button_routes_to_faq():
     assert result["graph_state"]["route_source"] == "livechat_button_fast_path"
     assert result["graph_state"]["intent_result"]["intent"] == "deposit_howto"
     assert result["graph_state"]["intent_result"]["faq_trigger_source"] == "livechat_button"
-    assert result["outbound_messages"][0]["payload_json"]["text"] == "FAQ answer 請回到選單並選擇「存款未到帳」。"
+    assert result["outbound_messages"][0]["payload_json"]["text"] == "Respuesta FAQ"
+
+
+def test_gateway_livechat_faq_button_translates_with_final_reply_and_preserves_media():
+    final_reply_service = FakeFinalReplyService("Siga estos pasos para realizar el depósito.")
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepositoryWithState(slot_memory={"last_reply_language": "es"}),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=FakeRagService(chinese_tutorial_context("deposit_howto")),
+        workflow_graph=FailIfCalledWorkflowGraph(),
+        llm_final_reply_service=final_reply_service,
+        llm_final_reply_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(443, make_event_with_button("deposit_howto", "📘 Cómo recargar")))
+
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text"]
+    assert result["outbound_messages"][1]["payload_json"]["text"] == final_reply_service.final_text
+    assert final_reply_service.calls[0]["response_text_fallback"] == "中文教程"
+
+
+def test_gateway_chinese_faq_uses_target_language_notice_when_final_reply_is_unavailable():
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepositoryWithState(slot_memory={"last_reply_language": "es"}),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=FakeRagService(chinese_tutorial_context("deposit_howto")),
+        workflow_graph=FailIfCalledWorkflowGraph(),
+        llm_final_reply_enabled=False,
+    )
+
+    result = asyncio.run(service.process_event(448, make_event_with_button("deposit_howto", "📘 Cómo recargar")))
+
+    assert [message["message_type"] for message in result["outbound_messages"]] == ["image", "text"]
+    assert result["outbound_messages"][1]["payload_json"]["text"] == (
+        "Lo siento, temporalmente no puedo ofrecer esta guía en su idioma. "
+        "Solicite ayuda a un agente humano para continuar."
+    )
+
+
+def test_gateway_chinese_faq_uses_default_notice_when_reply_language_is_unknown():
+    assert GatewayService._safe_faq_fallback_text("中文教程", "unknown") == FAQ_TRANSLATION_FAILURE_NOTICES["es"]
+
+
+def test_gateway_structured_faq_button_finalizes_synchronously_when_streaming_is_enabled():
+    final_reply_service = FakeFinalReplyService("Guía final en español.")
+    streaming_service = FakeOfficialStreamingService("streamed text")
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepositoryWithState(slot_memory={"last_reply_language": "es"}),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=FakeRagService(chinese_tutorial_context("deposit_howto")),
+        workflow_graph=FailIfCalledWorkflowGraph(),
+        llm_final_reply_service=final_reply_service,
+        llm_final_reply_enabled=True,
+        livechat_sender_client=FakeLiveChatSenderClient(),
+        final_reply_streaming_service=streaming_service,
+        llm_final_reply_streaming_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(445, make_event_with_button("deposit_howto", "📘 Cómo recargar")))
+
+    assert final_reply_service.calls
+    assert streaming_service.calls == []
+    assert result["outbound_messages"][1]["payload_json"]["text"] == "Guía final en español."
+
+
+def test_gateway_faq_finalization_logs_language_and_fallback_metadata(caplog):
+    final_reply_service = FailingFinalReplyService("language_guard", reply_language="es")
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepositoryWithState(slot_memory={"last_reply_language": "es"}),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=FakeRagService(chinese_tutorial_context("deposit_howto")),
+        workflow_graph=FailIfCalledWorkflowGraph(),
+        llm_final_reply_service=final_reply_service,
+        llm_final_reply_enabled=True,
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.services.gateway"):
+        result = asyncio.run(service.process_event(446, make_event_with_button("deposit_howto", "📘 Cómo recargar")))
+
+    record = next(record for record in caplog.records if record.message.startswith("faq.finalization "))
+    metadata = json.loads(record.message.removeprefix("faq.finalization "))
+    assert metadata["requested_language"] == "es"
+    assert metadata["final_reply_status"] == "fallback"
+    assert metadata["fallback_reason"] == "language_guard"
+    assert result["outbound_messages"][1]["payload_json"]["text"] == FAQ_TRANSLATION_FAILURE_NOTICES["es"]
+
+
+@pytest.mark.parametrize(
+    ("button_id", "button_text", "intent"),
+    [
+        ("deposit_howto", "📘 Cómo recargar", "deposit_howto"),
+        ("withdrawal_howto", "📘 Cómo retirar", "withdrawal_howto"),
+        ("forgot_password", "🔑 Olvidé mi contraseña", "forgot_password_howto"),
+    ],
+)
+def test_gateway_livechat_faq_buttons_use_spanish_generic_fallback_without_llm(
+    button_id,
+    button_text,
+    intent,
+):
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepositoryWithState(slot_memory={"last_reply_language": "es"}),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=FakeRagService(chinese_tutorial_context(intent)),
+        workflow_graph=FailIfCalledWorkflowGraph(),
+    )
+
+    result = asyncio.run(service.process_event(444, make_event_with_button(button_id, button_text)))
+
+    text_messages = [message for message in result["outbound_messages"] if message["message_type"] == "text"]
+    assert text_messages[0]["payload_json"]["text"] == FAQ_TRANSLATION_FAILURE_NOTICES["es"]
+    assert "中" not in text_messages[0]["payload_json"]["text"]
 
 
 @pytest.mark.parametrize(
@@ -1050,6 +1268,31 @@ def test_gateway_livechat_faq_buttons_bypass_graph(button_id, text, intent):
     assert result["outbound_messages"][0]["payload_json"]["text"] == "FAQ button answer"
 
 
+def test_gateway_forgot_password_button_marks_followup_context():
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        message_repository=FakeConversationMessageRepository(),
+        rag_service=FakeRagService(
+            {
+                "matched": True,
+                "answer": "Password reset tutorial",
+                "answer_blocks": [{"type": "text", "text": "Password reset tutorial"}],
+                "documents": [],
+                "fallback_reason": None,
+                "source": "knowledge_documents",
+            }
+        ),
+        workflow_graph=FailIfCalledWorkflowGraph(),
+    )
+
+    result = asyncio.run(service.process_event(244, make_event_with_button("forgot_password", "🔐 Olvidé mi contraseña")))
+
+    assert result["graph_state"]["active_workflow"] == "forgot_password_howto"
+    assert result["graph_state"]["workflow_stage"] == "awaiting_password_reset_result"
+
+
 def test_gateway_natural_language_faq_strips_menu_directives():
     rag_service = FakeRagService(
         {
@@ -1068,7 +1311,7 @@ def test_gateway_natural_language_faq_strips_menu_directives():
     )
     service = GatewayService(
         inbound_repository=FakeInboundRepository(),
-        conversation_repository=FakeConversationRepository(),
+        conversation_repository=FakeConversationRepositoryWithState(slot_memory={"last_reply_language": "zh-Hant"}),
         outbound_repository=FakeOutboundRepository(),
         message_repository=FakeConversationMessageRepository(),
         rag_service=rag_service,
@@ -1279,6 +1522,53 @@ def test_gateway_service_uses_final_reply_text_for_outbound_message():
     assert "final_reply_target" not in result["outbound_messages"][1]["payload_json"]
 
 
+@pytest.mark.parametrize(
+    ("language", "expected_notice"),
+    [
+        ("zh-Hans", "很抱歉，AI客服当前出现临时故障。为了不影响您继续处理问题，现为您转接人工客服继续协助。"),
+        ("zh-Hant", "很抱歉，AI客服目前出現暫時故障。為了不影響您繼續處理問題，現為您轉接真人客服繼續協助。"),
+        ("en", "Sorry, the automated assistant is having a temporary technical issue. To avoid delaying your case, I will transfer you to a human agent for continued help."),
+        ("es", "Lo sentimos, el asistente automático tuvo un inconveniente técnico temporal. Para no afectar la atención de su caso, le transferiremos con un agente humano para que continúe ayudándole."),
+        ("tl", "Paumanhin, pansamantalang nagkaroon ng teknikal na problema ang automated assistant. Upang hindi maantala ang iyong concern, ililipat ka namin sa isang human agent para patuloy kang matulungan."),
+        ("th", "ขออภัย ผู้ช่วยอัตโนมัติเกิดปัญหาทางเทคนิคชั่วคราว เพื่อไม่ให้การดำเนินการของคุณล่าช้า เราจะโอนคุณไปยังเจ้าหน้าที่เพื่อช่วยเหลือต่อ"),
+        ("my", "တောင်းပန်ပါတယ်၊ အလိုအလျောက်အကူစနစ်တွင် ယာယီနည်းပညာပြဿနာ ဖြစ်ပေါ်နေပါသည်။ သင့်ကိစ္စ မနှောင့်နှေးစေရန် လူသားဝန်ထမ်းထံ လွှဲပြောင်းပေးပါမည်။"),
+        ("ms", "Maaf, pembantu automatik sedang mengalami masalah teknikal sementara. Untuk mengelakkan urusan anda tertangguh, kami akan memindahkan anda kepada ejen manusia untuk bantuan lanjut."),
+        ("unknown", "Lo sentimos, el asistente automático tuvo un inconveniente técnico temporal. Para no afectar la atención de su caso, le transferiremos con un agente humano para que continúe ayudándole."),
+    ],
+)
+def test_gateway_final_reply_failure_routes_to_localized_human_handoff_without_second_llm_call(
+    language,
+    expected_notice,
+):
+    final_reply_service = FailingFinalReplyService("exception", reply_language=language)
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    conversation_repository = FakeConversationRepository()
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        message_repository=FakeConversationMessageRepository(),
+        llm_final_reply_service=final_reply_service,
+        llm_final_reply_enabled=True,
+    )
+
+    result = asyncio.run(service.process_event(9912, make_inbound_event()))
+
+    assert len(final_reply_service.calls) == 1
+    assert result["graph_state"]["route"] == "human_handoff"
+    assert result["graph_state"]["active_workflow"] == "human_handoff"
+    assert result["graph_state"]["workflow_stage"] == "handoff_requested"
+    assert result["graph_state"]["slot_memory"]["ai_service_failure_reason"] == "exception"
+    assert [command["command_type"] for command in result["external_commands"]] == ["human_handoff.requested"]
+    assert external_repository.inserted[0]["payload_json"]["reason"] == "ai_service_failure"
+    text_messages = [message for message in result["outbound_messages"] if message["message_type"] == "text"]
+    assert len(text_messages) == 1
+    assert text_messages[0]["payload_json"]["handoff_ack"] is True
+    assert text_messages[0]["payload_json"]["text"] == expected_notice
+
+
 def test_gateway_fast_path_sop_uses_final_reply_text_for_livechat_command():
     final_reply_service = FakeFinalReplyService("We have received your details and are checking this deposit now. Please wait.")
     outbound_repository = FakeOutboundRepository()
@@ -1486,7 +1776,10 @@ def test_gateway_service_withdrawal_blocked_generates_backend_query_without_rag_
         rag_service=rag_service,
     )
 
-    result = asyncio.run(service.process_event(88, make_event_with_text("提款不了，提示还有流水，用户名 andy123")))
+    event = make_event_with_text("提款不了，提示还有流水，用户名 andy123")
+    event.payload_json.update({"livechat_group_id": 13, "platform": "PAG99"})
+
+    result = asyncio.run(service.process_event(88, event))
 
     assert rag_service.calls == []
     assert result["graph_state"]["intent_result"]["intent"] == "withdrawal_blocked_or_rollover"
@@ -1502,6 +1795,63 @@ def test_gateway_service_withdrawal_blocked_generates_backend_query_without_rag_
     assert external_repository.inserted[0]["payload_json"]["reply_language"] == result["graph_state"]["reply_language"]
     assert external_repository.inserted[0]["payload_json"]["conversation_language"] == result["graph_state"]["conversation_language"]
     assert external_repository.inserted[0]["payload_json"]["detected_language"] == result["graph_state"]["detected_language"]
+    assert external_repository.inserted[0]["payload_json"]["livechat_group_id"] == 13
+    assert external_repository.inserted[0]["payload_json"]["platform"] == "PAG99"
+
+
+def test_gateway_backend_context_uses_ingress_values_over_command_values():
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=FakeConversationRepository(),
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=FakeExternalCommandRepository(),
+        message_repository=FakeConversationMessageRepository(),
+    )
+    event = make_event_with_text("3107939521")
+    event.payload_json.update({"livechat_group_id": 13, "platform": "PAG99"})
+    command = {
+        "type": CommandType.BACKEND_QUERY,
+        "payload": {"livechat_group_id": 24, "platform": "CUM777"},
+    }
+
+    decorated = service._with_livechat_command_context(command, event)
+
+    assert decorated["payload"]["livechat_group_id"] == 13
+    assert decorated["payload"]["platform"] == "PAG99"
+
+
+def test_gateway_backend_context_removes_command_route_when_ingress_has_none():
+    service = GatewayService()
+    event = make_event_with_text("3107939521")
+    command = {
+        "type": CommandType.BACKEND_QUERY,
+        "payload": {
+            "account_or_phone": "3107939521",
+            "livechat_group_id": 24,
+            "platform": "CUM777",
+        },
+    }
+
+    decorated = service._with_livechat_command_context(command, event)
+
+    assert decorated["payload"]["account_or_phone"] == "3107939521"
+    assert "livechat_group_id" not in decorated["payload"]
+    assert "platform" not in decorated["payload"]
+
+
+def test_gateway_backend_context_keeps_only_available_ingress_route_fields():
+    service = GatewayService()
+    event = make_event_with_text("3107939521")
+    event.payload_json["platform"] = "PAG99"
+    command = {
+        "type": CommandType.BACKEND_QUERY,
+        "payload": {"livechat_group_id": 24, "platform": "CUM777"},
+    }
+
+    decorated = service._with_livechat_command_context(command, event)
+
+    assert "livechat_group_id" not in decorated["payload"]
+    assert decorated["payload"]["platform"] == "PAG99"
 
 
 def test_gateway_active_withdrawal_blocked_numeric_account_generates_backend_query():
@@ -1533,6 +1883,7 @@ def test_gateway_active_withdrawal_blocked_numeric_account_generates_backend_que
     assert [command["command_type"] for command in external_repository.inserted] == ["backend.query"]
     assert external_repository.inserted[0]["payload_json"]["account_or_phone"] == "3239413629"
     assert external_repository.inserted[0]["payload_json"]["identity_kind"] == "phone"
+    assert external_repository.inserted[0]["payload_json"]["identity_source"] == "user_text"
 
 
 def test_gateway_closed_withdrawal_workflow_reopens_and_queries_phone():
@@ -1590,8 +1941,39 @@ def test_gateway_service_human_active_records_inbound_but_does_not_run_graph_or_
     assert result["external_commands"] == []
     assert outbound_repository.inserted == []
     assert external_repository.inserted == []
-    assert message_repository.inserted == []
+    assert len(message_repository.inserted) == 1
+    assert message_repository.inserted[0]["sender_role"] == "customer"
+    assert message_repository.inserted[0]["text_content"] == "are you there?"
     assert inbound_repository.processed == [15]
+
+
+def test_gateway_service_handoff_requested_records_inbound_but_keeps_automation_suspended():
+    conversation_repository = FakeConversationRepository(status="HANDOFF_REQUESTED")
+    outbound_repository = FakeOutboundRepository()
+    external_repository = FakeExternalCommandRepository()
+    message_repository = FakeConversationMessageRepository()
+    graph = RecordingGraph()
+    inbound_repository = FakeInboundRepository()
+    service = GatewayService(
+        inbound_repository=inbound_repository,
+        conversation_repository=conversation_repository,
+        outbound_repository=outbound_repository,
+        external_command_repository=external_repository,
+        message_repository=message_repository,
+        workflow_graph=graph,
+    )
+
+    result = asyncio.run(service.process_event(16, make_event_with_text("I am still waiting")))
+
+    assert graph.calls == []
+    assert result["graph_state"] is None
+    assert result["outbound_messages"] == []
+    assert result["external_commands"] == []
+    assert outbound_repository.inserted == []
+    assert external_repository.inserted == []
+    assert len(message_repository.inserted) == 1
+    assert message_repository.inserted[0]["text_content"] == "I am still waiting"
+    assert inbound_repository.processed == [16]
 
 
 def test_gateway_new_thread_does_not_inherit_previous_thread_human_active_state():
@@ -2181,9 +2563,9 @@ def test_gateway_faq_multiblock_uses_event_platform_for_tutorial_asset():
                             "type": "image",
                             "asset_key": "withdrawal_howto",
                             "platform_asset_map": {
-                                "CON777": "legacy/bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
-                                "ZAP69": "legacy/bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg",
-                                "default": "legacy/bot66tornado/assets/tutorials/CON777/withdrawal.jpg",
+                                "CON777": "data/assets/customer-service/tutorials/CON777/withdrawal.jpg",
+                                "ZAP69": "data/assets/customer-service/tutorials/ZAP69/withdrawal.jpg",
+                                "default": "data/assets/customer-service/tutorials/CON777/withdrawal.jpg",
                             },
                         },
                     ]
@@ -2193,7 +2575,7 @@ def test_gateway_faq_multiblock_uses_event_platform_for_tutorial_asset():
         )
     )
 
-    assert rows[0]["payload_json"]["asset_ref"] == "legacy/bot66tornado/assets/tutorials/ZAP69/withdrawal.jpg"
+    assert rows[0]["payload_json"]["asset_ref"] == "data/assets/customer-service/tutorials/ZAP69/withdrawal.jpg"
 
 
 def test_gateway_faq_multiblock_finalizes_each_text_block_and_preserves_media():
@@ -2273,7 +2655,7 @@ def test_gateway_faq_multiblock_text_finalization_falls_back_per_block():
     )
 
     assert rows[0]["payload_json"]["text"] == "First English block"
-    assert rows[1]["payload_json"]["text"] == "第二段中文"
+    assert rows[1]["payload_json"]["text"] == FAQ_TRANSLATION_FAILURE_NOTICES["en"]
     assert len(final_reply_service.calls) == 2
 
 
@@ -3415,6 +3797,45 @@ def test_gateway_service_file_received_updates_slot_memory():
     assert result["graph_state"]["active_workflow"] == "deposit_missing"
     assert message_repository.inserted[0]["message_type"] == "file"
     assert message_repository.inserted[0]["attachment_refs"][0]["url"] == "https://cdn.example/deposit.png"
+
+
+def test_gateway_active_backend_sop_does_not_query_with_identity_from_image_rewrite():
+    conversation_repository = FakeConversationRepositoryWithState(
+        active_workflow="withdrawal_blocked_or_rollover",
+        workflow_stage="collecting_slots",
+    )
+    external_repository = FakeExternalCommandRepository()
+    rewrite_service = FakeLLMRewriteService(
+        {
+            "rewritten_question": (
+                "No puedo retirar, adjunto captura Screenshot_20260714-201347.png "
+                "que muestra un requisito de giro."
+            ),
+            "normalized_query": "No puedo retirar y adjunto una captura.",
+            "language": "es",
+            "preserved_entities": [],
+            "missing_or_ambiguous": [],
+            "risk_flags": [],
+            "confidence": 0.95,
+            "reason": "image context",
+        }
+    )
+    service = GatewayService(
+        inbound_repository=FakeInboundRepository(),
+        conversation_repository=conversation_repository,
+        outbound_repository=FakeOutboundRepository(),
+        external_command_repository=external_repository,
+        message_repository=FakeConversationMessageRepository(),
+        llm_rewrite_service=rewrite_service,
+    )
+    event = make_file_event()
+    event.payload_json["event"]["name"] = "Screenshot_20260714-201347.png"
+
+    result = asyncio.run(service.process_event(52, event))
+
+    assert result["external_commands"] == []
+    assert external_repository.inserted == []
+    assert "account_or_phone" not in result["graph_state"]["slot_memory"]
 
 
 async def async_get_or_create_with_active_deposit(chat_id: str, thread_id: str | None = None) -> dict:

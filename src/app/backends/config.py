@@ -19,6 +19,8 @@ class BackendConfig:
     default_lookback_days: int
     fallback_lookback_days: int
     source: str
+    livechat_group_id: int | None = None
+    platform: str | None = None
 
     def __repr__(self) -> str:
         return f"BackendConfig({self.sanitized()!r})"
@@ -37,6 +39,8 @@ class BackendConfig:
             "default_lookback_days": self.default_lookback_days,
             "fallback_lookback_days": self.fallback_lookback_days,
             "source": self.source,
+            "livechat_group_id": self.livechat_group_id,
+            "platform": self.platform,
         }
         for key in SECRET_FIELDS:
             if data.get(key):

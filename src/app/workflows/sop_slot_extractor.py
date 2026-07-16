@@ -37,12 +37,14 @@ def extract_sop_slots(
     if identity:
         extracted_slots["account_or_phone"] = identity["value"]
         extracted_slots["identity_kind"] = identity["type"]
+        extracted_slots["identity_source"] = "user_text"
         if identity.get("type") == "phone":
             extracted_slots["phone"] = identity["value"]
     if standalone_phone:
         extracted_slots["phone"] = standalone_phone
         extracted_slots["account_or_phone"] = standalone_phone
         extracted_slots["identity_kind"] = "phone"
+        extracted_slots["identity_source"] = "user_text"
     extracted_slots["amount"] = amount
     extracted_slots["payment_channel"] = extract_channel(text)
 

@@ -79,7 +79,7 @@ def test_final_reply_payload_includes_language_contract_fields():
     assert payload["tenant_persona"]["default_language"] == "es"
 
 
-def test_final_reply_language_mismatch_is_accepted_with_warning():
+def test_final_reply_language_mismatch_uses_localized_fallback():
     provider = FakeFinalReplyProvider(
         {
             "text": "請提供用戶名或註冊手機號，並上傳存款付款截圖。",
@@ -92,14 +92,29 @@ def test_final_reply_language_mismatch_is_accepted_with_warning():
     )
     service = FinalReplyService(provider=provider, enabled=True)
 
-    result = asyncio.run(service.compose(base_state()))
+    fallback = "Please provide your username or registered phone number and proof of payment."
+    result = asyncio.run(
+        service.compose(
+            base_state(
+                response_text=fallback,
+                response_text_fallback=fallback,
+                reply_plan=build_reply_plan(
+                    kind="ask_missing_slots",
+                    fallback_text=fallback,
+                    semantic_required_items=["account_or_phone", "deposit_screenshot"],
+                    missing_slots=["account_or_phone", "deposit_screenshot"],
+                ),
+            )
+        )
+    )
 
-    assert result["final_response_text"] == "請提供用戶名或註冊手機號，並上傳存款付款截圖。"
-    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
+    assert result["final_response_text"] == fallback
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["fallback_reason"] == "language_guard"
     assert "language_mismatch" in result["final_reply_result"]["violations"]
 
 
-def test_final_reply_zh_hans_audits_traditional_script_without_rewriting_model_text():
+def test_final_reply_zh_hans_script_mismatch_uses_simplified_fallback():
     provider = FakeFinalReplyProvider(
         {
             "text": "請上傳能清楚看到付款憑證的截圖。",
@@ -135,8 +150,9 @@ def test_final_reply_zh_hans_audits_traditional_script_without_rewriting_model_t
 
     result = asyncio.run(service.compose(state))
 
-    assert result["final_response_text"] == "請上傳能清楚看到付款憑證的截圖。"
-    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
+    assert result["final_response_text"] == "请上传能清楚看到付款凭证的截图。"
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["fallback_reason"] == "language_guard"
     assert "language_script_mismatch" in result["final_reply_result"]["violations"]
     payload = provider.calls[0]
     assert payload["response_text_fallback"] == "請上傳能清楚看到付款憑證的截圖。"
@@ -144,7 +160,7 @@ def test_final_reply_zh_hans_audits_traditional_script_without_rewriting_model_t
     assert payload["reply_plan"]["allowed_facts"] == ["請上傳能清楚看到付款憑證的截圖。"]
 
 
-def test_final_reply_zh_hant_audits_simplified_script_without_rewriting_model_text():
+def test_final_reply_zh_hant_script_mismatch_uses_traditional_fallback():
     provider = FakeFinalReplyProvider(
         {
             "text": "请上传能清楚看到付款凭证的截图。",
@@ -180,8 +196,9 @@ def test_final_reply_zh_hant_audits_simplified_script_without_rewriting_model_te
 
     result = asyncio.run(service.compose(state))
 
-    assert result["final_response_text"] == "请上传能清楚看到付款凭证的截图。"
-    assert result["final_reply_result"]["status"] == "accepted_with_warnings"
+    assert result["final_response_text"] == "請上傳能清楚看到付款憑證的截圖。"
+    assert result["final_reply_result"]["status"] == "fallback"
+    assert result["final_reply_result"]["fallback_reason"] == "language_guard"
     assert "language_script_mismatch" in result["final_reply_result"]["violations"]
     payload = provider.calls[0]
     assert payload["response_text_fallback"] == "请上传能清楚看到付款凭证的截图。"

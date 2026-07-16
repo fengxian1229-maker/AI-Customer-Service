@@ -134,6 +134,7 @@ HUMAN_HANDOFF_FORBIDDEN_PROMISES = (
 )
 
 INTERNAL_TELEGRAM_IDENTIFIER_PATTERN = re.compile(r"\b(?:tg|mock_tg):\d+\b|telegram_message_id|telegram_case_id", re.I)
+ASSISTANT_IDENTITY_LEAK_PATTERN = re.compile(r"客服灵犀")
 INTERNAL_ORGANIZATION_LABEL_PATTERN = re.compile(
     r"(后台|後台|\bbackend\b|工作人员|人工后台|backend\s+staff|staff\s+reply|third[-\s]?party\s+platform|第三方平台|第三方\s*api|\bapi\b|接口)",
     re.I,
@@ -257,6 +258,9 @@ def validate_final_reply_output(state: dict[str, Any], output: dict[str, Any]) -
 
     if INTERNAL_TELEGRAM_IDENTIFIER_PATTERN.search(text):
         violations.append("internal_telegram_identifier")
+
+    if ASSISTANT_IDENTITY_LEAK_PATTERN.search(text):
+        violations.append("assistant_identity_leak")
 
     if INTERNAL_ORGANIZATION_LABEL_PATTERN.search(text):
         violations.append("internal_organization_label")

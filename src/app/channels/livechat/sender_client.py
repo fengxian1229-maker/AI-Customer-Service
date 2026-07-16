@@ -103,11 +103,39 @@ class LiveChatSenderClient:
         del thread_id
         await self._ensure_agent_added_before_send(chat_id)
         file_data = await self._load_file(asset_ref, filename=filename)
-        uploaded = await self.upload_file(
-            file_data["content"],
+        return await self._upload_and_send_file(
+            chat_id,
+            content=file_data["content"],
             content_type=file_data["content_type"],
             filename=file_data["filename"],
         )
+
+    async def send_image_content(
+        self,
+        chat_id: str,
+        thread_id: str | None,
+        content: bytes,
+        content_type: str,
+        filename: str,
+    ) -> dict:
+        del thread_id
+        await self._ensure_agent_added_before_send(chat_id)
+        return await self._upload_and_send_file(
+            chat_id,
+            content=content,
+            content_type=content_type,
+            filename=filename,
+        )
+
+    async def _upload_and_send_file(
+        self,
+        chat_id: str,
+        *,
+        content: bytes,
+        content_type: str,
+        filename: str,
+    ) -> dict:
+        uploaded = await self.upload_file(content, content_type=content_type, filename=filename)
         url = str(uploaded.get("url") or "").strip()
         if not url:
             raise LiveChatApiError(
@@ -117,16 +145,18 @@ class LiveChatSenderClient:
                     "error": {"message": f"upload_file returned no url: {uploaded}"},
                 },
             )
-        body = {
-            "chat_id": chat_id,
-            "event": {
-                "type": "file",
-                "url": url,
-                "name": file_data["filename"],
-                "content_type": file_data["content_type"],
+        return await self._post_json(
+            "/agent/action/send_event",
+            {
+                "chat_id": chat_id,
+                "event": {
+                    "type": "file",
+                    "url": url,
+                    "name": filename,
+                    "content_type": content_type,
+                },
             },
-        }
-        return await self._post_json("/agent/action/send_event", body)
+        )
 
     async def upload_file(self, content: bytes, content_type: str, filename: str) -> dict:
         return await asyncio.to_thread(self._upload_file_sync, content, content_type, filename)
