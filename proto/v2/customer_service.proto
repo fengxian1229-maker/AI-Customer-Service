@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+package ai.customer_service.v2;
+
+import "google/protobuf/timestamp.proto";
+
+service CustomerService {
+  rpc Stream(stream StreamFrame) returns (stream StreamFrame);
+}
+
+message StreamFrame {
+  oneof frame {
+    HandshakeRequest handshake_request = 1;
+    HandshakeResponse handshake_response = 2;
+    ClientEvent client_event = 3;
+    ServerEvent server_event = 4;
+    EventAck event_ack = 5;
+  }
+}
+
+message HandshakeRequest {
+  reserved 1;
+  reserved "protocol_version";
+}
+
+message HandshakeResponse {
+  reserved 1;
+  reserved "protocol_version";
+  string stream_epoch = 2;
+}
+
+message EventAck {
+  string stream_epoch = 1;
+  string acked_event_id = 2;
+  uint64 acked_sequence = 3;
+}
+
+message ClientEvent {
+  reserved 1;
+  reserved "protocol_version";
+  string event_id = 2;
+  string tenant_id = 3;
+  string agent_id = 4;
+  string conversation_id = 5;
+  uint64 conversation_sequence = 6;
+  google.protobuf.Timestamp occurred_at = 7;
+
+  oneof payload {
+    UserMessage user_message = 20;
+    ControlDirectiveResult control_directive_result = 21;
+    ConversationStatusUpdate conversation_status_update = 22;
+  }
+}
+
+message ServerEvent {
+  reserved 1;
+  reserved "protocol_version";
+  string event_id = 2;
+  string tenant_id = 3;
+  string agent_id = 4;
+  string conversation_id = 5;
+  uint64 conversation_sequence = 6;
+  google.protobuf.Timestamp occurred_at = 7;
+
+  oneof payload {
+    AssistantMessage assistant_message = 20;
+    ControlDirective control_directive = 21;
+    ServiceError service_error = 22;
+  }
+}
+
+enum ContentType {
+  CONTENT_TYPE_UNSPECIFIED = 0;
+  CONTENT_TYPE_TEXT = 1;
+  CONTENT_TYPE_IMAGE = 2;
+  CONTENT_TYPE_VIDEO = 3;
+  CONTENT_TYPE_AUDIO = 4;
+}
+
+message ContentPart {
+  ContentType content_type = 1;
+  string content = 2;
+}
+
+enum SenderRole {
+  SENDER_ROLE_UNSPECIFIED = 0;
+  SENDER_ROLE_CUSTOMER = 1;
+  SENDER_ROLE_AI_ASSISTANT = 2;
+  SENDER_ROLE_HUMAN_AGENT = 3;
+  SENDER_ROLE_SYSTEM = 4;
+}
+
+message ConversationMessage {
+  string message_id = 1;
+  SenderRole sender_role = 2;
+  ContentPart content_part = 3;
+  google.protobuf.Timestamp sent_at = 4;
+}
+
+message UserMessage {
+  ConversationMessage message = 1;
+  repeated ConversationMessage history_snapshot = 2;
+}
+
+enum ControlDirectiveOutcome {
+  CONTROL_DIRECTIVE_OUTCOME_UNSPECIFIED = 0;
+  CONTROL_DIRECTIVE_OUTCOME_SUCCEEDED = 1;
+  CONTROL_DIRECTIVE_OUTCOME_ALREADY_SUCCEEDED = 2;
+  CONTROL_DIRECTIVE_OUTCOME_REJECTED_STALE = 3;
+  CONTROL_DIRECTIVE_OUTCOME_FAILED_RETRYABLE = 4;
+  CONTROL_DIRECTIVE_OUTCOME_FAILED_FINAL = 5;
+  CONTROL_DIRECTIVE_OUTCOME_UNKNOWN_AFTER_EXTERNAL_SUCCESS = 6;
+}
+
+message ControlDirectiveResult {
+  string directive_id = 1;
+  ControlDirectiveOutcome outcome = 2;
+  repeated string completed_stages = 3;
+  optional string error_code = 4;
+}
+
+enum ServiceStatus {
+  SERVICE_STATUS_UNSPECIFIED = 0;
+  SERVICE_STATUS_BOT_ACTIVE = 1;
+  SERVICE_STATUS_HANDOFF_PENDING = 2;
+  SERVICE_STATUS_HUMAN_ACTIVE = 3;
+  SERVICE_STATUS_CLOSED = 4;
+}
+
+message ConversationStatusUpdate {
+  ServiceStatus previous_status = 1;
+  ServiceStatus new_status = 2;
+  string reason = 3;
+  google.protobuf.Timestamp effective_at = 4;
+}
+
+message AssistantMessage {
+  string text = 1;
+  string reply_language = 2;
+  string response_kind = 3;
+  repeated string in_reply_to_event_ids = 4;
+}
+
+enum ControlDirectiveType {
+  CONTROL_DIRECTIVE_TYPE_UNSPECIFIED = 0;
+  CONTROL_DIRECTIVE_TYPE_HANDOFF_REQUESTED = 1;
+}
+
+message ControlDirective {
+  string directive_id = 1;
+  ControlDirectiveType directive_type = 2;
+  string customer_notice = 3;
+}
+
+message ServiceError {
+  string error_code = 1;
+  bool retryable = 2;
+  optional string related_event_id = 3;
+  string safe_message = 4;
+}
